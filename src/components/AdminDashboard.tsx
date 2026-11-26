@@ -361,6 +361,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   >('all');
   const [lastScanReport, setLastScanReport] = useState<SecurityScanReport | null>(null);
   const [runningScan, setRunningScan] = useState(false);
+  const [simulatingAttack, setSimulatingAttack] = useState(false);
   const [analyzingLogs, setAnalyzingLogs] = useState(false);
   const [logAnalysisResult, setLogAnalysisResult] = useState<{
     unresolvedCount: number;
@@ -1122,6 +1123,35 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       onNotify('ok', res.report.summary);
     } finally {
       setRunningScan(false);
+    }
+  };
+
+  const handleSimulateAttack = async () => {
+    if (!adminToken || simulatingAttack) return;
+    setSimulatingAttack(true);
+    try {
+      const res = await fetch('/api/payments/tolovgo/callback', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Tolovgo-Signature': 'fake_signature_test_999',
+        },
+        body: JSON.stringify({
+          order_id: 999999,
+          status: 'paid',
+          amount: 500000,
+        }),
+      });
+      await res.json();
+      onNotify('ok', "Soxta hujum simulyatsiyasi bajarildi! Kiber tizim logni qayd etdi.");
+      const secRes = await adminListSecurityLogs(telegramSessionToken, adminToken);
+      if (secRes.logs) {
+        setSecurityLogs(secRes.logs);
+      }
+    } catch (err: any) {
+      onNotify('err', 'Simulyatsiya xatosi: ' + (err.message || 'Xatolik'));
+    } finally {
+      setSimulatingAttack(false);
     }
   };
 
@@ -3572,19 +3602,34 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           Env kalitlar, TolovGo HMAC, Telegram-only darvozasi va shubhali loglarni tekshirish.
                         </p>
                       </div>
-                      <button
-                        type="button"
-                        disabled={runningScan}
-                        onClick={() => void handleRunSecurityScan()}
-                        className="px-3.5 py-2 rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-55 text-white text-xs font-semibold flex items-center gap-1.5 shrink-0"
-                      >
-                        {runningScan ? (
-                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                        ) : (
-                          <ShieldAlert className="w-3.5 h-3.5" />
-                        )}
-                        <span>{runningScan ? 'Skanerlanmoqda...' : 'Skanerlash'}</span>
-                      </button>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          disabled={simulatingAttack}
+                          onClick={() => void handleSimulateAttack()}
+                          className="px-3 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 disabled:opacity-55 text-white text-xs font-semibold flex items-center gap-1.5 shrink-0"
+                        >
+                          {simulatingAttack ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <ShieldAlert className="w-3.5 h-3.5" />
+                          )}
+                          <span>{simulatingAttack ? 'Sinovda...' : 'Soxta Hujum Testi'}</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={runningScan}
+                          onClick={() => void handleRunSecurityScan()}
+                          className="px-3.5 py-2 rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-55 text-white text-xs font-semibold flex items-center gap-1.5 shrink-0"
+                        >
+                          {runningScan ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <ShieldAlert className="w-3.5 h-3.5" />
+                          )}
+                          <span>{runningScan ? 'Skanerlanmoqda...' : 'Skanerlash'}</span>
+                        </button>
+                      </div>
                     </div>
 
                     {lastScanReport ? (
