@@ -1256,10 +1256,61 @@ interface TolovgoOrderRecord {
 
 const tolovgoOrders = new Map<string, TolovgoOrderRecord>();
 
-function getTolovgoApiKey(): string | null {
-  const raw = (process.env.TOLOVGO_API_KEY || process.env.TOLOVGO_KEY)?.trim();
-  if (!raw || raw === 'MY_TOLOVGO_API_KEY') return null;
+function getCleanEnvKey(value: string | undefined, placeholder: string): string | null {
+  const raw = value?.trim();
+  if (!raw || raw === placeholder) return null;
   return raw;
+}
+
+function resolveTolovgoCredential(): {
+  apiKey: string;
+  isTest: boolean;
+  hasLiveKey: boolean;
+  hasTestKey: boolean;
+} | null {
+  const liveKey =
+    getCleanEnvKey(process.env.TOLOVGO_API_KEY, 'MY_TOLOVGO_API_KEY') ||
+    getCleanEnvKey(process.env.TOLOVGO_KEY, 'MY_TOLOVGO_API_KEY');
+  const testKey = getCleanEnvKey(process.env.TOLOVGO_TEST_API, 'MY_TOLOVGO_TEST_API');
+  const mode = process.env.TOLOVGO_MODE?.trim().toLowerCase();
+
+  const hasLiveKey = Boolean(liveKey);
+  const hasTestKey = Boolean(testKey);
+
+  if (mode === 'test') {
+    if (testKey) return { apiKey: testKey, isTest: true, hasLiveKey, hasTestKey };
+    if (liveKey && liveKey.startsWith('test_')) {
+      return { apiKey: liveKey, isTest: true, hasLiveKey, hasTestKey };
+    }
+    return null;
+  }
+
+  if (mode === 'live') {
+    if (liveKey) {
+      return {
+        apiKey: liveKey,
+        isTest: liveKey.startsWith('test_'),
+        hasLiveKey,
+        hasTestKey,
+      };
+    }
+    return null;
+  }
+
+  if (liveKey) {
+    return {
+      apiKey: liveKey,
+      isTest: liveKey.startsWith('test_'),
+      hasLiveKey,
+      hasTestKey,
+    };
+  }
+
+  if (testKey) {
+    return { apiKey: testKey, isTest: true, hasLiveKey, hasTestKey };
+  }
+
+  return null;
 }
 
 function getTolovgoBaseUrl(): string {
@@ -2071,8 +2122,17 @@ Qoidalar:
 // TolovGo (tolovgo.uz) UZS Payment Gateway Proxy Routes
 // =========================================================================
 app.get('/api/payments/tolovgo/config', (_req, res) => {
+  const cred = resolveTolovgoCredential();
+  const hasLiveKey = Boolean(
+    getCleanEnvKey(process.env.TOLOVGO_API_KEY, 'MY_TOLOVGO_API_KEY') ||
+      getCleanEnvKey(process.env.TOLOVGO_KEY, 'MY_TOLOVGO_API_KEY')
+  );
+  const hasTestKey = Boolean(getCleanEnvKey(process.env.TOLOVGO_TEST_API, 'MY_TOLOVGO_TEST_API'));
   res.json({
-    configured: Boolean(getTolovgoApiKey()),
+    configured: Boolean(cred),
+    isTestMode: Boolean(cred?.isTest),
+    hasLiveKey,
+    hasTestKey,
     provider: 'TolovGo',
     currency: 'UZS',
   });
@@ -2080,14 +2140,15 @@ app.get('/api/payments/tolovgo/config', (_req, res) => {
 
 app.post('/api/payments/tolovgo/create', async (req, res) => {
   try {
-    const apiKey = getTolovgoApiKey();
-    if (!apiKey) {
+    const cred = resolveTolovgoCredential();
+    if (!cred) {
       res.status(503).json({
         error:
-          "TOLOVGO_API_KEY sozlanmagan. Settings > Secrets (yoki Vercel Environment Variables) bo'limidan tolovgo.uz API kalitingizni qo'shing.",
+          "TOLOVGO_API_KEY yoki TOLOVGO_TEST_API sozlanmagan. Settings > Secrets (yoki Vercel Environment Variables) bo'limidan tolovgo.uz kalitingizni qo'shing.",
       });
       return;
     }
+    const apiKey = cred.apiKey;
 
     const body = (req.body || {}) as { amount?: unknown; providerHint?: unknown };
     const rawAmount = Number(body.amount);
@@ -2208,7 +2269,7 @@ app.post('/api/payments/tolovgo/create', async (req, res) => {
       amount: finalAmount,
       payUrl,
       status: 'pending',
-      test: Boolean(data.test),
+      test: Boolean(data.test) || cred.isTest,
       providers: data.providers && typeof data.providers === 'object' ? data.providers : {},
     });
   } catch (err) {
@@ -2227,15 +2288,15 @@ app.get('/api/payments/tolovgo/status/:orderId', async (req, res) => {
       return;
     }
 
-    const apiKey = getTolovgoApiKey();
-    if (!apiKey) {
+    const cred = resolveTolovgoCredential();
+    if (!cred) {
       res.status(503).json({
-        error: 'TOLOVGO_API_KEY sozlanmagan.',
+        error: 'TOLOVGO_API_KEY yoki TOLOVGO_TEST_API sozlanmagan.',
       });
       return;
     }
 
-    const remote = await fetchRemoteTolovgoStatus(orderId, apiKey);
+    const remote = await fetchRemoteTolovgoStatus(orderId, cred.apiKey);
     const existing = tolovgoOrders.get(orderId);
     const trustedAmount = existing?.amount ?? remote.amount ?? 0;
 
@@ -2293,14 +2354,14 @@ app.all('/api/payments/tolovgo/callback', async (req, res) => {
       return;
     }
 
-    const apiKey = getTolovgoApiKey();
-    if (!apiKey) {
+    const cred = resolveTolovgoCredential();
+    if (!cred) {
       res.status(503).json({ ok: false, error: 'Not configured' });
       return;
     }
 
     // Always verify callback server-to-server via TolovGo status endpoint
-    const remote = await fetchRemoteTolovgoStatus(orderId, apiKey);
+    const remote = await fetchRemoteTolovgoStatus(orderId, cred.apiKey);
     const existing = tolovgoOrders.get(orderId);
     if (existing) {
       existing.status = remote.status;

@@ -214,6 +214,7 @@ interface PendingTolovgoOrder {
   amount: number;
   payUrl: string;
   method: string;
+  isTest?: boolean;
   status: 'pending' | 'paid' | 'expired' | 'cancelled' | 'refunded';
 }
 
@@ -225,6 +226,7 @@ export const TopUpView: React.FC<TopUpViewProps> = ({ balance, onTopUp, onNotify
   const [method, setMethod] = useState('Click');
   const [creating, setCreating] = useState(false);
   const [checking, setChecking] = useState(false);
+  const [isTestMode, setIsTestMode] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [pendingOrder, setPendingOrder] = useState<PendingTolovgoOrder | null>(null);
 
@@ -235,6 +237,21 @@ export const TopUpView: React.FC<TopUpViewProps> = ({ balance, onTopUp, onNotify
   onNotifyRef.current = onNotify;
 
   const parsedAmount = Math.max(0, Number(amountText.replace(/\D/g, '')) || 0);
+
+  useEffect(() => {
+    let active = true;
+    fetch('/api/payments/tolovgo/config')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((cfg: { isTestMode?: boolean } | null) => {
+        if (active && cfg && typeof cfg.isTestMode === 'boolean') {
+          setIsTestMode(cfg.isTestMode);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const checkOrderStatus = useCallback(async (order: PendingTolovgoOrder, silent = false) => {
     if (!order?.orderId) return;
@@ -264,7 +281,11 @@ export const TopUpView: React.FC<TopUpViewProps> = ({ balance, onTopUp, onNotify
             typeof data.amount === 'number' && data.amount >= 1000 ? data.amount : order.amount;
           setPendingOrder(null);
           setErrorMsg(null);
-          onTopUpRef.current(finalAmount, `TolovGo · ${order.method}`, order.orderId);
+          onTopUpRef.current(
+            finalAmount,
+            order.isTest ? `TolovGo (Sinov) · ${order.method}` : `TolovGo · ${order.method}`,
+            order.orderId
+          );
           onNotifyRef.current?.('ok', `TolovGo to'lovi tasdiqlandi: +${formatSom(finalAmount)}`);
         }
         return;
@@ -322,6 +343,7 @@ export const TopUpView: React.FC<TopUpViewProps> = ({ balance, onTopUp, onNotify
         orderId?: string;
         amount?: number;
         payUrl?: string;
+        test?: boolean;
         error?: string;
       };
 
@@ -335,6 +357,7 @@ export const TopUpView: React.FC<TopUpViewProps> = ({ balance, onTopUp, onNotify
         amount: typeof data.amount === 'number' ? data.amount : parsedAmount,
         payUrl: data.payUrl,
         method,
+        isTest: Boolean(data.test),
         status: 'pending',
       });
     } catch {
@@ -343,6 +366,8 @@ export const TopUpView: React.FC<TopUpViewProps> = ({ balance, onTopUp, onNotify
       setCreating(false);
     }
   };
+
+  const showTestBadge = Boolean(pendingOrder?.isTest || isTestMode);
 
   return (
     <main className="flex-1 overflow-y-auto bg-[#F4F5F7] px-4 py-5">
@@ -354,9 +379,15 @@ export const TopUpView: React.FC<TopUpViewProps> = ({ balance, onTopUp, onNotify
               {formatSom(balance)}
             </div>
           </div>
-          <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-50 border border-emerald-200 text-[11px] font-semibold text-emerald-700 shrink-0">
+          <div
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-[11px] font-semibold shrink-0 ${
+              showTestBadge
+                ? 'bg-amber-50 border-amber-200 text-amber-700'
+                : 'bg-emerald-50 border-emerald-200 text-emerald-700'
+            }`}
+          >
             <ShieldCheck className="w-3.5 h-3.5" />
-            <span>TolovGo · UZS</span>
+            <span>{showTestBadge ? 'TolovGo · Sinov' : 'TolovGo · UZS'}</span>
           </div>
         </div>
 
@@ -384,8 +415,17 @@ export const TopUpView: React.FC<TopUpViewProps> = ({ balance, onTopUp, onNotify
                 {formatSom(pendingOrder.amount)}
               </div>
               <p className="text-[11px] text-slate-500 leading-relaxed">
-                TolovGo sahifasida <strong>{pendingOrder.method}</strong> (yoki Click / Payme / Uzum)
-                orqali to'lang. Tasdiqlangach balans avtomatik to'ldiriladi.
+                {pendingOrder.isTest ? (
+                  <>
+                    Sinov havolasi: TolovGo sahifasida{' '}
+                    <strong>«To'landi deb belgilash»</strong> tugmasini bosing (haqiqiy pul yechilmaydi).
+                  </>
+                ) : (
+                  <>
+                    TolovGo sahifasida <strong>{pendingOrder.method}</strong> (yoki Click / Payme / Uzum)
+                    orqali to'lang. Tasdiqlangach balans avtomatik to'ldiriladi.
+                  </>
+                )}
               </p>
             </div>
 
