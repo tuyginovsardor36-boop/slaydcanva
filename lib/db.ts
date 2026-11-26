@@ -119,7 +119,10 @@ export interface AdminOverviewStats {
   totalReferrals: number;
   totalProjects: number;
   activeManagers: number;
+  activeSupportAgents: number;
   unreadCrmEvents: number;
+  openSupportTickets: number;
+  unresolvedSecurityLogs: number;
   todayRevenue: number;
   todayNewUsers: number;
 }
@@ -133,13 +136,17 @@ export type DbManagerPermission =
   | 'pricing'
   | 'promos'
   | 'broadcast'
-  | 'settings';
+  | 'settings'
+  | 'support'
+  | 'security';
 
 export interface DbManagerRecord {
   telegramId: string;
   firstName: string;
   username?: string;
   roleTitle: string;
+  roleType: 'manager' | 'support';
+  isSupportDefault: boolean;
   permissions: DbManagerPermission[];
   passwordHash?: string;
   hasPassword: boolean;
@@ -160,12 +167,66 @@ export interface DbCrmEvent {
     | 'security_alert'
     | 'broadcast_sent'
     | 'manager_changed'
-    | 'user_banned';
+    | 'user_banned'
+    | 'support_message';
   title: string;
   message: string;
   userId?: string;
   amount?: number;
   isRead: boolean;
+  createdAt: number;
+}
+
+export interface DbSupportTicket {
+  id: string;
+  telegramId: string;
+  userFirstName: string;
+  userUsername?: string;
+  assignedTo?: string;
+  assignedName?: string;
+  status: 'open' | 'pending' | 'resolved';
+  subject: string;
+  lastMessage: string;
+  unreadForStaff: number;
+  unreadForUser: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface DbInboxMessage {
+  id: string;
+  threadId: string;
+  telegramId: string;
+  senderRole: 'user' | 'staff';
+  senderId: string;
+  senderName: string;
+  channel: 'site' | 'telegram' | 'both';
+  message: string;
+  isRead: boolean;
+  createdAt: number;
+}
+
+export interface DbSecurityLog {
+  id: string;
+  severity: 'low' | 'medium' | 'high' | 'critical';
+  category: string;
+  title: string;
+  details: string;
+  ipAddress?: string;
+  userId?: string;
+  path?: string;
+  isResolved: boolean;
+  notifiedStaff: boolean;
+  createdAt: number;
+}
+
+export interface DbUserFileRecord {
+  id: string;
+  telegramId: string;
+  fileName: string;
+  format: 'pptx' | 'pdf' | 'docx' | 'png';
+  sizeBytes: number;
+  sentToTelegram: boolean;
   createdAt: number;
 }
 
@@ -408,6 +469,8 @@ export async function ensureDbSchema(): Promise<boolean> {
           first_name TEXT NOT NULL,
           username TEXT,
           role_title TEXT NOT NULL DEFAULT 'Menejer',
+          role_type TEXT NOT NULL DEFAULT 'manager',
+          is_support_default BOOLEAN NOT NULL DEFAULT FALSE,
           permissions JSONB NOT NULL DEFAULT '[]'::jsonb,
           password_hash TEXT,
           is_active BOOLEAN NOT NULL DEFAULT TRUE,
@@ -417,6 +480,9 @@ export async function ensureDbSchema(): Promise<boolean> {
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
       `;
+
+      await sql`ALTER TABLE managers ADD COLUMN IF NOT EXISTS role_type TEXT NOT NULL DEFAULT 'manager'`;
+      await sql`ALTER TABLE managers ADD COLUMN IF NOT EXISTS is_support_default BOOLEAN NOT NULL DEFAULT FALSE`;
 
       await sql`
         CREATE TABLE IF NOT EXISTS crm_events (
@@ -434,6 +500,82 @@ export async function ensureDbSchema(): Promise<boolean> {
       await sql`
         CREATE INDEX IF NOT EXISTS idx_crm_events_created
         ON crm_events (created_at DESC)
+      `;
+
+      await sql`
+        CREATE TABLE IF NOT EXISTS support_tickets (
+          id TEXT PRIMARY KEY,
+          telegram_id TEXT UNIQUE NOT NULL,
+          user_first_name TEXT NOT NULL,
+          user_username TEXT,
+          assigned_to TEXT,
+          assigned_name TEXT,
+          status TEXT NOT NULL DEFAULT 'open',
+          subject TEXT NOT NULL DEFAULT 'Support suhbati',
+          last_message TEXT NOT NULL DEFAULT '',
+          unread_for_staff INTEGER NOT NULL DEFAULT 0,
+          unread_for_user INTEGER NOT NULL DEFAULT 0,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `;
+
+      await sql`
+        CREATE TABLE IF NOT EXISTS inbox_messages (
+          id TEXT PRIMARY KEY,
+          thread_id TEXT NOT NULL,
+          telegram_id TEXT NOT NULL,
+          sender_role TEXT NOT NULL,
+          sender_id TEXT NOT NULL,
+          sender_name TEXT NOT NULL,
+          channel TEXT NOT NULL DEFAULT 'site',
+          message TEXT NOT NULL,
+          is_read BOOLEAN NOT NULL DEFAULT FALSE,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `;
+
+      await sql`
+        CREATE INDEX IF NOT EXISTS idx_inbox_messages_tg_created
+        ON inbox_messages (telegram_id, created_at ASC)
+      `;
+
+      await sql`
+        CREATE TABLE IF NOT EXISTS security_logs (
+          id TEXT PRIMARY KEY,
+          severity TEXT NOT NULL,
+          category TEXT NOT NULL,
+          title TEXT NOT NULL,
+          details TEXT NOT NULL,
+          ip_address TEXT,
+          user_id TEXT,
+          path TEXT,
+          is_resolved BOOLEAN NOT NULL DEFAULT FALSE,
+          notified_staff BOOLEAN NOT NULL DEFAULT FALSE,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `;
+
+      await sql`
+        CREATE INDEX IF NOT EXISTS idx_security_logs_created
+        ON security_logs (created_at DESC)
+      `;
+
+      await sql`
+        CREATE TABLE IF NOT EXISTS user_files (
+          id TEXT PRIMARY KEY,
+          telegram_id TEXT NOT NULL,
+          file_name TEXT NOT NULL,
+          format TEXT NOT NULL,
+          size_bytes INTEGER NOT NULL DEFAULT 0,
+          sent_to_telegram BOOLEAN NOT NULL DEFAULT TRUE,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `;
+
+      await sql`
+        CREATE INDEX IF NOT EXISTS idx_user_files_tg_created
+        ON user_files (telegram_id, created_at DESC)
       `;
 
       await sql`
@@ -1324,11 +1466,22 @@ export async function dbGetAdminOverview(): Promise<AdminOverviewStats | null> {
     `) as Array<Record<string, unknown>>;
 
     const [mgrRow] = (await sql`
-      SELECT COUNT(*) FILTER (WHERE is_active = TRUE)::int AS active_managers FROM managers
+      SELECT
+        COUNT(*) FILTER (WHERE is_active = TRUE AND role_type <> 'support')::int AS active_managers,
+        COUNT(*) FILTER (WHERE is_active = TRUE AND role_type = 'support')::int AS active_support
+      FROM managers
     `) as Array<Record<string, unknown>>;
 
     const [crmRow] = (await sql`
       SELECT COUNT(*) FILTER (WHERE is_read = FALSE)::int AS unread_crm FROM crm_events
+    `) as Array<Record<string, unknown>>;
+
+    const [supRow] = (await sql`
+      SELECT COUNT(*) FILTER (WHERE status <> 'resolved')::int AS open_tickets FROM support_tickets
+    `) as Array<Record<string, unknown>>;
+
+    const [secRow] = (await sql`
+      SELECT COUNT(*) FILTER (WHERE is_resolved = FALSE)::int AS unresolved_sec FROM security_logs
     `) as Array<Record<string, unknown>>;
 
     return {
@@ -1340,7 +1493,10 @@ export async function dbGetAdminOverview(): Promise<AdminOverviewStats | null> {
       totalReferrals: Number(rRow?.total_referrals) || 0,
       totalProjects: Number(prRow?.total_projects) || 0,
       activeManagers: Number(mgrRow?.active_managers) || 0,
+      activeSupportAgents: Number(mgrRow?.active_support) || 0,
       unreadCrmEvents: Number(crmRow?.unread_crm) || 0,
+      openSupportTickets: Number(supRow?.open_tickets) || 0,
+      unresolvedSecurityLogs: Number(secRow?.unresolved_sec) || 0,
       todayRevenue: Number(pRow?.today_revenue) || 0,
       todayNewUsers: Number(uRow?.today_new_users) || 0,
     };
@@ -1717,6 +1873,8 @@ function mapManagerRow(r: Record<string, unknown>): DbManagerRecord {
     firstName: String(r.first_name || 'Menejer'),
     username: r.username ? String(r.username) : undefined,
     roleTitle: String(r.role_title || 'Menejer'),
+    roleType: r.role_type === 'support' ? 'support' : 'manager',
+    isSupportDefault: Boolean(r.is_support_default),
     permissions: permsRaw.map((p) => String(p)) as DbManagerPermission[],
     passwordHash: r.password_hash ? String(r.password_hash) : undefined,
     hasPassword: Boolean(r.password_hash),
@@ -1734,7 +1892,7 @@ export async function dbListManagers(): Promise<DbManagerRecord[] | null> {
   try {
     const rows = (await sql`
       SELECT
-        telegram_id, first_name, username, role_title, permissions,
+        telegram_id, first_name, username, role_title, role_type, is_support_default, permissions,
         (password_hash IS NOT NULL AND password_hash <> '') AS has_pwd,
         is_active, notify_telegram, added_by,
         EXTRACT(EPOCH FROM created_at) * 1000 AS created_ms,
@@ -1759,7 +1917,7 @@ export async function dbGetManagerById(telegramId: string): Promise<DbManagerRec
   try {
     const rows = (await sql`
       SELECT
-        telegram_id, first_name, username, role_title, permissions,
+        telegram_id, first_name, username, role_title, role_type, is_support_default, permissions,
         password_hash, is_active, notify_telegram, added_by,
         EXTRACT(EPOCH FROM created_at) * 1000 AS created_ms,
         EXTRACT(EPOCH FROM updated_at) * 1000 AS updated_ms
@@ -1780,6 +1938,8 @@ export async function dbUpsertManager(params: {
   firstName: string;
   username?: string;
   roleTitle: string;
+  roleType?: 'manager' | 'support';
+  isSupportDefault?: boolean;
   permissions: DbManagerPermission[];
   passwordHash?: string;
   isActive: boolean;
@@ -1789,16 +1949,23 @@ export async function dbUpsertManager(params: {
   const sql = getSql();
   if (!sql || !(await ensureDbSchema())) return null;
   try {
+    const roleType = params.roleType === 'support' ? 'support' : 'manager';
+    const isSupportDefault = Boolean(params.isSupportDefault);
+    if (isSupportDefault) {
+      await sql`UPDATE managers SET is_support_default = FALSE WHERE telegram_id <> ${params.telegramId}`;
+    }
     const permsJson = JSON.stringify(params.permissions);
     const rows = (await sql`
       INSERT INTO managers (
-        telegram_id, first_name, username, role_title, permissions, password_hash, is_active, notify_telegram, added_by
+        telegram_id, first_name, username, role_title, role_type, is_support_default, permissions, password_hash, is_active, notify_telegram, added_by
       )
       VALUES (
         ${params.telegramId},
         ${params.firstName},
         ${params.username ?? null},
         ${params.roleTitle},
+        ${roleType},
+        ${isSupportDefault},
         ${permsJson}::jsonb,
         ${params.passwordHash ?? null},
         ${params.isActive},
@@ -1809,13 +1976,15 @@ export async function dbUpsertManager(params: {
         first_name = EXCLUDED.first_name,
         username = COALESCE(EXCLUDED.username, managers.username),
         role_title = EXCLUDED.role_title,
+        role_type = EXCLUDED.role_type,
+        is_support_default = EXCLUDED.is_support_default,
         permissions = EXCLUDED.permissions,
         password_hash = COALESCE(${params.passwordHash ?? null}, managers.password_hash),
         is_active = EXCLUDED.is_active,
         notify_telegram = EXCLUDED.notify_telegram,
         updated_at = NOW()
       RETURNING
-        telegram_id, first_name, username, role_title, permissions,
+        telegram_id, first_name, username, role_title, role_type, is_support_default, permissions,
         (password_hash IS NOT NULL AND password_hash <> '') AS has_pwd,
         is_active, notify_telegram, added_by,
         EXTRACT(EPOCH FROM created_at) * 1000 AS created_ms,
@@ -2036,16 +2205,80 @@ export async function dbGetUserDetailAdmin(telegramId: string): Promise<{
 }
 
 export async function dbGetAdminAnalytics(days = 14): Promise<{
-  daily: Array<{ day: string; newUsers: number; paidRevenue: number; paidOrders: number; aiSpent: number }>;
+  daily: Array<{
+    day: string;
+    newUsers: number;
+    paidRevenue: number;
+    paidOrders: number;
+    aiSpent: number;
+    promoUses: number;
+    projectsCreated: number;
+    avgOrderValue: number;
+    netCashflow: number;
+    activeUsers: number;
+  }>;
   topSpenders: AdminUserRow[];
   serviceBreakdown: Array<{ label: string; count: number; totalAmount: number }>;
+  hourlyActivity: Array<{ hour: number; label: string; count: number; revenue: number }>;
+  paymentMethodBreakdown: Array<{ method: string; count: number; amount: number }>;
+  userSegmentBreakdown: Array<{ segment: string; count: number }>;
+  staffActivityBreakdown: Array<{ actorId: string; name: string; role: string; actions: number }>;
+  supportMetrics: {
+    openCount: number;
+    pendingCount: number;
+    resolvedCount: number;
+    totalMessages: number;
+    telegramChannelCount: number;
+    siteChannelCount: number;
+  };
+  securityMetrics: {
+    totalLogs: number;
+    criticalCount: number;
+    highCount: number;
+    mediumCount: number;
+    lowCount: number;
+    unresolvedCount: number;
+    dailyThreats: Array<{ day: string; count: number; critical: number }>;
+  };
+  referralMetrics: {
+    totalReferrals: number;
+    totalInviterBonus: number;
+    conversionRate: number;
+  };
+  economyMetrics: {
+    totalDeposited: number;
+    totalSpent: number;
+    promoBonusGiven: number;
+    netMargin: number;
+    retentionRate: number;
+    repeatOrderRate: number;
+    averageOrderValue: number;
+  };
 } | null> {
   const sql = getSql();
   if (!sql || !(await ensureDbSchema())) return null;
 
   const safeDays = Math.min(30, Math.max(7, Math.round(days)));
   try {
-    const [uDaily, pDaily, sDaily, topRows, srvRows] = await Promise.all([
+    const [
+      uDaily,
+      pDaily,
+      sDaily,
+      promoDaily,
+      projDaily,
+      secDaily,
+      hourlyRows,
+      topRows,
+      srvRows,
+      payMethodRows,
+      segRows,
+      staffRows,
+      supTickRows,
+      supMsgRows,
+      secAggRows,
+      refAggRows,
+      econRows,
+    ] = await Promise.all([
       sql`
         SELECT TO_CHAR(DATE_TRUNC('day', created_at), 'MM-DD') AS day_key, COUNT(*)::int AS cnt
         FROM users
@@ -2064,9 +2297,41 @@ export async function dbGetAdminAnalytics(days = 14): Promise<{
       ` as Promise<Array<Record<string, unknown>>>,
       sql`
         SELECT TO_CHAR(DATE_TRUNC('day', created_at), 'MM-DD') AS day_key,
-               COALESCE(SUM(ABS(amount)), 0)::bigint AS spent
+               COALESCE(SUM(ABS(amount)), 0)::bigint AS spent,
+               COUNT(DISTINCT telegram_id)::int AS active_users
         FROM transactions
-        WHERE amount < 0 AND created_at >= NOW() - (${safeDays} || ' days')::interval
+        WHERE created_at >= NOW() - (${safeDays} || ' days')::interval
+        GROUP BY 1
+        ORDER BY 1 ASC
+      ` as Promise<Array<Record<string, unknown>>>,
+      sql`
+        SELECT TO_CHAR(DATE_TRUNC('day', created_at), 'MM-DD') AS day_key,
+               COUNT(*)::int AS cnt
+        FROM promo_redemptions
+        WHERE created_at >= NOW() - (${safeDays} || ' days')::interval
+        GROUP BY 1
+      ` as Promise<Array<Record<string, unknown>>>,
+      sql`
+        SELECT TO_CHAR(DATE_TRUNC('day', created_at), 'MM-DD') AS day_key,
+               COUNT(*)::int AS cnt
+        FROM projects
+        WHERE created_at >= NOW() - (${safeDays} || ' days')::interval
+        GROUP BY 1
+      ` as Promise<Array<Record<string, unknown>>>,
+      sql`
+        SELECT TO_CHAR(DATE_TRUNC('day', created_at), 'MM-DD') AS day_key,
+               COUNT(*)::int AS cnt,
+               COUNT(*) FILTER (WHERE severity IN ('high', 'critical'))::int AS crit
+        FROM security_logs
+        WHERE created_at >= NOW() - (${safeDays} || ' days')::interval
+        GROUP BY 1
+      ` as Promise<Array<Record<string, unknown>>>,
+      sql`
+        SELECT EXTRACT(HOUR FROM created_at)::int AS hr,
+               COUNT(*)::int AS cnt,
+               COALESCE(SUM(ABS(amount)), 0)::bigint AS vol
+        FROM transactions
+        WHERE created_at >= NOW() - (${safeDays} || ' days')::interval
         GROUP BY 1
         ORDER BY 1 ASC
       ` as Promise<Array<Record<string, unknown>>>,
@@ -2094,17 +2359,111 @@ export async function dbGetAdminAnalytics(days = 14): Promise<{
         ORDER BY total_amt DESC
         LIMIT 8
       ` as Promise<Array<Record<string, unknown>>>,
+      sql`
+        SELECT
+          COALESCE(NULLIF(method, ''), 'TolovGo') AS mth,
+          COUNT(*)::int AS cnt,
+          COALESCE(SUM(amount), 0)::bigint AS total_amt
+        FROM payment_orders
+        WHERE status = 'paid'
+        GROUP BY 1
+        ORDER BY total_amt DESC
+        LIMIT 8
+      ` as Promise<Array<Record<string, unknown>>>,
+      sql`
+        SELECT
+          COUNT(*)::int AS total_cnt,
+          COUNT(*) FILTER (WHERE is_banned = TRUE)::int AS banned_cnt,
+          COUNT(*) FILTER (WHERE is_banned = FALSE AND (crm_tag = 'vip' OR balance >= 10000))::int AS vip_cnt,
+          COUNT(*) FILTER (WHERE is_banned = FALSE AND balance < 1000)::int AS zero_cnt,
+          COUNT(*) FILTER (WHERE is_banned = FALSE AND balance >= 1000 AND COALESCE(crm_tag, '') <> 'vip' AND balance < 10000)::int AS active_cnt
+        FROM users
+      ` as Promise<Array<Record<string, unknown>>>,
+      sql`
+        SELECT a.actor_id, COUNT(*)::int AS actions,
+               COALESCE(MAX(m.first_name), 'Super Admin') AS name,
+               COALESCE(MAX(m.role_type), 'super_admin') AS role_type
+        FROM audit_logs a
+        LEFT JOIN managers m ON m.telegram_id = a.actor_id
+        GROUP BY a.actor_id
+        ORDER BY actions DESC
+        LIMIT 8
+      ` as Promise<Array<Record<string, unknown>>>,
+      sql`
+        SELECT
+          COUNT(*) FILTER (WHERE status = 'open')::int AS open_cnt,
+          COUNT(*) FILTER (WHERE status = 'pending')::int AS pending_cnt,
+          COUNT(*) FILTER (WHERE status = 'resolved')::int AS resolved_cnt
+        FROM support_tickets
+      ` as Promise<Array<Record<string, unknown>>>,
+      sql`
+        SELECT
+          COUNT(*)::int AS total_msgs,
+          COUNT(*) FILTER (WHERE channel IN ('telegram', 'both'))::int AS tg_cnt,
+          COUNT(*) FILTER (WHERE channel IN ('site', 'both'))::int AS site_cnt
+        FROM inbox_messages
+      ` as Promise<Array<Record<string, unknown>>>,
+      sql`
+        SELECT
+          COUNT(*)::int AS total_logs,
+          COUNT(*) FILTER (WHERE severity = 'critical')::int AS crit_cnt,
+          COUNT(*) FILTER (WHERE severity = 'high')::int AS high_cnt,
+          COUNT(*) FILTER (WHERE severity = 'medium')::int AS med_cnt,
+          COUNT(*) FILTER (WHERE severity = 'low')::int AS low_cnt,
+          COUNT(*) FILTER (WHERE is_resolved = FALSE)::int AS unres_cnt
+        FROM security_logs
+      ` as Promise<Array<Record<string, unknown>>>,
+      sql`
+        SELECT
+          COUNT(*)::int AS total_refs,
+          COALESCE(SUM(inviter_bonus), 0)::bigint AS total_bonus
+        FROM referrals
+      ` as Promise<Array<Record<string, unknown>>>,
+      sql`
+        SELECT
+          COALESCE((SELECT SUM(amount)::bigint FROM payment_orders WHERE status = 'paid' AND is_test = FALSE), 0) AS total_dep,
+          COALESCE((SELECT SUM(ABS(amount))::bigint FROM transactions WHERE amount < 0), 0) AS total_spent,
+          COALESCE((SELECT SUM(bonus_amount)::bigint FROM promo_redemptions), 0) AS promo_bonus,
+          COALESCE((SELECT COUNT(DISTINCT telegram_id)::int FROM payment_orders WHERE status = 'paid' AND is_test = FALSE), 0) AS paying_users,
+          COALESCE((SELECT COUNT(*)::int FROM (SELECT telegram_id FROM payment_orders WHERE status = 'paid' AND is_test = FALSE GROUP BY telegram_id HAVING COUNT(*) > 1) r), 0) AS repeat_users,
+          COALESCE((SELECT COUNT(*)::int FROM payment_orders WHERE status = 'paid' AND is_test = FALSE), 0) AS paid_cnt
+      ` as Promise<Array<Record<string, unknown>>>,
     ]);
 
     const dayMap = new Map<
       string,
-      { day: string; newUsers: number; paidRevenue: number; paidOrders: number; aiSpent: number }
+      {
+        day: string;
+        newUsers: number;
+        paidRevenue: number;
+        paidOrders: number;
+        aiSpent: number;
+        promoUses: number;
+        projectsCreated: number;
+        avgOrderValue: number;
+        netCashflow: number;
+        activeUsers: number;
+      }
     >();
+    const threatDayMap = new Map<string, { day: string; count: number; critical: number }>();
+
     const now = new Date();
     for (let i = safeDays - 1; i >= 0; i--) {
       const d = new Date(now.getTime() - i * 86_400_000);
       const key = `${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
-      dayMap.set(key, { day: key, newUsers: 0, paidRevenue: 0, paidOrders: 0, aiSpent: 0 });
+      dayMap.set(key, {
+        day: key,
+        newUsers: 0,
+        paidRevenue: 0,
+        paidOrders: 0,
+        aiSpent: 0,
+        promoUses: 0,
+        projectsCreated: 0,
+        avgOrderValue: 0,
+        netCashflow: 0,
+        activeUsers: 0,
+      });
+      threatDayMap.set(key, { day: key, count: 0, critical: 0 });
     }
     for (const r of uDaily) {
       const item = dayMap.get(String(r.day_key));
@@ -2115,15 +2474,65 @@ export async function dbGetAdminAnalytics(days = 14): Promise<{
       if (item) {
         item.paidOrders = Number(r.orders) || 0;
         item.paidRevenue = Number(r.revenue) || 0;
+        item.avgOrderValue = item.paidOrders > 0 ? Math.round(item.paidRevenue / item.paidOrders) : 0;
       }
     }
     for (const r of sDaily) {
       const item = dayMap.get(String(r.day_key));
-      if (item) item.aiSpent = Number(r.spent) || 0;
+      if (item) {
+        item.aiSpent = Number(r.spent) || 0;
+        item.activeUsers = Number(r.active_users) || 0;
+      }
     }
+    for (const r of promoDaily) {
+      const item = dayMap.get(String(r.day_key));
+      if (item) item.promoUses = Number(r.cnt) || 0;
+    }
+    for (const r of projDaily) {
+      const item = dayMap.get(String(r.day_key));
+      if (item) item.projectsCreated = Number(r.cnt) || 0;
+    }
+    for (const item of dayMap.values()) {
+      item.netCashflow = item.paidRevenue - Math.round(item.aiSpent * 0.15);
+    }
+    for (const r of secDaily) {
+      const t = threatDayMap.get(String(r.day_key));
+      if (t) {
+        t.count = Number(r.cnt) || 0;
+        t.critical = Number(r.crit) || 0;
+      }
+    }
+
+    const hourMap = new Map<number, { hour: number; label: string; count: number; revenue: number }>();
+    for (let h = 0; h < 24; h++) {
+      hourMap.set(h, { hour: h, label: `${String(h).padStart(2, '0')}:00`, count: 0, revenue: 0 });
+    }
+    for (const r of hourlyRows) {
+      const hr = Number(r.hr);
+      const item = hourMap.get(hr);
+      if (item) {
+        item.count = Number(r.cnt) || 0;
+        item.revenue = Number(r.vol) || 0;
+      }
+    }
+
+    const seg = segRows[0] || {};
+    const totalUsersCnt = Math.max(1, Number(seg.total_cnt) || 1);
+    const supT = supTickRows[0] || {};
+    const supM = supMsgRows[0] || {};
+    const secA = secAggRows[0] || {};
+    const refA = refAggRows[0] || {};
+    const ec = econRows[0] || {};
+
+    const totalDep = Number(ec.total_dep) || 0;
+    const promoBonus = Number(ec.promo_bonus) || 0;
+    const paidCnt = Number(ec.paid_cnt) || 0;
+    const payingUsers = Number(ec.paying_users) || 0;
+    const repeatUsers = Number(ec.repeat_users) || 0;
 
     return {
       daily: Array.from(dayMap.values()),
+      hourlyActivity: Array.from(hourMap.values()),
       topSpenders: topRows.map((r) => ({
         telegramId: String(r.telegram_id),
         chatId: String(r.chat_id),
@@ -2149,6 +2558,54 @@ export async function dbGetAdminAnalytics(days = 14): Promise<{
         count: Number(s.cnt) || 0,
         totalAmount: Number(s.total_amt) || 0,
       })),
+      paymentMethodBreakdown: payMethodRows.map((p) => ({
+        method: String(p.mth || 'TolovGo'),
+        count: Number(p.cnt) || 0,
+        amount: Number(p.total_amt) || 0,
+      })),
+      userSegmentBreakdown: [
+        { segment: 'VIP', count: Number(seg.vip_cnt) || 0 },
+        { segment: 'Faol', count: Number(seg.active_cnt) || 0 },
+        { segment: '0-Balans', count: Number(seg.zero_cnt) || 0 },
+        { segment: 'Bloklangan', count: Number(seg.banned_cnt) || 0 },
+      ],
+      staffActivityBreakdown: staffRows.map((st) => ({
+        actorId: String(st.actor_id),
+        name: String(st.name || st.actor_id),
+        role: String(st.role_type || 'staff'),
+        actions: Number(st.actions) || 0,
+      })),
+      supportMetrics: {
+        openCount: Number(supT.open_cnt) || 0,
+        pendingCount: Number(supT.pending_cnt) || 0,
+        resolvedCount: Number(supT.resolved_cnt) || 0,
+        totalMessages: Number(supM.total_msgs) || 0,
+        telegramChannelCount: Number(supM.tg_cnt) || 0,
+        siteChannelCount: Number(supM.site_cnt) || 0,
+      },
+      securityMetrics: {
+        totalLogs: Number(secA.total_logs) || 0,
+        criticalCount: Number(secA.crit_cnt) || 0,
+        highCount: Number(secA.high_cnt) || 0,
+        mediumCount: Number(secA.med_cnt) || 0,
+        lowCount: Number(secA.low_cnt) || 0,
+        unresolvedCount: Number(secA.unres_cnt) || 0,
+        dailyThreats: Array.from(threatDayMap.values()),
+      },
+      referralMetrics: {
+        totalReferrals: Number(refA.total_refs) || 0,
+        totalInviterBonus: Number(refA.total_bonus) || 0,
+        conversionRate: Math.round(((Number(refA.total_refs) || 0) / totalUsersCnt) * 100),
+      },
+      economyMetrics: {
+        totalDeposited: totalDep,
+        totalSpent: Number(ec.total_spent) || 0,
+        promoBonusGiven: promoBonus,
+        netMargin: Math.max(0, totalDep - promoBonus),
+        retentionRate: Math.round((payingUsers / totalUsersCnt) * 100),
+        repeatOrderRate: payingUsers > 0 ? Math.round((repeatUsers / payingUsers) * 100) : 0,
+        averageOrderValue: paidCnt > 0 ? Math.round(totalDep / paidCnt) : 0,
+      },
     };
   } catch (err) {
     console.error('[Neon dbGetAdminAnalytics Error]', err);
@@ -2418,3 +2875,356 @@ export async function dbListBroadcastLogs(limit = 30): Promise<DbBroadcastLog[] 
     return null;
   }
 }
+
+// =========================================================================
+// Support Tickets, Live Inbox Chat, Security Logs & Telegram Saved Files
+// =========================================================================
+
+export async function dbUpsertSupportTicket(params: {
+  telegramId: string;
+  userFirstName: string;
+  userUsername?: string;
+  assignedTo?: string;
+  assignedName?: string;
+  subject?: string;
+  lastMessage: string;
+  incrementStaffUnread?: boolean;
+  incrementUserUnread?: boolean;
+  status?: 'open' | 'pending' | 'resolved';
+}): Promise<DbSupportTicket | null> {
+  const sql = getSql();
+  if (!sql || !(await ensureDbSchema())) return null;
+  try {
+    const id = `sup_${params.telegramId}`;
+    const staffInc = params.incrementStaffUnread ? 1 : 0;
+    const userInc = params.incrementUserUnread ? 1 : 0;
+    const rows = (await sql`
+      INSERT INTO support_tickets (
+        id, telegram_id, user_first_name, user_username, assigned_to, assigned_name,
+        status, subject, last_message, unread_for_staff, unread_for_user
+      )
+      VALUES (
+        ${id},
+        ${params.telegramId},
+        ${params.userFirstName.slice(0, 80)},
+        ${params.userUsername ?? null},
+        ${params.assignedTo ?? null},
+        ${params.assignedName ?? null},
+        ${params.status || 'open'},
+        ${(params.subject || 'Mijoz murojaati').slice(0, 120)},
+        ${params.lastMessage.slice(0, 400)},
+        ${staffInc},
+        ${userInc}
+      )
+      ON CONFLICT (telegram_id) DO UPDATE SET
+        user_first_name = EXCLUDED.user_first_name,
+        user_username = COALESCE(EXCLUDED.user_username, support_tickets.user_username),
+        assigned_to = COALESCE(support_tickets.assigned_to, EXCLUDED.assigned_to),
+        assigned_name = COALESCE(support_tickets.assigned_name, EXCLUDED.assigned_name),
+        status = ${params.status || 'open'},
+        last_message = EXCLUDED.last_message,
+        unread_for_staff = support_tickets.unread_for_staff + ${staffInc},
+        unread_for_user = support_tickets.unread_for_user + ${userInc},
+        updated_at = NOW()
+      RETURNING
+        id, telegram_id, user_first_name, user_username, assigned_to, assigned_name,
+        status, subject, last_message, unread_for_staff, unread_for_user,
+        EXTRACT(EPOCH FROM created_at) * 1000 AS created_ms,
+        EXTRACT(EPOCH FROM updated_at) * 1000 AS updated_ms
+    `) as Array<Record<string, unknown>>;
+    const r = rows[0];
+    if (!r) return null;
+    return {
+      id: String(r.id),
+      telegramId: String(r.telegram_id),
+      userFirstName: String(r.user_first_name),
+      userUsername: r.user_username ? String(r.user_username) : undefined,
+      assignedTo: r.assigned_to ? String(r.assigned_to) : undefined,
+      assignedName: r.assigned_name ? String(r.assigned_name) : undefined,
+      status: String(r.status || 'open') as DbSupportTicket['status'],
+      subject: String(r.subject || 'Support'),
+      lastMessage: String(r.last_message || ''),
+      unreadForStaff: Number(r.unread_for_staff) || 0,
+      unreadForUser: Number(r.unread_for_user) || 0,
+      createdAt: Number(r.created_ms) || Date.now(),
+      updatedAt: Number(r.updated_ms) || Date.now(),
+    };
+  } catch (err) {
+    console.error('[Neon dbUpsertSupportTicket Error]', err);
+    return null;
+  }
+}
+
+export async function dbListSupportTickets(limit = 100): Promise<DbSupportTicket[] | null> {
+  const sql = getSql();
+  if (!sql || !(await ensureDbSchema())) return null;
+  try {
+    const rows = (await sql`
+      SELECT
+        id, telegram_id, user_first_name, user_username, assigned_to, assigned_name,
+        status, subject, last_message, unread_for_staff, unread_for_user,
+        EXTRACT(EPOCH FROM created_at) * 1000 AS created_ms,
+        EXTRACT(EPOCH FROM updated_at) * 1000 AS updated_ms
+      FROM support_tickets
+      ORDER BY updated_at DESC
+      LIMIT ${limit}
+    `) as Array<Record<string, unknown>>;
+    return rows.map((r) => ({
+      id: String(r.id),
+      telegramId: String(r.telegram_id),
+      userFirstName: String(r.user_first_name),
+      userUsername: r.user_username ? String(r.user_username) : undefined,
+      assignedTo: r.assigned_to ? String(r.assigned_to) : undefined,
+      assignedName: r.assigned_name ? String(r.assigned_name) : undefined,
+      status: String(r.status || 'open') as DbSupportTicket['status'],
+      subject: String(r.subject || 'Support'),
+      lastMessage: String(r.last_message || ''),
+      unreadForStaff: Number(r.unread_for_staff) || 0,
+      unreadForUser: Number(r.unread_for_user) || 0,
+      createdAt: Number(r.created_ms) || Date.now(),
+      updatedAt: Number(r.updated_ms) || Date.now(),
+    }));
+  } catch (err) {
+    console.error('[Neon dbListSupportTickets Error]', err);
+    return null;
+  }
+}
+
+export async function dbAssignSupportTicket(
+  telegramId: string,
+  assignedTo: string | null,
+  assignedName: string | null
+): Promise<boolean> {
+  const sql = getSql();
+  if (!sql || !(await ensureDbSchema())) return false;
+  try {
+    await sql`
+      UPDATE support_tickets
+      SET assigned_to = ${assignedTo}, assigned_name = ${assignedName}, updated_at = NOW()
+      WHERE telegram_id = ${telegramId}
+    `;
+    return true;
+  } catch (err) {
+    console.error('[Neon dbAssignSupportTicket Error]', err);
+    return false;
+  }
+}
+
+export async function dbUpdateSupportTicketStatus(
+  telegramId: string,
+  status: 'open' | 'pending' | 'resolved'
+): Promise<boolean> {
+  const sql = getSql();
+  if (!sql || !(await ensureDbSchema())) return false;
+  try {
+    await sql`
+      UPDATE support_tickets
+      SET status = ${status}, updated_at = NOW()
+      WHERE telegram_id = ${telegramId}
+    `;
+    return true;
+  } catch (err) {
+    console.error('[Neon dbUpdateSupportTicketStatus Error]', err);
+    return false;
+  }
+}
+
+export async function dbAddInboxMessage(msg: Omit<DbInboxMessage, 'createdAt'>): Promise<DbInboxMessage | null> {
+  const sql = getSql();
+  if (!sql || !(await ensureDbSchema())) return null;
+  try {
+    const rows = (await sql`
+      INSERT INTO inbox_messages (id, thread_id, telegram_id, sender_role, sender_id, sender_name, channel, message, is_read)
+      VALUES (
+        ${msg.id},
+        ${msg.threadId},
+        ${msg.telegramId},
+        ${msg.senderRole},
+        ${msg.senderId},
+        ${msg.senderName.slice(0, 80)},
+        ${msg.channel},
+        ${msg.message.slice(0, 2000)},
+        ${msg.isRead}
+      )
+      RETURNING EXTRACT(EPOCH FROM created_at) * 1000 AS created_ms
+    `) as Array<Record<string, unknown>>;
+    return {
+      ...msg,
+      createdAt: Number(rows[0]?.created_ms) || Date.now(),
+    };
+  } catch (err) {
+    console.error('[Neon dbAddInboxMessage Error]', err);
+    return null;
+  }
+}
+
+export async function dbListInboxMessages(
+  telegramId: string,
+  limit = 100
+): Promise<DbInboxMessage[] | null> {
+  const sql = getSql();
+  if (!sql || !(await ensureDbSchema())) return null;
+  try {
+    const rows = (await sql`
+      SELECT id, thread_id, telegram_id, sender_role, sender_id, sender_name, channel, message, is_read,
+             EXTRACT(EPOCH FROM created_at) * 1000 AS created_ms
+      FROM inbox_messages
+      WHERE telegram_id = ${telegramId}
+      ORDER BY created_at ASC
+      LIMIT ${limit}
+    `) as Array<Record<string, unknown>>;
+    return rows.map((r) => ({
+      id: String(r.id),
+      threadId: String(r.thread_id),
+      telegramId: String(r.telegram_id),
+      senderRole: r.sender_role === 'staff' ? 'staff' : 'user',
+      senderId: String(r.sender_id),
+      senderName: String(r.sender_name),
+      channel: (r.channel === 'telegram' || r.channel === 'both' ? r.channel : 'site') as DbInboxMessage['channel'],
+      message: String(r.message),
+      isRead: Boolean(r.is_read),
+      createdAt: Number(r.created_ms) || Date.now(),
+    }));
+  } catch (err) {
+    console.error('[Neon dbListInboxMessages Error]', err);
+    return null;
+  }
+}
+
+export async function dbMarkThreadRead(
+  telegramId: string,
+  viewerRole: 'staff' | 'user'
+): Promise<void> {
+  const sql = getSql();
+  if (!sql || !(await ensureDbSchema())) return;
+  try {
+    if (viewerRole === 'staff') {
+      await sql`UPDATE support_tickets SET unread_for_staff = 0 WHERE telegram_id = ${telegramId}`;
+      await sql`UPDATE inbox_messages SET is_read = TRUE WHERE telegram_id = ${telegramId} AND sender_role = 'user'`;
+    } else {
+      await sql`UPDATE support_tickets SET unread_for_user = 0 WHERE telegram_id = ${telegramId}`;
+      await sql`UPDATE inbox_messages SET is_read = TRUE WHERE telegram_id = ${telegramId} AND sender_role = 'staff'`;
+    }
+  } catch {
+    // Non-critical
+  }
+}
+
+export async function dbAppendSecurityLog(entry: Omit<DbSecurityLog, 'createdAt'>): Promise<boolean> {
+  const sql = getSql();
+  if (!sql || !(await ensureDbSchema())) return false;
+  try {
+    await sql`
+      INSERT INTO security_logs (id, severity, category, title, details, ip_address, user_id, path, is_resolved, notified_staff)
+      VALUES (
+        ${entry.id},
+        ${entry.severity},
+        ${entry.category.slice(0, 60)},
+        ${entry.title.slice(0, 140)},
+        ${entry.details.slice(0, 600)},
+        ${entry.ipAddress ? entry.ipAddress.slice(0, 64) : null},
+        ${entry.userId ? entry.userId.slice(0, 32) : null},
+        ${entry.path ? entry.path.slice(0, 120) : null},
+        ${entry.isResolved},
+        ${entry.notifiedStaff}
+      )
+      ON CONFLICT (id) DO NOTHING
+    `;
+    return true;
+  } catch (err) {
+    console.error('[Neon dbAppendSecurityLog Error]', err);
+    return false;
+  }
+}
+
+export async function dbListSecurityLogs(limit = 120): Promise<DbSecurityLog[] | null> {
+  const sql = getSql();
+  if (!sql || !(await ensureDbSchema())) return null;
+  try {
+    const rows = (await sql`
+      SELECT id, severity, category, title, details, ip_address, user_id, path, is_resolved, notified_staff,
+             EXTRACT(EPOCH FROM created_at) * 1000 AS created_ms
+      FROM security_logs
+      ORDER BY created_at DESC
+      LIMIT ${limit}
+    `) as Array<Record<string, unknown>>;
+    return rows.map((r) => ({
+      id: String(r.id),
+      severity: String(r.severity || 'low') as DbSecurityLog['severity'],
+      category: String(r.category || 'system'),
+      title: String(r.title),
+      details: String(r.details),
+      ipAddress: r.ip_address ? String(r.ip_address) : undefined,
+      userId: r.user_id ? String(r.user_id) : undefined,
+      path: r.path ? String(r.path) : undefined,
+      isResolved: Boolean(r.is_resolved),
+      notifiedStaff: Boolean(r.notified_staff),
+      createdAt: Number(r.created_ms) || Date.now(),
+    }));
+  } catch (err) {
+    console.error('[Neon dbListSecurityLogs Error]', err);
+    return null;
+  }
+}
+
+export async function dbResolveSecurityLog(id: string): Promise<boolean> {
+  const sql = getSql();
+  if (!sql || !(await ensureDbSchema())) return false;
+  try {
+    await sql`UPDATE security_logs SET is_resolved = TRUE WHERE id = ${id}`;
+    return true;
+  } catch (err) {
+    console.error('[Neon dbResolveSecurityLog Error]', err);
+    return false;
+  }
+}
+
+export async function dbRecordUserFile(entry: Omit<DbUserFileRecord, 'createdAt'>): Promise<boolean> {
+  const sql = getSql();
+  if (!sql || !(await ensureDbSchema())) return false;
+  try {
+    await sql`
+      INSERT INTO user_files (id, telegram_id, file_name, format, size_bytes, sent_to_telegram)
+      VALUES (
+        ${entry.id},
+        ${entry.telegramId},
+        ${entry.fileName.slice(0, 140)},
+        ${entry.format},
+        ${Math.max(0, Math.round(entry.sizeBytes))},
+        ${entry.sentToTelegram}
+      )
+    `;
+    return true;
+  } catch (err) {
+    console.error('[Neon dbRecordUserFile Error]', err);
+    return false;
+  }
+}
+
+export async function dbListUserFiles(telegramId: string, limit = 50): Promise<DbUserFileRecord[] | null> {
+  const sql = getSql();
+  if (!sql || !(await ensureDbSchema())) return null;
+  try {
+    const rows = (await sql`
+      SELECT id, telegram_id, file_name, format, size_bytes, sent_to_telegram,
+             EXTRACT(EPOCH FROM created_at) * 1000 AS created_ms
+      FROM user_files
+      WHERE telegram_id = ${telegramId}
+      ORDER BY created_at DESC
+      LIMIT ${limit}
+    `) as Array<Record<string, unknown>>;
+    return rows.map((r) => ({
+      id: String(r.id),
+      telegramId: String(r.telegram_id),
+      fileName: String(r.file_name),
+      format: (r.format === 'pdf' || r.format === 'docx' || r.format === 'png' ? r.format : 'pptx') as DbUserFileRecord['format'],
+      sizeBytes: Number(r.size_bytes) || 0,
+      sentToTelegram: Boolean(r.sent_to_telegram),
+      createdAt: Number(r.created_ms) || Date.now(),
+    }));
+  } catch (err) {
+    console.error('[Neon dbListUserFiles Error]', err);
+    return null;
+  }
+}
+

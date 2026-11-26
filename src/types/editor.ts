@@ -1,6 +1,6 @@
 export type WorkspaceMode = 'pptx' | 'word' | 'pdf';
 
-export type MobileTab = 'home' | 'editor' | 'topup' | 'balance' | 'profile';
+export type MobileTab = 'home' | 'files' | 'editor' | 'topup' | 'balance' | 'profile';
 
 export type DesktopView = 'services' | 'editor';
 
@@ -77,7 +77,7 @@ export interface UserProfile {
 
 export type TolovgoPaymentMode = 'live' | 'test';
 
-export type StaffRole = 'super_admin' | 'manager' | 'user';
+export type StaffRole = 'super_admin' | 'manager' | 'support' | 'user';
 
 export type ManagerPermission =
   | 'overview'
@@ -88,7 +88,9 @@ export type ManagerPermission =
   | 'pricing'
   | 'promos'
   | 'broadcast'
-  | 'settings';
+  | 'settings'
+  | 'support'
+  | 'security';
 
 export interface TelegramUser {
   telegramId: string;
@@ -101,6 +103,7 @@ export interface TelegramUser {
   referralCount?: number;
   isAdmin?: boolean;
   isManager?: boolean;
+  isSupport?: boolean;
   staffRole?: StaffRole;
   managerPermissions?: ManagerPermission[];
   isBanned?: boolean;
@@ -133,6 +136,9 @@ export interface SiteConfigSettings {
   notifyNewUsersToStaff: boolean;
   notifyPaymentsToStaff: boolean;
   defaultAiModel: string;
+  telegramOnlyMode: boolean;
+  supportUsername: string;
+  botWelcomeTitle?: string;
 }
 
 export interface AdminOverviewStats {
@@ -144,7 +150,10 @@ export interface AdminOverviewStats {
   totalReferrals: number;
   totalProjects: number;
   activeManagers?: number;
+  activeSupportAgents?: number;
   unreadCrmEvents?: number;
+  openSupportTickets?: number;
+  unresolvedSecurityLogs?: number;
   todayRevenue?: number;
   todayNewUsers?: number;
 }
@@ -197,6 +206,8 @@ export interface ManagerRecord {
   firstName: string;
   username?: string;
   roleTitle: string;
+  roleType?: 'manager' | 'support';
+  isSupportDefault?: boolean;
   permissions: ManagerPermission[];
   hasPassword: boolean;
   isActive: boolean;
@@ -216,7 +227,8 @@ export interface CrmEventRow {
     | 'security_alert'
     | 'broadcast_sent'
     | 'manager_changed'
-    | 'user_banned';
+    | 'user_banned'
+    | 'support_message';
   title: string;
   message: string;
   userId?: string;
@@ -253,12 +265,59 @@ export interface DailyAnalyticsPoint {
   paidRevenue: number;
   paidOrders: number;
   aiSpent: number;
+  promoUses?: number;
+  projectsCreated?: number;
+  avgOrderValue?: number;
+  netCashflow?: number;
+  activeUsers?: number;
+}
+
+export interface HourlyAnalyticsPoint {
+  hour: number;
+  label: string;
+  count: number;
+  revenue: number;
 }
 
 export interface AdminAnalyticsPayload {
   daily: DailyAnalyticsPoint[];
   topSpenders: AdminUserRow[];
   serviceBreakdown: Array<{ label: string; count: number; totalAmount: number }>;
+  hourlyActivity?: HourlyAnalyticsPoint[];
+  paymentMethodBreakdown?: Array<{ method: string; count: number; amount: number }>;
+  userSegmentBreakdown?: Array<{ segment: string; count: number }>;
+  staffActivityBreakdown?: Array<{ actorId: string; name: string; role: string; actions: number }>;
+  supportMetrics?: {
+    openCount: number;
+    pendingCount: number;
+    resolvedCount: number;
+    totalMessages: number;
+    telegramChannelCount: number;
+    siteChannelCount: number;
+  };
+  securityMetrics?: {
+    totalLogs: number;
+    criticalCount: number;
+    highCount: number;
+    mediumCount: number;
+    lowCount: number;
+    unresolvedCount: number;
+    dailyThreats: Array<{ day: string; count: number; critical: number }>;
+  };
+  referralMetrics?: {
+    totalReferrals: number;
+    totalInviterBonus: number;
+    conversionRate: number;
+  };
+  economyMetrics?: {
+    totalDeposited: number;
+    totalSpent: number;
+    promoBonusGiven: number;
+    netMargin: number;
+    retentionRate: number;
+    repeatOrderRate: number;
+    averageOrderValue: number;
+  };
 }
 
 export interface AdminUserDetailPayload {
@@ -267,6 +326,88 @@ export interface AdminUserDetailPayload {
   orders: AdminOrderRow[];
   projects: ProjectSummary[];
   referrals: Array<{ inviteeId: string; inviterBonus: number; createdAt: number }>;
+}
+
+export type SupportTicketStatus = 'open' | 'pending' | 'resolved';
+
+export interface SupportAgentPublic {
+  telegramId: string;
+  firstName: string;
+  username?: string;
+  roleTitle: string;
+  isDefault: boolean;
+}
+
+export interface SupportTicketRow {
+  id: string;
+  telegramId: string;
+  userFirstName: string;
+  userUsername?: string;
+  assignedTo?: string;
+  assignedName?: string;
+  status: SupportTicketStatus;
+  subject: string;
+  lastMessage: string;
+  unreadForStaff: number;
+  unreadForUser: number;
+  updatedAt: number;
+  createdAt: number;
+}
+
+export interface InboxMessageRow {
+  id: string;
+  threadId: string;
+  telegramId: string;
+  senderRole: 'user' | 'staff';
+  senderId: string;
+  senderName: string;
+  channel: 'site' | 'telegram' | 'both';
+  message: string;
+  isRead: boolean;
+  createdAt: number;
+}
+
+export type SecurityLogSeverity = 'low' | 'medium' | 'high' | 'critical';
+
+export interface SecurityLogRow {
+  id: string;
+  severity: SecurityLogSeverity;
+  category: string;
+  title: string;
+  details: string;
+  ipAddress?: string;
+  userId?: string;
+  path?: string;
+  isResolved: boolean;
+  notifiedStaff: boolean;
+  createdAt: number;
+}
+
+export interface SecurityScanCheck {
+  id: string;
+  name: string;
+  status: 'pass' | 'warn' | 'fail';
+  severity: SecurityLogSeverity;
+  message: string;
+  recommendation?: string;
+}
+
+export interface SecurityScanReport {
+  scannedAt: number;
+  score: number;
+  riskLevel: 'safe' | 'moderate' | 'elevated' | 'critical';
+  checks: SecurityScanCheck[];
+  summary: string;
+  threatsDetected: number;
+}
+
+export interface UserFileRecord {
+  id: string;
+  fileName: string;
+  format: 'pptx' | 'pdf' | 'docx' | 'png';
+  sizeBytes: number;
+  sentToTelegram: boolean;
+  createdAt: number;
 }
 
 export interface SlaydCanvaState {

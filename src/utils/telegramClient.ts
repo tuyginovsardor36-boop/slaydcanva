@@ -10,14 +10,21 @@ import {
   BroadcastLogRow,
   CloudProjectData,
   CrmEventRow,
+  InboxMessageRow,
   ManagerPermission,
   ManagerRecord,
   ProjectSummary,
   PromoCodeRow,
+  SecurityLogRow,
+  SecurityScanReport,
   SiteConfigSettings,
   StaffRole,
+  SupportAgentPublic,
+  SupportTicketRow,
+  SupportTicketStatus,
   TelegramUser,
   TolovgoPaymentMode,
+  UserFileRecord,
   UserProfile,
 } from '../types/editor';
 
@@ -28,6 +35,8 @@ export interface TelegramConfigResponse {
   webhookSecretConfigured: boolean;
   kvConfigured: boolean;
   dbDriver?: string;
+  telegramOnlyMode?: boolean;
+  supportUsername?: string;
 }
 
 export interface TelegramAccountResponse {
@@ -203,6 +212,7 @@ export async function fetchTelegramAccountMe(sessionToken?: string | null): Prom
   account?: TelegramAccountResponse;
   isAdmin?: boolean;
   isManager?: boolean;
+  isSupport?: boolean;
   staffRole?: StaffRole;
   managerPermissions?: ManagerPermission[];
 } | null> {
@@ -219,6 +229,7 @@ export async function fetchTelegramAccountMe(sessionToken?: string | null): Prom
       account?: TelegramAccountResponse;
       isAdmin?: boolean;
       isManager?: boolean;
+      isSupport?: boolean;
       staffRole?: StaffRole;
       managerPermissions?: ManagerPermission[];
     };
@@ -397,6 +408,7 @@ export interface AdminStatusResponse {
   ok: boolean;
   isAdmin: boolean;
   isManager?: boolean;
+  isSupport?: boolean;
   staffRole?: StaffRole;
   permissions?: ManagerPermission[];
   passwordConfigured: boolean;
@@ -633,6 +645,8 @@ export async function adminUpsertManager(
     firstName: string;
     username?: string;
     roleTitle: string;
+    roleType?: 'manager' | 'support';
+    isSupportDefault?: boolean;
     permissions: ManagerPermission[];
     password?: string;
     isActive: boolean;
@@ -1027,6 +1041,394 @@ export async function adminListAuditLogs(
   const data = (await res.json().catch(() => ({}))) as { logs?: AdminAuditRow[]; error?: string };
   if (!res.ok) return { logs: [], error: data.error };
   return { logs: Array.isArray(data.logs) ? data.logs : [] };
+}
+
+export async function fetchSupportInfo(sessionToken?: string | null): Promise<{
+  ok: boolean;
+  agent: SupportAgentPublic | null;
+  ticket: SupportTicketRow | null;
+  messages: InboxMessageRow[];
+  botUsername?: string | null;
+} | null> {
+  try {
+    const res = await fetch('/api/support/info', {
+      credentials: 'same-origin',
+      headers: getTelegramAuthHeaders(sessionToken),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as {
+      ok?: boolean;
+      supportAgent?: SupportAgentPublic | null;
+      agent?: SupportAgentPublic | null;
+      ticket?: SupportTicketRow | null;
+      messages?: InboxMessageRow[];
+      botUsername?: string | null;
+    };
+    return {
+      ok: Boolean(data.ok),
+      agent: data.supportAgent || data.agent || null,
+      ticket: data.ticket || null,
+      messages: Array.isArray(data.messages) ? data.messages : [],
+      botUsername: data.botUsername || null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function sendUserSupportMessage(
+  sessionToken: string,
+  message: string,
+  subject?: string
+): Promise<{
+  ok: boolean;
+  ticket?: SupportTicketRow;
+  message?: InboxMessageRow;
+  error?: string;
+}> {
+  try {
+    const res = await fetch('/api/support/messages', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {
+        'Content-Type': 'application/json',
+        ...getTelegramAuthHeaders(sessionToken),
+      },
+      body: JSON.stringify({ message, subject }),
+    });
+    const data = (await res.json().catch(() => ({}))) as {
+      ok?: boolean;
+      ticket?: SupportTicketRow;
+      message?: InboxMessageRow;
+      error?: string;
+    };
+    if (!res.ok) return { ok: false, error: data.error || 'Xabar yuborilmadi.' };
+    return { ok: true, ticket: data.ticket, message: data.message };
+  } catch {
+    return { ok: false, error: "Server bilan bog'lanishda xatolik." };
+  }
+}
+
+export async function fetchUserSavedFiles(sessionToken?: string | null): Promise<{
+  files: UserFileRecord[];
+  projects: ProjectSummary[];
+} | null> {
+  if (!sessionToken) return null;
+  try {
+    const res = await fetch('/api/files', {
+      credentials: 'same-origin',
+      headers: getTelegramAuthHeaders(sessionToken),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as {
+      ok?: boolean;
+      files?: UserFileRecord[];
+      projects?: ProjectSummary[];
+    };
+    return {
+      files: Array.isArray(data.files) ? data.files : [],
+      projects: Array.isArray(data.projects) ? data.projects : [],
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function adminListSupportTickets(
+  sessionToken: string,
+  adminToken: string
+): Promise<{
+  tickets: SupportTicketRow[];
+  supportAgents: Array<{
+    telegramId: string;
+    firstName: string;
+    username?: string;
+    roleTitle: string;
+    isSupportDefault?: boolean;
+  }>;
+  error?: string;
+}> {
+  const res = await fetch('/api/admin/support/tickets', {
+    credentials: 'same-origin',
+    headers: getAdminHeaders(sessionToken, adminToken),
+  });
+  const data = (await res.json().catch(() => ({}))) as {
+    tickets?: SupportTicketRow[];
+    supportAgents?: Array<{
+      telegramId: string;
+      firstName: string;
+      username?: string;
+      roleTitle: string;
+      isSupportDefault?: boolean;
+    }>;
+    error?: string;
+  };
+  if (!res.ok) return { tickets: [], supportAgents: [], error: data.error };
+  return {
+    tickets: Array.isArray(data.tickets) ? data.tickets : [],
+    supportAgents: Array.isArray(data.supportAgents) ? data.supportAgents : [],
+  };
+}
+
+export async function adminGetSupportThread(
+  sessionToken: string,
+  adminToken: string,
+  targetTelegramId: string
+): Promise<{
+  ticket: SupportTicketRow | null;
+  messages: InboxMessageRow[];
+  userDetail: AdminUserDetailPayload | null;
+  error?: string;
+}> {
+  const res = await fetch(
+    `/api/admin/support/tickets/${encodeURIComponent(targetTelegramId)}`,
+    {
+      credentials: 'same-origin',
+      headers: getAdminHeaders(sessionToken, adminToken),
+    }
+  );
+  const data = (await res.json().catch(() => ({}))) as {
+    ticket?: SupportTicketRow | null;
+    messages?: InboxMessageRow[];
+    userDetail?: AdminUserDetailPayload | null;
+    error?: string;
+  };
+  if (!res.ok) return { ticket: null, messages: [], userDetail: null, error: data.error };
+  return {
+    ticket: data.ticket || null,
+    messages: Array.isArray(data.messages) ? data.messages : [],
+    userDetail: data.userDetail || null,
+  };
+}
+
+export async function adminReplySupportTicket(
+  sessionToken: string,
+  adminToken: string,
+  targetTelegramId: string,
+  message: string,
+  channel: 'site' | 'telegram' | 'both' = 'both'
+): Promise<{
+  ok: boolean;
+  ticket?: SupportTicketRow;
+  message?: InboxMessageRow;
+  telegramSent?: boolean;
+  error?: string;
+}> {
+  const res = await fetch(
+    `/api/admin/support/tickets/${encodeURIComponent(targetTelegramId)}/reply`,
+    {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {
+        'Content-Type': 'application/json',
+        ...getAdminHeaders(sessionToken, adminToken),
+      },
+      body: JSON.stringify({ message, channel }),
+    }
+  );
+  const data = (await res.json().catch(() => ({}))) as {
+    ok?: boolean;
+    ticket?: SupportTicketRow;
+    message?: InboxMessageRow;
+    telegramSent?: boolean;
+    error?: string;
+  };
+  if (!res.ok) return { ok: false, error: data.error || 'Javob yuborilmadi.' };
+  return {
+    ok: true,
+    ticket: data.ticket,
+    message: data.message,
+    telegramSent: data.telegramSent,
+  };
+}
+
+export async function adminAssignSupportTicket(
+  sessionToken: string,
+  adminToken: string,
+  targetTelegramId: string,
+  assignedTo: string | null
+): Promise<{ ok: boolean; assignedTo?: string | null; assignedName?: string | null; error?: string }> {
+  const res = await fetch(
+    `/api/admin/support/tickets/${encodeURIComponent(targetTelegramId)}/assign`,
+    {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {
+        'Content-Type': 'application/json',
+        ...getAdminHeaders(sessionToken, adminToken),
+      },
+      body: JSON.stringify({ assignedTo }),
+    }
+  );
+  const data = (await res.json().catch(() => ({}))) as {
+    ok?: boolean;
+    assignedTo?: string | null;
+    assignedName?: string | null;
+    error?: string;
+  };
+  if (!res.ok) return { ok: false, error: data.error || 'Biriktirib bo‘lmadi.' };
+  return { ok: true, assignedTo: data.assignedTo, assignedName: data.assignedName };
+}
+
+export async function adminUpdateSupportStatus(
+  sessionToken: string,
+  adminToken: string,
+  targetTelegramId: string,
+  status: SupportTicketStatus
+): Promise<{ ok: boolean; status?: SupportTicketStatus; error?: string }> {
+  const res = await fetch(
+    `/api/admin/support/tickets/${encodeURIComponent(targetTelegramId)}/status`,
+    {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {
+        'Content-Type': 'application/json',
+        ...getAdminHeaders(sessionToken, adminToken),
+      },
+      body: JSON.stringify({ status }),
+    }
+  );
+  const data = (await res.json().catch(() => ({}))) as {
+    ok?: boolean;
+    status?: SupportTicketStatus;
+    error?: string;
+  };
+  if (!res.ok) return { ok: false, error: data.error || "Holatni o'zgartirib bo'lmadi." };
+  return { ok: true, status: data.status };
+}
+
+export async function adminListSecurityLogs(
+  sessionToken: string,
+  adminToken: string
+): Promise<{ logs: SecurityLogRow[]; lastScan: SecurityScanReport | null; error?: string }> {
+  const res = await fetch('/api/admin/security/logs', {
+    credentials: 'same-origin',
+    headers: getAdminHeaders(sessionToken, adminToken),
+  });
+  const data = (await res.json().catch(() => ({}))) as {
+    logs?: SecurityLogRow[];
+    lastScan?: SecurityScanReport | null;
+    error?: string;
+  };
+  if (!res.ok) return { logs: [], lastScan: null, error: data.error };
+  return {
+    logs: Array.isArray(data.logs) ? data.logs : [],
+    lastScan: data.lastScan || null,
+  };
+}
+
+export async function adminResolveSecurityLog(
+  sessionToken: string,
+  adminToken: string,
+  logId: string
+): Promise<{ ok: boolean; error?: string }> {
+  const res = await fetch(`/api/admin/security/logs/${encodeURIComponent(logId)}/resolve`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: getAdminHeaders(sessionToken, adminToken),
+  });
+  const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+  if (!res.ok) return { ok: false, error: data.error || 'Log yopilmadi.' };
+  return { ok: true };
+}
+
+export async function adminRunSecurityScan(
+  sessionToken: string,
+  adminToken: string
+): Promise<{ ok: boolean; report?: SecurityScanReport; error?: string }> {
+  const res = await fetch('/api/admin/security/scan', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: getAdminHeaders(sessionToken, adminToken),
+  });
+  const data = (await res.json().catch(() => ({}))) as {
+    ok?: boolean;
+    report?: SecurityScanReport;
+    error?: string;
+  };
+  if (!res.ok || !data.report) {
+    return { ok: false, error: data.error || 'Skaner ishga tushmadi.' };
+  }
+  return { ok: true, report: data.report };
+}
+
+export async function adminAnalyzeSecurityLogs(
+  sessionToken: string,
+  adminToken: string,
+  notifyStaff = true
+): Promise<{
+  ok: boolean;
+  unresolvedCount?: number;
+  criticalCount?: number;
+  topCategories?: Array<[string, number]>;
+  topIps?: Array<[string, number]>;
+  analysisText?: string;
+  alertSent?: boolean;
+  error?: string;
+}> {
+  const res = await fetch('/api/admin/security/analyze', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: {
+      'Content-Type': 'application/json',
+      ...getAdminHeaders(sessionToken, adminToken),
+    },
+    body: JSON.stringify({ notifyStaff }),
+  });
+  const data = (await res.json().catch(() => ({}))) as {
+    ok?: boolean;
+    unresolvedCount?: number;
+    criticalCount?: number;
+    topCategories?: Array<[string, number]>;
+    topIps?: Array<[string, number]>;
+    analysisText?: string;
+    alertSent?: boolean;
+    error?: string;
+  };
+  if (!res.ok) return { ok: false, error: data.error || 'Log tahlili bajarilmadi.' };
+  return {
+    ok: true,
+    unresolvedCount: data.unresolvedCount,
+    criticalCount: data.criticalCount,
+    topCategories: data.topCategories,
+    topIps: data.topIps,
+    analysisText: data.analysisText,
+    alertSent: data.alertSent,
+  };
+}
+
+export async function adminSetupTelegramWebhook(
+  sessionToken: string,
+  adminToken: string
+): Promise<{
+  ok: boolean;
+  webhookUrl?: string;
+  botUsername?: string | null;
+  commandsUpdated?: boolean;
+  menuButtonUpdated?: boolean;
+  error?: string;
+}> {
+  const res = await fetch('/api/admin/telegram/setup-webhook', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: getAdminHeaders(sessionToken, adminToken),
+  });
+  const data = (await res.json().catch(() => ({}))) as {
+    ok?: boolean;
+    webhookUrl?: string;
+    botUsername?: string | null;
+    commandsUpdated?: boolean;
+    menuButtonUpdated?: boolean;
+    error?: string;
+  };
+  if (!res.ok) return { ok: false, error: data.error || 'Webhook sozlanmadi.' };
+  return {
+    ok: true,
+    webhookUrl: data.webhookUrl,
+    botUsername: data.botUsername,
+    commandsUpdated: data.commandsUpdated,
+    menuButtonUpdated: data.menuButtonUpdated,
+  };
 }
 
 

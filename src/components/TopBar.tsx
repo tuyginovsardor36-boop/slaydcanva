@@ -3,6 +3,7 @@ import {
   Download,
   FileText,
   FileType2,
+  Headphones,
   ImageDown,
   Loader2,
   Presentation,
@@ -32,6 +33,7 @@ interface TopBarProps {
   onResetCurrent: () => void;
   onOpenTopUp?: () => void;
   onOpenProfile?: () => void;
+  onOpenSupport?: () => void;
   isAdmin?: boolean;
   staffRole?: StaffRole;
   onOpenAdminPanel?: () => void;
@@ -41,6 +43,7 @@ interface TopBarProps {
 
 const MOBILE_TAB_TITLES: Record<MobileTab, string> = {
   home: 'Bosh sahifa',
+  files: 'Fayllar va Amaliyotlar',
   editor: 'Slayd qilish',
   topup: "Balans to'ldirish",
   balance: 'Balans',
@@ -63,6 +66,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   onResetCurrent,
   onOpenTopUp,
   onOpenProfile,
+  onOpenSupport,
   isAdmin = false,
   staffRole = 'user',
   onOpenAdminPanel,
@@ -216,17 +220,41 @@ export const TopBar: React.FC<TopBarProps> = ({
                 )}
               </button>
             )}
-            {(isAdmin || staffRole === 'super_admin' || staffRole === 'manager') && onOpenAdminPanel && (
+            {onOpenSupport && (
               <button
                 type="button"
-                onClick={onOpenAdminPanel}
-                title={staffRole === 'manager' ? 'Menejer CRM Boshqaruv Paneli' : 'Admin CRM Boshqaruv Paneli'}
-                className="flex items-center gap-1.5 text-xs bg-red-600 hover:bg-red-500 border border-red-500 rounded-md px-2.5 py-1.5 text-white font-medium transition-colors whitespace-nowrap shrink-0"
+                onClick={onOpenSupport}
+                title="Support va Yordam"
+                className="flex items-center gap-1.5 text-xs bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 rounded-md px-2.5 py-1.5 text-zinc-300 hover:text-white transition-colors"
               >
-                <Shield className="w-3.5 h-3.5" />
-                <span>{staffRole === 'manager' ? 'Menejer · CRM' : 'Admin · CRM'}</span>
+                <Headphones className="w-3.5 h-3.5 text-red-500" />
+                <span>Support</span>
               </button>
             )}
+            {(isAdmin || staffRole === 'super_admin' || staffRole === 'manager' || staffRole === 'support') &&
+              onOpenAdminPanel && (
+                <button
+                  type="button"
+                  onClick={onOpenAdminPanel}
+                  title={
+                    staffRole === 'support'
+                      ? 'Support CRM Boshqaruv Paneli'
+                      : staffRole === 'manager'
+                        ? 'Menejer CRM Boshqaruv Paneli'
+                        : 'Admin CRM Boshqaruv Paneli'
+                  }
+                  className="flex items-center gap-1.5 text-xs bg-red-600 hover:bg-red-500 border border-red-500 rounded-md px-2.5 py-1.5 text-white font-medium transition-colors whitespace-nowrap shrink-0"
+                >
+                  <Shield className="w-3.5 h-3.5" />
+                  <span>
+                    {staffRole === 'support'
+                      ? 'Support · CRM'
+                      : staffRole === 'manager'
+                        ? 'Menejer · CRM'
+                        : 'Admin · CRM'}
+                  </span>
+                </button>
+              )}
           </div>
         ) : (
           <>

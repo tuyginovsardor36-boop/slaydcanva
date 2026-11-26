@@ -1,5 +1,5 @@
 import React from 'react';
-import { Home, Plus, Presentation, User, Wallet } from 'lucide-react';
+import { FolderOpen, Home, Plus, User, Wallet } from 'lucide-react';
 import { MobileTab } from '../types/editor';
 
 interface MobileBottomNavProps {
@@ -43,28 +43,28 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
           </span>
         </button>
 
-        {/* 2. Slayd qilish */}
+        {/* 2. Fayllar va Amaliyotlar (Telegramda saqlanadi) */}
         <button
           type="button"
-          onClick={() => onSelectTab('editor')}
-          aria-pressed={activeTab === 'editor'}
+          onClick={() => onSelectTab('files')}
+          aria-pressed={activeTab === 'files'}
           className="min-h-[44px] flex flex-col items-center justify-center gap-0.5 active:scale-95 transition-transform"
         >
           <span
             className={`w-11 h-7 rounded-full border flex items-center justify-center transition-colors ${
-              activeTab === 'editor'
+              activeTab === 'files'
                 ? 'bg-white border-white text-zinc-950'
                 : 'bg-zinc-900 border-zinc-800 text-zinc-400'
             }`}
           >
-            <Presentation className="w-4 h-4" />
+            <FolderOpen className="w-4 h-4" />
           </span>
           <span
             className={`text-[10px] font-medium leading-none truncate max-w-full ${
-              activeTab === 'editor' ? 'text-white' : 'text-zinc-400'
+              activeTab === 'files' ? 'text-white' : 'text-zinc-400'
             }`}
           >
-            Slayd qilish
+            Fayllar
           </span>
         </button>
 

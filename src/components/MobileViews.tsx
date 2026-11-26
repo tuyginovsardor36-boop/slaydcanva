@@ -10,6 +10,7 @@ import {
   FileType2,
   FolderOpen,
   Gift,
+  Headphones,
   Loader2,
   LogOut,
   Plus,
@@ -30,19 +31,26 @@ import {
   AiServiceId,
   AppPricingSettings,
   BalanceTransaction,
+  InboxMessageRow,
   ManagerPermission,
   MobileTab,
   ProjectSummary,
   StaffRole,
+  SupportAgentPublic,
+  SupportTicketRow,
   TelegramUser,
   TolovgoPaymentMode,
+  UserFileRecord,
   UserProfile,
   WorkspaceMode,
 } from '../types/editor';
 import {
+  fetchSupportInfo,
+  fetchUserSavedFiles,
   formatTelegramDisplayName,
   getTelegramAuthHeaders,
   redeemPromoCode,
+  sendUserSupportMessage,
   TelegramAccountResponse,
   TelegramConfigResponse,
 } from '../utils/telegramClient';
@@ -758,6 +766,513 @@ export const BalanceView: React.FC<BalanceViewProps> = ({
   );
 };
 
+interface SupportClientPanelProps {
+  telegramSessionToken?: string | null;
+  telegramUser?: TelegramUser | null;
+  botUsername?: string | null;
+  supportUsername?: string;
+  compact?: boolean;
+  onNotify?: (type: 'ok' | 'err', text: string) => void;
+}
+
+export const SupportClientPanel: React.FC<SupportClientPanelProps> = ({
+  telegramSessionToken = null,
+  telegramUser = null,
+  botUsername = null,
+  supportUsername,
+  compact = false,
+  onNotify,
+}) => {
+  const [loading, setLoading] = useState(true);
+  const [agent, setAgent] = useState<SupportAgentPublic | null>(null);
+  const [ticket, setTicket] = useState<SupportTicketRow | null>(null);
+  const [messages, setMessages] = useState<InboxMessageRow[]>([]);
+  const [subject, setSubject] = useState('');
+  const [text, setText] = useState('');
+  const [sending, setSending] = useState(false);
+
+  const loadSupport = useCallback(async () => {
+    const res = await fetchSupportInfo(telegramSessionToken);
+    if (res) {
+      setAgent(res.agent);
+      setTicket(res.ticket);
+      setMessages(res.messages);
+    }
+    setLoading(false);
+  }, [telegramSessionToken]);
+
+  useEffect(() => {
+    void loadSupport();
+    const timer = window.setInterval(() => {
+      void loadSupport();
+    }, 10000);
+    return () => window.clearInterval(timer);
+  }, [loadSupport]);
+
+  const handleSend = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!telegramSessionToken || !text.trim() || sending) return;
+    setSending(true);
+    try {
+      const res = await sendUserSupportMessage(
+        telegramSessionToken,
+        text.trim(),
+        subject.trim() || undefined
+      );
+      if (!res.ok) {
+        onNotify?.('err', res.error || "Xabar yuborilmadi.");
+        return;
+      }
+      setText('');
+      if (res.ticket) setTicket(res.ticket);
+      if (res.message) setMessages((prev) => [...prev, res.message!]);
+      onNotify?.('ok', 'Support xizmatiga xabaringiz yuborildi.');
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const agentUsername = (agent?.username || supportUsername || '').replace(/^@/, '');
+
+  return (
+    <section
+      className={`${
+        compact ? '' : 'max-w-md mx-auto'
+      } bg-white border border-zinc-200 rounded-2xl p-4 sm:p-5 space-y-3.5`}
+    >
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <h2 className="text-sm font-semibold text-zinc-900 flex items-center gap-1.5">
+            <Headphones className="w-4 h-4 text-red-600" />
+            <span>Support va Jonli Yordam</span>
+          </h2>
+          <p className="text-[11px] text-zinc-500 mt-0.5 leading-snug">
+            Savollaringizga biriktirilgan mutaxassis sayt va Telegram lichkangiz orqali javob beradi.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => void loadSupport()}
+          className="p-1.5 rounded-lg border border-zinc-200 text-zinc-500 hover:text-zinc-900 hover:bg-zinc-50 shrink-0"
+          aria-label="Yangilash"
+        >
+          <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+        </button>
+      </div>
+
+      {/* Biriktirilgan Support mutaxassisi */}
+      <div className="p-3 rounded-xl bg-zinc-50 border border-zinc-200/80 flex items-center justify-between gap-2">
+        <div className="min-w-0">
+          <div className="text-[11px] text-zinc-500">Mas'ul mutaxassis</div>
+          <div className="text-xs font-semibold text-zinc-900 truncate mt-0.5">
+            {agent ? `${agent.firstName} · ${agent.roleTitle}` : 'SlaydCanva Support Jamoasi'}
+          </div>
+          {ticket && (
+            <div className="text-[10px] font-mono text-zinc-500 mt-0.5">
+              Murojaat holati:{' '}
+              <span
+                className={
+                  ticket.status === 'resolved'
+                    ? 'text-emerald-700 font-semibold'
+                    : ticket.status === 'pending'
+                      ? 'text-amber-700 font-semibold'
+                      : 'text-red-600 font-semibold'
+                }
+              >
+                {ticket.status === 'resolved'
+                  ? 'Hal qilingan'
+                  : ticket.status === 'pending'
+                    ? 'Kutilmoqda'
+                    : 'Ochiq'}
+              </span>
+            </div>
+          )}
+        </div>
+        {agentUsername ? (
+          <a
+            href={`https://t.me/${agentUsername}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="px-2.5 py-1.5 rounded-lg bg-[#111113] hover:bg-zinc-800 text-white text-[11px] font-medium flex items-center gap-1 shrink-0"
+          >
+            <Send className="w-3 h-3" />
+            <span>@{agentUsername}</span>
+          </a>
+        ) : botUsername ? (
+          <a
+            href={`https://t.me/${botUsername}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="px-2.5 py-1.5 rounded-lg bg-[#111113] hover:bg-zinc-800 text-white text-[11px] font-medium flex items-center gap-1 shrink-0"
+          >
+            <Send className="w-3 h-3" />
+            <span>Botda yozish</span>
+          </a>
+        ) : null}
+      </div>
+
+      {/* Chat tarixi */}
+      {telegramUser && telegramSessionToken ? (
+        <>
+          <div className="border border-zinc-200 rounded-xl bg-zinc-50/70 p-3 max-h-56 overflow-y-auto space-y-2">
+            {loading && messages.length === 0 ? (
+              <div className="py-6 text-center text-xs text-zinc-400">Yuklanmoqda...</div>
+            ) : messages.length === 0 ? (
+              <div className="py-6 text-center text-xs text-zinc-400">
+                Hali yozishmalar yo‘q. Savolingizni quyida yozib qoldiring.
+              </div>
+            ) : (
+              messages.map((m) => {
+                const isUser = m.senderRole === 'user';
+                const d = new Date(m.createdAt);
+                const hhmm = `${String(d.getHours()).padStart(2, '0')}:${String(
+                  d.getMinutes()
+                ).padStart(2, '0')}`;
+                return (
+                  <div
+                    key={m.id}
+                    className={`flex flex-col ${isUser ? 'items-end' : 'items-start'}`}
+                  >
+                    <div
+                      className={`max-w-[85%] rounded-2xl px-3 py-2 text-xs leading-relaxed ${
+                        isUser
+                          ? 'bg-[#111113] text-white rounded-br-sm'
+                          : 'bg-white border border-zinc-200 text-zinc-900 rounded-bl-sm'
+                      }`}
+                    >
+                      {!isUser && (
+                        <div className="text-[10px] font-semibold text-red-600 mb-0.5">
+                          {m.senderName} · Support
+                        </div>
+                      )}
+                      <div className="whitespace-pre-wrap break-words">{m.message}</div>
+                      <div
+                        className={`text-[9px] font-mono mt-1 ${
+                          isUser ? 'text-zinc-400' : 'text-zinc-400'
+                        }`}
+                      >
+                        {hhmm} · {m.channel === 'telegram' ? 'Telegram' : m.channel === 'both' ? 'Sayt + TG' : 'Sayt'}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+
+          <form onSubmit={handleSend} className="space-y-2">
+            {messages.length === 0 && (
+              <input
+                type="text"
+                value={subject}
+                onChange={(e) => setSubject(e.target.value)}
+                placeholder="Murojaat mavzusi (masalan: To'lov yoki slayd haqida)"
+                className="w-full text-xs text-zinc-900 bg-zinc-50 border border-zinc-200 focus:border-red-600 focus:bg-white rounded-xl px-3 py-2 outline-none"
+              />
+            )}
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                placeholder="Support mutaxassisiga xabar yozing..."
+                className="flex-1 min-w-0 text-xs text-zinc-900 bg-zinc-50 border border-zinc-200 focus:border-red-600 focus:bg-white rounded-xl px-3 py-2.5 outline-none"
+              />
+              <button
+                type="submit"
+                disabled={sending || !text.trim()}
+                className="px-3.5 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-45 text-white text-xs font-semibold flex items-center gap-1 shrink-0 transition-colors"
+              >
+                {sending ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Send className="w-3.5 h-3.5" />
+                )}
+                <span>Yuborish</span>
+              </button>
+            </div>
+          </form>
+        </>
+      ) : (
+        <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-800">
+          Supportga yozish uchun Telegram hisobingiz bilan kiring.
+        </div>
+      )}
+    </section>
+  );
+};
+
+interface FilesAndOpsViewProps {
+  telegramSessionToken?: string | null;
+  telegramUser?: TelegramUser | null;
+  botUsername?: string | null;
+  savedProjects: ProjectSummary[];
+  activeProjectId?: string;
+  transactions: BalanceTransaction[];
+  syncingProject?: boolean;
+  onSaveProjectNow?: () => void;
+  onLoadCloudProject?: (id: string) => void;
+  onDeleteCloudProject?: (id: string) => void;
+  onSendCurrentToTelegram?: () => void;
+  onOpenEditor: (mode: WorkspaceMode) => void;
+  onOpenTab: (tab: MobileTab) => void;
+}
+
+export const FilesAndOpsView: React.FC<FilesAndOpsViewProps> = ({
+  telegramSessionToken = null,
+  telegramUser = null,
+  botUsername = null,
+  savedProjects,
+  activeProjectId,
+  transactions,
+  syncingProject = false,
+  onSaveProjectNow,
+  onLoadCloudProject,
+  onDeleteCloudProject,
+  onSendCurrentToTelegram,
+  onOpenEditor,
+  onOpenTab,
+}) => {
+  const [files, setFiles] = useState<UserFileRecord[]>([]);
+  const [loadingFiles, setLoadingFiles] = useState(false);
+
+  const refreshFiles = useCallback(async () => {
+    if (!telegramSessionToken) return;
+    setLoadingFiles(true);
+    try {
+      const res = await fetchUserSavedFiles(telegramSessionToken);
+      if (res?.files) {
+        setFiles(res.files);
+      }
+    } finally {
+      setLoadingFiles(false);
+    }
+  }, [telegramSessionToken]);
+
+  useEffect(() => {
+    void refreshFiles();
+  }, [refreshFiles]);
+
+  const formatFileSize = (bytes: number) => {
+    if (!bytes) return '—';
+    if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  };
+
+  return (
+    <main className="flex-1 overflow-y-auto bg-[#F4F4F6] px-4 py-5 space-y-5">
+      {/* Telegram Storage Banner */}
+      <section className="max-w-md mx-auto bg-[#111113] text-white border border-zinc-800 rounded-2xl p-4 space-y-3">
+        <div className="flex items-start justify-between gap-2">
+          <div>
+            <div className="flex items-center gap-1.5 text-sm font-semibold">
+              <Send className="w-4 h-4 text-sky-400" />
+              <span>Telegramda saqlangan fayllar</span>
+            </div>
+            <p className="text-[11px] text-zinc-400 mt-0.5 leading-snug">
+              Tayyorlangan PPTX, PDF, Word va PNG fayllar avtomatik ravishda Telegram bot chatiga yuboriladi va shu yerda qayd etiladi.
+            </p>
+          </div>
+          {botUsername && (
+            <a
+              href={`https://t.me/${botUsername}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs font-medium text-white flex items-center gap-1 shrink-0"
+            >
+              <span>Bot</span>
+              <ExternalLink className="w-3 h-3" />
+            </a>
+          )}
+        </div>
+
+        <div className="grid grid-cols-2 gap-2">
+          {onSendCurrentToTelegram && (
+            <button
+              type="button"
+              onClick={onSendCurrentToTelegram}
+              className="py-2 px-3 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors"
+            >
+              <Send className="w-3.5 h-3.5" />
+              <span>Joriy faylni TG ga</span>
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => onOpenEditor('pptx')}
+            className="py-2 px-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-white text-xs font-medium flex items-center justify-center gap-1.5 transition-colors"
+          >
+            <Presentation className="w-3.5 h-3.5" />
+            <span>Muharrirni ochish</span>
+          </button>
+        </div>
+      </section>
+
+      {/* Telegram-exported files list */}
+      <section className="max-w-md mx-auto bg-white border border-zinc-200 rounded-2xl overflow-hidden">
+        <div className="px-4 py-3 border-b border-zinc-200 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-1.5">
+            <FolderOpen className="w-4 h-4 text-red-600" />
+            <h2 className="text-sm font-semibold text-zinc-900">
+              Eksport qilingan fayllar ({files.length})
+            </h2>
+          </div>
+          <button
+            type="button"
+            onClick={() => void refreshFiles()}
+            className="p-1.5 rounded-lg border border-zinc-200 text-zinc-500 hover:text-zinc-900"
+            aria-label="Yangilash"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${loadingFiles ? 'animate-spin' : ''}`} />
+          </button>
+        </div>
+
+        <div className="divide-y divide-zinc-100">
+          {!telegramUser ? (
+            <div className="p-5 text-center text-xs text-zinc-500">
+              Fayllar tarixi uchun Telegram orqali kiring.
+            </div>
+          ) : files.length === 0 ? (
+            <div className="p-5 text-center text-xs text-zinc-500">
+              Hali Telegramga yuborilgan fayllar yo‘q. AI xizmat yoki muharrirdan yuklab oling — shu yerda va Telegramda saqlanadi.
+            </div>
+          ) : (
+            files.map((f) => (
+              <div key={f.id} className="px-4 py-3 flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-xs font-semibold text-zinc-900 truncate">{f.fileName}</div>
+                  <div className="text-[11px] font-mono text-zinc-500 flex items-center gap-1.5 mt-0.5">
+                    <span className="uppercase font-semibold text-red-600">{f.format}</span>
+                    <span>·</span>
+                    <span>{formatFileSize(f.sizeBytes)}</span>
+                    <span>·</span>
+                    <span>{new Date(f.createdAt).toLocaleDateString('uz-UZ')}</span>
+                  </div>
+                </div>
+                {botUsername ? (
+                  <a
+                    href={`https://t.me/${botUsername}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="px-2.5 py-1.5 rounded-lg bg-sky-50 border border-sky-200 text-sky-700 text-[11px] font-medium shrink-0 flex items-center gap-1"
+                  >
+                    <Send className="w-3 h-3" />
+                    <span>TG Chat</span>
+                  </a>
+                ) : (
+                  <span className="text-[11px] text-emerald-700 font-medium shrink-0">
+                    Saqlangan
+                  </span>
+                )}
+              </div>
+            ))
+          )}
+        </div>
+      </section>
+
+      {/* Bulutli Loyihalar */}
+      {telegramUser && (
+        <section className="max-w-md mx-auto bg-white border border-zinc-200 rounded-2xl overflow-hidden">
+          <div className="px-4 py-3 border-b border-zinc-200 flex items-center justify-between gap-2">
+            <h2 className="text-sm font-semibold text-zinc-900">
+              Bulutli loyihalar ({savedProjects.length})
+            </h2>
+            {onSaveProjectNow && (
+              <button
+                type="button"
+                disabled={syncingProject}
+                onClick={onSaveProjectNow}
+                className="px-2.5 py-1.5 rounded-lg bg-[#111113] text-white text-[11px] font-medium flex items-center gap-1 disabled:opacity-50"
+              >
+                {syncingProject ? (
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                ) : (
+                  <Save className="w-3 h-3" />
+                )}
+                <span>Saqlash</span>
+              </button>
+            )}
+          </div>
+          <div className="divide-y divide-zinc-100">
+            {savedProjects.length === 0 ? (
+              <div className="p-5 text-center text-xs text-zinc-500">Saqlangan loyihalar yo‘q.</div>
+            ) : (
+              savedProjects.map((proj) => (
+                <div
+                  key={proj.id}
+                  className={`px-4 py-3 flex items-center justify-between gap-2 ${
+                    proj.id === activeProjectId ? 'bg-red-50/40' : ''
+                  }`}
+                >
+                  <button
+                    type="button"
+                    onClick={() => onLoadCloudProject?.(proj.id)}
+                    className="min-w-0 flex-1 text-left"
+                  >
+                    <div className="text-xs font-semibold text-zinc-900 truncate">
+                      {proj.title}
+                    </div>
+                    <div className="text-[11px] font-mono text-zinc-500 mt-0.5">
+                      {proj.mode.toUpperCase()} · {proj.pptxCount} slayd · {proj.pdfCount} PDF
+                    </div>
+                  </button>
+                  {onDeleteCloudProject && (
+                    <button
+                      type="button"
+                      onClick={() => onDeleteCloudProject(proj.id)}
+                      className="p-1.5 rounded-lg text-zinc-400 hover:text-red-600"
+                      aria-label="Loyihani o'chirish"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+              ))
+            )}
+          </div>
+        </section>
+      )}
+
+      {/* Oxirgi Amaliyotlar */}
+      <section className="max-w-md mx-auto bg-white border border-zinc-200 rounded-2xl overflow-hidden">
+        <div className="px-4 py-3 border-b border-zinc-200 flex items-center justify-between gap-2">
+          <h2 className="text-sm font-semibold text-zinc-900">So‘nggi amaliyotlar</h2>
+          <button
+            type="button"
+            onClick={() => onOpenTab('balance')}
+            className="text-xs font-medium text-red-600 hover:underline"
+          >
+            Barchasi
+          </button>
+        </div>
+        <div className="divide-y divide-zinc-100">
+          {transactions.length === 0 ? (
+            <div className="p-5 text-center text-xs text-zinc-400">Hozircha amaliyotlar yo‘q.</div>
+          ) : (
+            transactions.slice(0, 6).map((tx) => (
+              <div key={tx.id} className="px-4 py-2.5 flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-xs font-medium text-zinc-900 truncate">{tx.title}</div>
+                  <div className="text-[11px] font-mono text-zinc-500">
+                    {tx.method} · {tx.date}
+                  </div>
+                </div>
+                <span
+                  className={`text-xs font-mono tabular-nums font-semibold shrink-0 ${
+                    tx.amount < 0 ? 'text-zinc-700' : 'text-emerald-700'
+                  }`}
+                >
+                  {tx.amount < 0 ? `-${formatSom(Math.abs(tx.amount))}` : `+${formatSom(tx.amount)}`}
+                </span>
+              </div>
+            ))
+          )}
+        </div>
+      </section>
+    </main>
+  );
+};
+
 interface ProfileViewProps {
   profile: UserProfile;
   balance: number;
@@ -767,8 +1282,10 @@ interface ProfileViewProps {
   staffRole?: StaffRole;
   pricingSettings?: AppPricingSettings;
   botUsername?: string | null;
+  supportUsername?: string;
   telegramUser?: TelegramUser | null;
   telegramSessionToken?: string | null;
+  onNotify?: (type: 'ok' | 'err', text: string) => void;
   onTelegramAuthenticated?: (payload: {
     user: TelegramUser;
     sessionToken: string;
@@ -776,6 +1293,7 @@ interface ProfileViewProps {
     kvConfigured?: boolean;
     isAdmin?: boolean;
     isManager?: boolean;
+    isSupport?: boolean;
     staffRole?: StaffRole;
     managerPermissions?: ManagerPermission[];
   }) => void;
@@ -802,8 +1320,10 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
   staffRole = 'user',
   pricingSettings,
   botUsername,
+  supportUsername,
   telegramUser,
   telegramSessionToken,
+  onNotify,
   onTelegramAuthenticated,
   onUpdateTelegramPrefs,
   onTelegramLogout,
@@ -871,6 +1391,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
           kvConfigured?: boolean;
           isAdmin?: boolean;
           isManager?: boolean;
+          isSupport?: boolean;
           staffRole?: StaffRole;
           managerPermissions?: ManagerPermission[];
         };
@@ -883,6 +1404,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
             kvConfigured: data.kvConfigured,
             isAdmin: data.isAdmin,
             isManager: data.isManager,
+            isSupport: data.isSupport,
             staffRole: data.staffRole,
             managerPermissions: data.managerPermissions,
           });
@@ -1249,31 +1771,51 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
         </section>
       )}
 
-      {/* Super Admin yoki Menejer uchun CRM Panelga kirish */}
-      {(isAdmin || staffRole === 'super_admin' || staffRole === 'manager') && onOpenAdminPanel && (
-        <section className="max-w-md mx-auto bg-[#111113] text-white border border-zinc-800 rounded-2xl p-5 flex items-center justify-between gap-3">
-          <div>
-            <div className="flex items-center gap-1.5 text-sm font-semibold">
-              <Shield className="w-4 h-4 text-red-500" />
-              <span>
-                {staffRole === 'manager' ? 'Menejer CRM Paneli' : 'Boshqaruv paneli (Admin CRM)'}
-              </span>
+      {/* Support va Jonli Yordam */}
+      <SupportClientPanel
+        telegramSessionToken={telegramSessionToken}
+        telegramUser={telegramUser}
+        botUsername={botUsername || tgConfig?.botUsername || null}
+        supportUsername={supportUsername || tgConfig?.supportUsername}
+        onNotify={onNotify}
+      />
+
+      {/* Super Admin, Menejer yoki Support xodimi uchun CRM Panelga kirish */}
+      {(isAdmin || staffRole === 'super_admin' || staffRole === 'manager' || staffRole === 'support') &&
+        onOpenAdminPanel && (
+          <section className="max-w-md mx-auto bg-[#111113] text-white border border-zinc-800 rounded-2xl p-5 flex items-center justify-between gap-3">
+            <div>
+              <div className="flex items-center gap-1.5 text-sm font-semibold">
+                <Shield className="w-4 h-4 text-red-500" />
+                <span>
+                  {staffRole === 'support'
+                    ? 'Support CRM Paneli'
+                    : staffRole === 'manager'
+                      ? 'Menejer CRM Paneli'
+                      : 'Boshqaruv paneli (Admin CRM)'}
+                </span>
+              </div>
+              <p className="text-[11px] text-zinc-400 mt-0.5">
+                {staffRole === 'support'
+                  ? 'Mijozlar Inbox yozishmalari (Telegram & Sayt) va yordam tiketlari'
+                  : staffRole === 'manager'
+                    ? 'CRM xabarnomalar, foydalanuvchilar, buyurtmalar va promokodlar'
+                    : '20+ kordinatali statistika, Support Inbox, Xavfsizlik skaneri va CRM'}
+              </p>
             </div>
-            <p className="text-[11px] text-zinc-400 mt-0.5">
-              {staffRole === 'manager'
-                ? 'CRM xabarnomalar, foydalanuvchilar, buyurtmalar va promokodlar'
-                : '20 xil CRM boshqaruvi, menejerlar, narxlar va TolovGo nazorati'}
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={onOpenAdminPanel}
-            className="px-4 py-2 rounded-full bg-red-600 hover:bg-red-500 text-white text-xs font-semibold transition-colors shrink-0 whitespace-nowrap"
-          >
-            {staffRole === 'manager' ? 'Menejer Panel' : 'Admin Panel'}
-          </button>
-        </section>
-      )}
+            <button
+              type="button"
+              onClick={onOpenAdminPanel}
+              className="px-4 py-2 rounded-full bg-red-600 hover:bg-red-500 text-white text-xs font-semibold transition-colors shrink-0 whitespace-nowrap"
+            >
+              {staffRole === 'support'
+                ? 'Support Panel'
+                : staffRole === 'manager'
+                  ? 'Menejer Panel'
+                  : 'Admin Panel'}
+            </button>
+          </section>
+        )}
 
       <form
         onSubmit={handleSave}

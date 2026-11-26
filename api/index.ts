@@ -1,5 +1,7 @@
 import 'dotenv/config';
 import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import express from 'express';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import {
@@ -7,13 +9,20 @@ import {
   DEFAULT_PRICING_SETTINGS,
   DbBroadcastLog,
   DbCrmEvent,
+  DbInboxMessage,
   DbManagerPermission,
   DbManagerRecord,
   DbPromoCode,
+  DbSecurityLog,
+  DbSupportTicket,
+  DbUserFileRecord,
+  dbAddInboxMessage,
   dbAdminAdjustBalance,
   dbAppendAuditLog,
   dbAppendCrmEvent,
+  dbAppendSecurityLog,
   dbApplyReferralBonus,
+  dbAssignSupportTicket,
   dbChargeAiService,
   dbClaimAdminPasswordIfUnset,
   dbCreditTolovgoOrder,
@@ -34,26 +43,35 @@ import {
   dbListBroadcastLogs,
   dbListBroadcastTargets,
   dbListCrmEvents,
+  dbListInboxMessages,
   dbListManagers,
   dbListOrdersAdmin,
   dbListProjects,
   dbListPromoCodes,
+  dbListSecurityLogs,
+  dbListSupportTickets,
+  dbListUserFiles,
   dbListUsersAdmin,
   dbLogActivity,
   dbLogBroadcast,
   dbMarkCrmEventsRead,
+  dbMarkThreadRead,
+  dbRecordUserFile,
   dbRedeemPromoCode,
   dbRefundAiCharge,
+  dbResolveSecurityLog,
   dbSaveAuthNonce,
   dbSaveProject,
   dbSetSetting,
   dbSetUserBanned,
+  dbUpdateSupportTicketStatus,
   dbUpdateUserCrm,
   dbUpdateUserPreferences,
   dbUpdateUserProfile,
   dbUpsertManager,
   dbUpsertPaymentOrder,
   dbUpsertPromoCode,
+  dbUpsertSupportTicket,
   isNeonConfigured,
 } from '../lib/db.ts';
 
@@ -2633,7 +2651,7 @@ function issueAdminCookieAndToken(
   req: express.Request,
   res: express.Response,
   telegramId: string,
-  role: 'super_admin' | 'manager'
+  role: 'super_admin' | 'manager' | 'support'
 ): string {
   const token = signToken(
     { kind: 'admin_session', tid: telegramId, role },
@@ -2837,6 +2855,8 @@ const ALL_MANAGER_PERMISSIONS: DbManagerPermission[] = [
   'promos',
   'broadcast',
   'settings',
+  'support',
+  'security',
 ];
 
 interface SiteConfigSettings {
@@ -2846,6 +2866,9 @@ interface SiteConfigSettings {
   notifyNewUsersToStaff: boolean;
   notifyPaymentsToStaff: boolean;
   defaultAiModel: string;
+  telegramOnlyMode: boolean;
+  supportUsername: string;
+  botWelcomeTitle: string;
 }
 
 const DEFAULT_SITE_CONFIG: SiteConfigSettings = {
@@ -2855,6 +2878,9 @@ const DEFAULT_SITE_CONFIG: SiteConfigSettings = {
   notifyNewUsersToStaff: true,
   notifyPaymentsToStaff: true,
   defaultAiModel: 'google/gemini-2.5-flash',
+  telegramOnlyMode: true,
+  supportUsername: 'SlaydCanvaSupport',
+  botWelcomeTitle: 'SlaydCanva AI — Taqdimot, Hujjat va Dizayn Studiyasi',
 };
 
 async function getEffectiveSiteConfig(): Promise<SiteConfigSettings> {
@@ -2877,6 +2903,15 @@ async function getEffectiveSiteConfig(): Promise<SiteConfigSettings> {
       typeof raw.defaultAiModel === 'string' && raw.defaultAiModel.trim()
         ? raw.defaultAiModel.trim().slice(0, 100)
         : DEFAULT_SITE_CONFIG.defaultAiModel,
+    telegramOnlyMode: raw.telegramOnlyMode !== false,
+    supportUsername:
+      typeof raw.supportUsername === 'string' && raw.supportUsername.trim()
+        ? raw.supportUsername.trim().replace(/^@+/, '').slice(0, 64)
+        : DEFAULT_SITE_CONFIG.supportUsername,
+    botWelcomeTitle:
+      typeof raw.botWelcomeTitle === 'string' && raw.botWelcomeTitle.trim()
+        ? raw.botWelcomeTitle.trim().slice(0, 120)
+        : DEFAULT_SITE_CONFIG.botWelcomeTitle,
   };
 }
 
@@ -2904,6 +2939,18 @@ async function saveSiteConfig(next: Partial<SiteConfigSettings>): Promise<SiteCo
       typeof next.defaultAiModel === 'string' && next.defaultAiModel.trim()
         ? next.defaultAiModel.trim().slice(0, 100)
         : curr.defaultAiModel,
+    telegramOnlyMode:
+      typeof next.telegramOnlyMode === 'boolean'
+        ? next.telegramOnlyMode
+        : curr.telegramOnlyMode,
+    supportUsername:
+      typeof next.supportUsername === 'string'
+        ? next.supportUsername.trim().replace(/^@+/, '').slice(0, 64) || curr.supportUsername
+        : curr.supportUsername,
+    botWelcomeTitle:
+      typeof next.botWelcomeTitle === 'string' && next.botWelcomeTitle.trim()
+        ? next.botWelcomeTitle.trim().slice(0, 120)
+        : curr.botWelcomeTitle,
   };
   await Promise.all([
     dbSetSetting('site_config', clean),
@@ -3010,7 +3057,7 @@ async function getManagerRecord(telegramId: string): Promise<DbManagerRecord | n
 
 interface StaffAccessInfo {
   isStaff: boolean;
-  role: 'super_admin' | 'manager' | 'user';
+  role: 'super_admin' | 'manager' | 'support' | 'user';
   permissions: DbManagerPermission[];
   managerRecord?: DbManagerRecord | null;
 }
@@ -3026,10 +3073,13 @@ async function resolveStaffAccess(telegramId: string): Promise<StaffAccessInfo> 
   }
   const mgr = await getManagerRecord(telegramId);
   if (mgr && mgr.isActive) {
+    const role: 'manager' | 'support' = mgr.roleType === 'support' ? 'support' : 'manager';
+    const defaultPerms: DbManagerPermission[] =
+      role === 'support' ? ['overview', 'support', 'users'] : ALL_MANAGER_PERMISSIONS;
     return {
       isStaff: true,
-      role: 'manager',
-      permissions: mgr.permissions.length > 0 ? mgr.permissions : ALL_MANAGER_PERMISSIONS,
+      role,
+      permissions: mgr.permissions.length > 0 ? mgr.permissions : defaultPerms,
       managerRecord: mgr,
     };
   }
@@ -3200,6 +3250,184 @@ async function notifyStaffTelegram(htmlMessage: string): Promise<void> {
       telegramApi('sendMessage', {
         chat_id: chatId,
         text: htmlMessage,
+        parse_mode: 'HTML',
+      })
+    )
+  );
+}
+
+function extractClientIp(req?: express.Request): string | undefined {
+  if (!req) return undefined;
+  const fwd = req.get('x-forwarded-for');
+  if (fwd) {
+    const first = fwd.split(',')[0]?.trim();
+    if (first) return first.slice(0, 64);
+  }
+  return (req.ip || req.socket?.remoteAddress || '').slice(0, 64) || undefined;
+}
+
+const recentSecurityBurst = new Map<string, number[]>();
+
+async function recordSecurityEvent(params: {
+  severity: DbSecurityLog['severity'];
+  category: string;
+  title: string;
+  details: string;
+  req?: express.Request;
+  userId?: string;
+  path?: string;
+  forceNotify?: boolean;
+}): Promise<DbSecurityLog> {
+  const ip = extractClientIp(params.req);
+  const reqPath = params.path || params.req?.originalUrl || params.req?.path;
+  const now = Date.now();
+  const burstKey = `${params.category}:${ip || params.userId || 'global'}`;
+  const prevHits = (recentSecurityBurst.get(burstKey) || []).filter((ts) => now - ts < 10 * 60_000);
+  prevHits.push(now);
+  recentSecurityBurst.set(burstKey, prevHits);
+  if (recentSecurityBurst.size > 500) {
+    const firstKey = recentSecurityBurst.keys().next().value;
+    if (firstKey) recentSecurityBurst.delete(firstKey);
+  }
+
+  let effectiveSeverity = params.severity;
+  if (prevHits.length >= 4 && (effectiveSeverity === 'low' || effectiveSeverity === 'medium')) {
+    effectiveSeverity = 'high';
+  }
+
+  const shouldNotify = Boolean(
+    params.forceNotify ||
+      effectiveSeverity === 'critical' ||
+      effectiveSeverity === 'high' ||
+      prevHits.length >= 3
+  );
+
+  const entry: DbSecurityLog = {
+    id: `sec_${now.toString(36)}_${crypto.randomBytes(3).toString('hex')}`,
+    severity: effectiveSeverity,
+    category: params.category,
+    title: params.title.slice(0, 140),
+    details: params.details.slice(0, 600),
+    ipAddress: ip,
+    userId: params.userId,
+    path: reqPath ? String(reqPath).slice(0, 120) : undefined,
+    isResolved: false,
+    notifiedStaff: shouldNotify,
+    createdAt: now,
+  };
+
+  await dbAppendSecurityLog(entry);
+  const existingKv = (await kvGet<DbSecurityLog[]>('app_security_logs')) || [];
+  await kvSet('app_security_logs', [entry, ...existingKv].slice(0, 150));
+
+  if (shouldNotify) {
+    await recordCrmEventSafe({
+      id: `crm_${entry.id}`,
+      eventType: 'security_alert',
+      title: `🛡 Xavfsizlik ogohlantirishi: ${entry.title}`,
+      message: `${entry.details}${ip ? ` · IP: ${ip}` : ''}`,
+      userId: entry.userId,
+    });
+
+    const sevEmoji =
+      effectiveSeverity === 'critical' ? '🚨' : effectiveSeverity === 'high' ? '⚠️' : '🛡';
+    await notifyStaffTelegram(
+      `${sevEmoji} <b>XAVFSIZLIK TIZIMI OGOHLANTIRISHI (${effectiveSeverity.toUpperCase()})</b>\n\n` +
+        `📌 Hodisa: <b>${escapeTgHtml(entry.title)}</b>\n` +
+        `📂 Tur: <code>${escapeTgHtml(entry.category)}</code>\n` +
+        `📝 Tafsilot: ${escapeTgHtml(entry.details)}\n` +
+        (entry.userId ? `🆔 Foydalanuvchi: <code>${escapeTgHtml(entry.userId)}</code>\n` : '') +
+        (ip ? `🌐 IP: <code>${escapeTgHtml(ip)}</code>\n` : '') +
+        (entry.path ? `🔗 Manzil: <code>${escapeTgHtml(entry.path)}</code>\n` : '') +
+        `⏱ Urinishlar (10 daq): <b>${prevHits.length}</b>`
+    ).catch(() => {});
+  }
+
+  return entry;
+}
+
+async function resolveDefaultSupportAgent(): Promise<{
+  telegramId?: string;
+  firstName: string;
+  username?: string;
+  roleTitle: string;
+}> {
+  const [managers, siteCfg] = await Promise.all([listManagersAll(), getEffectiveSiteConfig()]);
+  const activeSupport =
+    managers.find((m) => m.isActive && m.roleType === 'support' && m.isSupportDefault) ||
+    managers.find((m) => m.isActive && m.roleType === 'support') ||
+    managers.find((m) => m.isActive && m.isSupportDefault) ||
+    managers.find((m) => m.isActive && m.permissions.includes('support'));
+
+  if (activeSupport) {
+    return {
+      telegramId: activeSupport.telegramId,
+      firstName: activeSupport.firstName,
+      username: activeSupport.username || siteCfg.supportUsername,
+      roleTitle: activeSupport.roleTitle || "Qo'llab-quvvatlash mutaxassisi",
+    };
+  }
+
+  const adminIds = getAdminTelegramIds();
+  return {
+    telegramId: adminIds[0],
+    firstName: 'SlaydCanva Support',
+    username: siteCfg.supportUsername,
+    roleTitle: 'Rasmiy Support',
+  };
+}
+
+async function listSupportInboxTicketsSafe(): Promise<DbSupportTicket[]> {
+  const dbRows = await dbListSupportTickets(120);
+  if (dbRows) return dbRows;
+  return (await kvGet<DbSupportTicket[]>('app_support_tickets')) || [];
+}
+
+async function saveSupportTicketKvFallback(ticket: DbSupportTicket): Promise<void> {
+  const existing = (await kvGet<DbSupportTicket[]>('app_support_tickets')) || [];
+  await kvSet('app_support_tickets', [ticket, ...existing.filter((t) => t.telegramId !== ticket.telegramId)].slice(0, 120));
+}
+
+async function appendInboxMessageSafe(msg: Omit<DbInboxMessage, 'createdAt'>): Promise<DbInboxMessage> {
+  const saved = await dbAddInboxMessage(msg);
+  const full: DbInboxMessage = saved || { ...msg, createdAt: Date.now() };
+  const kvKey = `app_inbox_msgs:${msg.telegramId}`;
+  const existing = (await kvGet<DbInboxMessage[]>(kvKey)) || [];
+  await kvSet(kvKey, [...existing, full].slice(-120));
+  return full;
+}
+
+async function notifySupportStaffTelegram(
+  ticket: DbSupportTicket,
+  messageText: string
+): Promise<void> {
+  if (!getTelegramBotToken()) return;
+  const adminIds = getAdminTelegramIds();
+  const managers = await listManagersAll();
+  const supportStaffIds = managers
+    .filter((m) => m.isActive && m.notifyTelegram && (m.roleType === 'support' || m.permissions.includes('support')))
+    .map((m) => m.telegramId);
+  const targets = ticket.assignedTo
+    ? Array.from(new Set([ticket.assignedTo, ...adminIds]))
+    : Array.from(new Set([...supportStaffIds, ...adminIds]));
+
+  const cleanTargets = targets.filter((id) => /^\d{3,20}$/.test(id));
+  if (!cleanTargets.length) return;
+
+  const senderTag = ticket.userUsername ? `@${ticket.userUsername}` : `ID ${ticket.telegramId}`;
+  const text =
+    `💬 <b>Yangi Support murojaati</b>\n\n` +
+    `👤 Mijoz: <b>${escapeTgHtml(ticket.userFirstName)}</b> (${escapeTgHtml(senderTag)})\n` +
+    `🆔 ID: <code>${escapeTgHtml(ticket.telegramId)}</code>\n` +
+    (ticket.assignedName ? `🎧 Biriktirilgan: <b>${escapeTgHtml(ticket.assignedName)}</b>\n` : '') +
+    `📝 Xabar:\n<i>${escapeTgHtml(messageText.slice(0, 700))}</i>\n\n` +
+    `Admin panel → <b>Support & Inbox</b> bo'limidan saytga yoki Telegram lichkaga javob yozing.`;
+
+  await Promise.allSettled(
+    cleanTargets.map((chatId) =>
+      telegramApi('sendMessage', {
+        chat_id: chatId,
+        text,
         parse_mode: 'HTML',
       })
     )
@@ -3564,6 +3792,76 @@ async function telegramSendDocument(
     ok: boolean;
     description?: string;
   };
+}
+
+let cachedBotWelcomeImageBuffer: Buffer | null = null;
+
+async function loadBotWelcomeImageBuffer(): Promise<Buffer | null> {
+  if (cachedBotWelcomeImageBuffer) return cachedBotWelcomeImageBuffer;
+  const candidates = [
+    path.resolve(process.cwd(), 'public/assets/bot-welcome.jpg'),
+    path.resolve(process.cwd(), 'src/assets/images/slaydcanva_bot_welcome_1795715878673.jpg'),
+  ];
+  for (const filePath of candidates) {
+    try {
+      const buf = await fs.readFile(filePath);
+      if (buf && buf.length > 1000) {
+        cachedBotWelcomeImageBuffer = buf;
+        return buf;
+      }
+    } catch {
+      // Try next candidate
+    }
+  }
+  return null;
+}
+
+async function telegramSendWelcomePhoto(
+  chatId: string,
+  caption: string,
+  replyMarkup?: Record<string, unknown>
+): Promise<{ ok: boolean; description?: string }> {
+  const token = getTelegramBotToken();
+  if (!token) return { ok: false, description: 'TELEGRAM_BOT_TOKEN not configured' };
+
+  const imageBuf = await loadBotWelcomeImageBuffer();
+  if (!imageBuf) {
+    return telegramApi('sendMessage', {
+      chat_id: chatId,
+      text: caption,
+      parse_mode: 'HTML',
+      ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+    });
+  }
+
+  const form = new FormData();
+  form.append('chat_id', chatId);
+  form.append('caption', caption.slice(0, 1020));
+  form.append('parse_mode', 'HTML');
+  if (replyMarkup) {
+    form.append('reply_markup', JSON.stringify(replyMarkup));
+  }
+  const blob = new Blob([new Uint8Array(imageBuf)], { type: 'image/jpeg' });
+  form.append('photo', blob, 'slaydcanva-welcome.jpg');
+
+  const res = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
+    method: 'POST',
+    body: form,
+    signal: AbortSignal.timeout(20000),
+  });
+  const data = (await res.json().catch(() => ({ ok: false }))) as {
+    ok: boolean;
+    description?: string;
+  };
+  if (!data.ok) {
+    return telegramApi('sendMessage', {
+      chat_id: chatId,
+      text: caption,
+      parse_mode: 'HTML',
+      ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+    });
+  }
+  return data;
 }
 
 async function resolveTelegramBotUsername(): Promise<string | null> {
@@ -4012,12 +4310,15 @@ app.all('/api/payments/tolovgo/callback', async (req, res) => {
     // Verify TOLOVGO_WEBHOOK_SECRET signature if configured in environment
     const sigCheck = verifyTolovgoWebhookSignature(req, orderId, body);
     if (sigCheck.configured && !sigCheck.valid) {
-      await recordCrmEventSafe({
-        eventType: 'security_alert',
+      await recordSecurityEvent({
+        severity: sigCheck.provided ? 'critical' : 'high',
+        category: 'webhook_signature',
         title: `TolovGo webhook signatura xatosi (#${orderId})`,
-        message: sigCheck.provided
-          ? `Buyurtma #${orderId} uchun noto'g'ri webhook signaturasi yuborildi.`
-          : `Buyurtma #${orderId} uchun webhook signaturasi yuborilmadi.`,
+        details: sigCheck.provided
+          ? `Buyurtma #${orderId} uchun noto'g'ri HMAC webhook signaturasi yuborildi.`
+          : `Buyurtma #${orderId} uchun webhook signaturasi taqdim etilmadi.`,
+        req,
+        forceNotify: true,
       });
       res.status(401).json({ ok: false, error: 'Invalid webhook signature' });
       return;
@@ -4230,7 +4531,7 @@ app.get('/api/admin/status', async (req, res) => {
   const origin = getPreferredPublicOrigin(req);
 
   const passwordRequiredForManager =
-    staff.role === 'manager'
+    staff.role === 'manager' || staff.role === 'support'
       ? Boolean(staff.managerRecord?.hasPassword || storedHash)
       : Boolean(storedHash);
 
@@ -4238,6 +4539,7 @@ app.get('/api/admin/status', async (req, res) => {
     ok: true,
     isAdmin: staff.role === 'super_admin',
     isManager: staff.role === 'manager',
+    isSupport: staff.role === 'support',
     staffRole: staff.role,
     permissions: staff.permissions,
     passwordConfigured: passwordRequiredForManager,
@@ -4296,6 +4598,15 @@ app.post('/api/admin/login', async (req, res) => {
   const { user, staff } = ctx;
 
   if (!checkAdminLoginAllowed(user.telegramId)) {
+    await recordSecurityEvent({
+      severity: 'high',
+      category: 'admin_bruteforce',
+      title: `Panel kirishi bloklandi (ID ${user.telegramId})`,
+      details: '5 martadan ortiq noto‘g‘ri parol urinishi sababli vaqtincha bloklandi.',
+      req,
+      userId: user.telegramId,
+      forceNotify: true,
+    });
     res.status(429).json({ error: "Juda ko'p noto'g'ri urinish. 15 daqiqadan so'ng urinib ko'ring." });
     return;
   }
@@ -4310,7 +4621,7 @@ app.post('/api/admin/login', async (req, res) => {
   }
 
   let valid = false;
-  if (staff.role === 'manager' && mgrHash) {
+  if ((staff.role === 'manager' || staff.role === 'support') && mgrHash) {
     valid = verifyAdminPassword(password, mgrHash);
   } else if (globalHash) {
     valid = verifyAdminPassword(password, globalHash);
@@ -4318,6 +4629,15 @@ app.post('/api/admin/login', async (req, res) => {
 
   if (!valid) {
     recordAdminLoginFailure(user.telegramId);
+    const failCount = adminLoginAttempts.get(user.telegramId)?.count || 1;
+    await recordSecurityEvent({
+      severity: failCount >= 3 ? 'high' : 'medium',
+      category: 'admin_login_failed',
+      title: `Noto'g'ri panel paroli (${staff.role})`,
+      details: `${user.firstName} (ID ${user.telegramId}) tomonidan noto'g'ri maxfiy parol kiritildi (${failCount}-urinish).`,
+      req,
+      userId: user.telegramId,
+    });
     res.status(401).json({ error: "Maxfiy panel paroli noto'g'ri." });
     return;
   }
@@ -4326,15 +4646,15 @@ app.post('/api/admin/login', async (req, res) => {
   await dbAppendAuditLog({
     id: `aud_adm_login_${Date.now().toString(36)}`,
     actorId: user.telegramId,
-    action: staff.role === 'manager' ? 'manager_login' : 'admin_login',
-    details: `${staff.role === 'manager' ? 'Menejer' : 'Admin'} panelga 15 kunlik sessiya bilan kirdi`,
+    action: staff.role === 'manager' ? 'manager_login' : staff.role === 'support' ? 'support_login' : 'admin_login',
+    details: `${staff.role === 'manager' ? 'Menejer' : staff.role === 'support' ? 'Support' : 'Admin'} panelga 15 kunlik sessiya bilan kirdi`,
   });
 
   const adminToken = issueAdminCookieAndToken(
     req,
     res,
     user.telegramId,
-    staff.role === 'manager' ? 'manager' : 'super_admin'
+    staff.role === 'manager' ? 'manager' : staff.role === 'support' ? 'support' : 'super_admin'
   );
   res.json({
     ok: true,
@@ -4386,7 +4706,7 @@ app.get('/api/admin/overview', async (req, res) => {
   const ctx = await requireStaffSession(req, res);
   if (!ctx) return;
 
-  const [overview, orders, auditLogs, pricing, tolovgoMode, dbStatus, siteConfig, managers, crmEvents] =
+  const [overview, orders, auditLogs, pricing, tolovgoMode, dbStatus, siteConfig, managers, crmEvents, supTickets, secLogs] =
     await Promise.all([
       dbGetAdminOverview(),
       dbListOrdersAdmin(60),
@@ -4397,9 +4717,12 @@ app.get('/api/admin/overview', async (req, res) => {
       getEffectiveSiteConfig(),
       listManagersAll(),
       dbListCrmEvents(50),
+      listSupportInboxTicketsSafe(),
+      dbListSecurityLogs(40),
     ]);
 
   const kvCrm = !crmEvents ? (await kvGet<DbCrmEvent[]>('app_crm_events')) || [] : crmEvents;
+  const kvSec = !secLogs ? (await kvGet<DbSecurityLog[]>('app_security_logs')) || [] : secLogs;
   const hasLiveKey = Boolean(
     getCleanEnvKey(process.env.TOLOVGO_API_KEY, 'MY_TOLOVGO_API_KEY') ||
       getCleanEnvKey(process.env.TOLOVGO_KEY, 'MY_TOLOVGO_API_KEY')
@@ -4420,8 +4743,11 @@ app.get('/api/admin/overview', async (req, res) => {
       totalPaidRevenue: 0,
       totalReferrals: 0,
       totalProjects: 0,
-      activeManagers: managers.filter((m) => m.isActive).length,
+      activeManagers: managers.filter((m) => m.isActive && m.roleType !== 'support').length,
+      activeSupportAgents: managers.filter((m) => m.isActive && m.roleType === 'support').length,
       unreadCrmEvents: kvCrm.filter((e) => !e.isRead).length,
+      openSupportTickets: supTickets.filter((t) => t.status !== 'resolved').length,
+      unresolvedSecurityLogs: kvSec.filter((s) => !s.isResolved).length,
       todayRevenue: 0,
       todayNewUsers: 0,
     },
@@ -4449,7 +4775,42 @@ app.get('/api/admin/analytics', async (req, res) => {
   const data = await dbGetAdminAnalytics(days);
   res.json({
     ok: true,
-    analytics: data || { daily: [], topSpenders: [], serviceBreakdown: [] },
+    analytics: data || {
+      daily: [],
+      hourlyActivity: [],
+      topSpenders: [],
+      serviceBreakdown: [],
+      paymentMethodBreakdown: [],
+      userSegmentBreakdown: [],
+      staffActivityBreakdown: [],
+      supportMetrics: {
+        openCount: 0,
+        pendingCount: 0,
+        resolvedCount: 0,
+        totalMessages: 0,
+        telegramChannelCount: 0,
+        siteChannelCount: 0,
+      },
+      securityMetrics: {
+        totalLogs: 0,
+        criticalCount: 0,
+        highCount: 0,
+        mediumCount: 0,
+        lowCount: 0,
+        unresolvedCount: 0,
+        dailyThreats: [],
+      },
+      referralMetrics: { totalReferrals: 0, totalInviterBonus: 0, conversionRate: 0 },
+      economyMetrics: {
+        totalDeposited: 0,
+        totalSpent: 0,
+        promoBonusGiven: 0,
+        netMargin: 0,
+        retentionRate: 0,
+        repeatOrderRate: 0,
+        averageOrderValue: 0,
+      },
+    },
   });
 });
 
@@ -4508,29 +4869,42 @@ app.post('/api/admin/managers', async (req, res) => {
     typeof req.body?.username === 'string' && req.body.username.trim()
       ? req.body.username.trim().replace(/^@+/, '').slice(0, 50)
       : undefined;
+  const roleType: 'manager' | 'support' = req.body?.roleType === 'support' ? 'support' : 'manager';
+  const isSupportDefault = Boolean(req.body?.isSupportDefault);
   const roleTitle =
     typeof req.body?.roleTitle === 'string' && req.body.roleTitle.trim()
       ? req.body.roleTitle.trim().slice(0, 40)
-      : 'CRM Menejer';
-  const rawPerms = Array.isArray(req.body?.permissions) ? req.body.permissions : ALL_MANAGER_PERMISSIONS;
+      : roleType === 'support'
+        ? "Qo'llab-quvvatlash mutaxassisi"
+        : 'CRM Menejer';
+  const rawPerms = Array.isArray(req.body?.permissions)
+    ? req.body.permissions
+    : roleType === 'support'
+      ? ['overview', 'support', 'users', 'crm_events']
+      : ALL_MANAGER_PERMISSIONS;
   const permissions = rawPerms.filter((p: unknown): p is DbManagerPermission =>
     ALL_MANAGER_PERMISSIONS.includes(p as DbManagerPermission)
   );
   const rawPwd = typeof req.body?.password === 'string' ? req.body.password.trim() : '';
   if (rawPwd && (rawPwd.length < 6 || rawPwd.length > 128)) {
-    res.status(400).json({ error: "Menejer paroli kamida 6 ta belgidan iborat bo'lishi kerak." });
+    res.status(400).json({ error: "Xodim paroli kamida 6 ta belgidan iborat bo'lishi kerak." });
     return;
   }
   const passwordHash = rawPwd ? hashAdminPassword(rawPwd) : undefined;
   const isActive = req.body?.isActive !== false;
   const notifyTelegram = req.body?.notifyTelegram !== false;
 
+  const defaultPerms: DbManagerPermission[] =
+    roleType === 'support' ? ['overview', 'support', 'users'] : ['overview', 'crm_events', 'users', 'orders'];
+
   const saved = await dbUpsertManager({
     telegramId: tid,
     firstName,
     username,
     roleTitle,
-    permissions: permissions.length ? permissions : ['overview', 'crm_events', 'users', 'orders'],
+    roleType,
+    isSupportDefault,
+    permissions: permissions.length ? permissions : defaultPerms,
     passwordHash,
     isActive,
     notifyTelegram,
@@ -4546,7 +4920,9 @@ app.post('/api/admin/managers', async (req, res) => {
         firstName,
         username,
         roleTitle,
-        permissions: permissions.length ? permissions : ['overview', 'crm_events', 'users', 'orders'],
+        roleType,
+        isSupportDefault,
+        permissions: permissions.length ? permissions : defaultPerms,
         passwordHash: passwordHash ?? prevKv?.passwordHash,
         hasPassword: Boolean(passwordHash ?? prevKv?.passwordHash),
         isActive,
@@ -4555,10 +4931,13 @@ app.post('/api/admin/managers', async (req, res) => {
         createdAt: prevKv?.createdAt || Date.now(),
         updatedAt: Date.now(),
       };
-  await kvSet('app_managers_list', [
+  const nextKvList = [
     nextRecord,
-    ...existingKv.filter((m) => m.telegramId !== tid),
-  ]);
+    ...existingKv
+      .filter((m) => m.telegramId !== tid)
+      .map((m) => (isSupportDefault ? { ...m, isSupportDefault: false } : m)),
+  ];
+  await kvSet('app_managers_list', nextKvList);
 
   await Promise.all([
     dbAppendAuditLog({
@@ -4566,23 +4945,25 @@ app.post('/api/admin/managers', async (req, res) => {
       actorId: ctx.user.telegramId,
       action: 'admin_manager_upsert',
       targetId: tid,
-      details: `Menejer ${firstName} (${isActive ? 'Faol' : 'O‘chirilgan'})`,
+      details: `${roleType === 'support' ? 'Support' : 'Menejer'} ${firstName} (${isActive ? 'Faol' : 'O‘chirilgan'})`,
     }),
     recordCrmEventSafe({
       eventType: 'manager_changed',
-      title: `Menejer yangilandi: ${firstName}`,
+      title: `${roleType === 'support' ? 'Support mutaxassis' : 'Menejer'} yangilandi: ${firstName}`,
       message: `ID ${tid} · Lavozim: ${roleTitle} · Holat: ${isActive ? 'Faol' : 'Nofaol'}`,
       userId: tid,
     }),
   ]);
 
   if (notifyTelegram && isActive && getTelegramBotToken()) {
+    const roleLabelText =
+      roleType === 'support' ? 'SlaydCanva Support mutaxassisi' : 'SlaydCanva CRM Menejer';
     await telegramApi('sendMessage', {
       chat_id: tid,
       text:
-        `🛡 <b>Siz SlaydCanva CRM Menejer etib tayinlandingiz!</b>\n\n` +
+        `🛡 <b>Siz ${roleLabelText} etib tayinlandingiz!</b>\n\n` +
         `👤 Lavozim: <b>${escapeTgHtml(roleTitle)}</b>\n` +
-        `Endi saytda Admin/Menejer paneliga kirishingiz va Telegram orqali yangi foydalanuvchi hamda to'lov bildirishnomalarini qabul qilishingiz mumkin.`,
+        `Endi boshqaruv paneliga kirishingiz, mijozlar murojaatlariga javob berishingiz va Telegram orqali tezkor bildirishnomalarni olishingiz mumkin.`,
       parse_mode: 'HTML',
     }).catch(() => {});
   }
@@ -5134,9 +5515,557 @@ app.get('/api/admin/audit-logs', async (req, res) => {
   res.json({ ok: true, logs: logs || [] });
 });
 
+// =========================================================================
+// Support Desk, Bidirectional Inbox & User Files Routes
+// =========================================================================
+app.get('/api/support/info', async (req, res) => {
+  const [supportAgent, siteConfig] = await Promise.all([
+    resolveDefaultSupportAgent(),
+    getEffectiveSiteConfig(),
+  ]);
+  const user = getAuthenticatedTelegramUser(req);
+  if (!user) {
+    res.json({ ok: true, supportAgent, supportUsername: siteConfig.supportUsername });
+    return;
+  }
+
+  await dbMarkThreadRead(user.telegramId, 'user');
+  const [tickets, dbMsgs] = await Promise.all([
+    listSupportInboxTicketsSafe(),
+    dbListInboxMessages(user.telegramId, 100),
+  ]);
+  const ticket = tickets.find((t) => t.telegramId === user.telegramId) || null;
+  const messages = dbMsgs || (await kvGet<DbInboxMessage[]>(`app_inbox_msgs:${user.telegramId}`)) || [];
+
+  res.json({
+    ok: true,
+    supportAgent,
+    supportUsername: siteConfig.supportUsername,
+    ticket,
+    messages,
+  });
+});
+
+app.post('/api/support/messages', async (req, res) => {
+  const user = getAuthenticatedTelegramUser(req);
+  if (!user) {
+    res.status(401).json({ error: 'Supportga yozish uchun avval Telegram orqali kiring.' });
+    return;
+  }
+  const account = await getTgUserAccount(user);
+  if (account.isBanned) {
+    res.status(403).json({ error: 'Hisobingiz bloklangan.' });
+    return;
+  }
+  const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+  if (message.length < 2 || message.length > 2000) {
+    res.status(400).json({ error: "Xabar matni 2 dan 2000 tagacha belgi bo'lishi kerak." });
+    return;
+  }
+  const subject =
+    typeof req.body?.subject === 'string' && req.body.subject.trim()
+      ? req.body.subject.trim().slice(0, 120)
+      : 'Mijoz murojaati';
+
+  const defaultSupport = await resolveDefaultSupportAgent();
+  const ticket =
+    (await dbUpsertSupportTicket({
+      telegramId: user.telegramId,
+      userFirstName: user.firstName,
+      userUsername: user.username,
+      assignedTo: defaultSupport.telegramId,
+      assignedName: defaultSupport.firstName,
+      subject,
+      lastMessage: message,
+      incrementStaffUnread: true,
+      status: 'open',
+    })) || {
+      id: `sup_${user.telegramId}`,
+      telegramId: user.telegramId,
+      userFirstName: user.firstName,
+      userUsername: user.username,
+      assignedTo: defaultSupport.telegramId,
+      assignedName: defaultSupport.firstName,
+      status: 'open' as const,
+      subject,
+      lastMessage: message.slice(0, 400),
+      unreadForStaff: 1,
+      unreadForUser: 0,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+  await saveSupportTicketKvFallback(ticket);
+
+  const savedMsg = await appendInboxMessageSafe({
+    id: `msg_${Date.now().toString(36)}_${crypto.randomBytes(3).toString('hex')}`,
+    threadId: ticket.id,
+    telegramId: user.telegramId,
+    senderRole: 'user',
+    senderId: user.telegramId,
+    senderName: user.firstName,
+    channel: 'site',
+    message,
+    isRead: false,
+  });
+
+  await Promise.all([
+    recordCrmEventSafe({
+      eventType: 'support_message',
+      title: `Yangi Support murojaati: ${user.firstName}`,
+      message: `${message.slice(0, 180)}`,
+      userId: user.telegramId,
+    }),
+    notifySupportStaffTelegram(ticket, message),
+  ]);
+
+  res.json({ ok: true, ticket, message: savedMsg });
+});
+
+app.get('/api/files', async (req, res) => {
+  const user = getAuthenticatedTelegramUser(req);
+  if (!user) {
+    res.status(401).json({ error: 'Telegram autentifikatsiyasi talab qilinadi.' });
+    return;
+  }
+  const [dbFiles, dbProjects] = await Promise.all([
+    dbListUserFiles(user.telegramId, 50),
+    dbListProjects(user.telegramId, 30),
+  ]);
+  const files = dbFiles || (await kvGet<DbUserFileRecord[]>(`user_files:${user.telegramId}`)) || [];
+  const projects = dbProjects || [];
+  res.json({ ok: true, files, projects });
+});
+
+app.get('/api/admin/support/tickets', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'support');
+  if (!ctx) return;
+  const [tickets, managers] = await Promise.all([
+    listSupportInboxTicketsSafe(),
+    listManagersAll(),
+  ]);
+  const supportAgents = managers
+    .filter((m) => m.isActive && (m.roleType === 'support' || m.permissions.includes('support')))
+    .map((m) => ({
+      telegramId: m.telegramId,
+      firstName: m.firstName,
+      username: m.username,
+      roleTitle: m.roleTitle,
+      isSupportDefault: m.isSupportDefault,
+    }));
+  res.json({ ok: true, tickets, supportAgents });
+});
+
+app.get('/api/admin/support/tickets/:telegramId', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'support');
+  if (!ctx) return;
+  const tid = String(req.params.telegramId || '').trim();
+  if (!/^\d{3,20}$/.test(tid)) {
+    res.status(400).json({ error: "Noto'g'ri foydalanuvchi ID." });
+    return;
+  }
+  await dbMarkThreadRead(tid, 'staff');
+  const [tickets, dbMsgs, detail] = await Promise.all([
+    listSupportInboxTicketsSafe(),
+    dbListInboxMessages(tid, 150),
+    dbGetUserDetailAdmin(tid),
+  ]);
+  const ticket = tickets.find((t) => t.telegramId === tid) || null;
+  if (ticket && ticket.unreadForStaff > 0) {
+    ticket.unreadForStaff = 0;
+    await saveSupportTicketKvFallback(ticket);
+  }
+  const messages = dbMsgs || (await kvGet<DbInboxMessage[]>(`app_inbox_msgs:${tid}`)) || [];
+  res.json({ ok: true, ticket, messages, userDetail: detail });
+});
+
+app.post('/api/admin/support/tickets/:telegramId/reply', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'support');
+  if (!ctx) return;
+  const tid = String(req.params.telegramId || '').trim();
+  if (!/^\d{3,20}$/.test(tid)) {
+    res.status(400).json({ error: "Noto'g'ri foydalanuvchi ID." });
+    return;
+  }
+  const rawMessage = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+  if (!rawMessage || rawMessage.length > 2000) {
+    res.status(400).json({ error: "Javob matni 1 dan 2000 tagacha belgi bo'lishi kerak." });
+    return;
+  }
+  const chRaw = String(req.body?.channel || 'both');
+  const channel: 'site' | 'telegram' | 'both' =
+    chRaw === 'site' || chRaw === 'telegram' ? chRaw : 'both';
+
+  let telegramSent = false;
+  if (channel === 'telegram' || channel === 'both') {
+    if (getTelegramBotToken()) {
+      const staffRoleLabel =
+        ctx.staff.role === 'super_admin'
+          ? 'Administrator'
+          : ctx.staff.role === 'support'
+            ? 'Support mutaxassisi'
+            : 'Menejer';
+      const sent = await telegramApi('sendMessage', {
+        chat_id: tid,
+        text:
+          `🎧 <b>${escapeTgHtml(staffRoleLabel)} (${escapeTgHtml(ctx.user.firstName)})</b>\n\n` +
+          `${escapeTgHtml(rawMessage)}\n\n` +
+          `<i>Javob berish uchun shu chatga yozishingiz yoki ilovadagi Support bo'limidan foydalanishingiz mumkin.</i>`,
+        parse_mode: 'HTML',
+      });
+      telegramSent = Boolean(sent.ok);
+    }
+  }
+
+  const tickets = await listSupportInboxTicketsSafe();
+  const prevTicket = tickets.find((t) => t.telegramId === tid);
+  const ticket =
+    (await dbUpsertSupportTicket({
+      telegramId: tid,
+      userFirstName: prevTicket?.userFirstName || `Mijoz ${tid.slice(-4)}`,
+      userUsername: prevTicket?.userUsername,
+      assignedTo: prevTicket?.assignedTo || ctx.user.telegramId,
+      assignedName: prevTicket?.assignedName || ctx.user.firstName,
+      lastMessage: rawMessage,
+      incrementUserUnread: true,
+      status: 'pending',
+    })) || {
+      id: `sup_${tid}`,
+      telegramId: tid,
+      userFirstName: prevTicket?.userFirstName || `Mijoz ${tid.slice(-4)}`,
+      userUsername: prevTicket?.userUsername,
+      assignedTo: prevTicket?.assignedTo || ctx.user.telegramId,
+      assignedName: prevTicket?.assignedName || ctx.user.firstName,
+      status: 'pending' as const,
+      subject: prevTicket?.subject || 'Mijoz murojaati',
+      lastMessage: rawMessage.slice(0, 400),
+      unreadForStaff: 0,
+      unreadForUser: (prevTicket?.unreadForUser || 0) + 1,
+      createdAt: prevTicket?.createdAt || Date.now(),
+      updatedAt: Date.now(),
+    };
+  await saveSupportTicketKvFallback(ticket);
+
+  const savedMsg = await appendInboxMessageSafe({
+    id: `msg_${Date.now().toString(36)}_${crypto.randomBytes(3).toString('hex')}`,
+    threadId: ticket.id,
+    telegramId: tid,
+    senderRole: 'staff',
+    senderId: ctx.user.telegramId,
+    senderName: ctx.user.firstName,
+    channel,
+    message: rawMessage,
+    isRead: false,
+  });
+
+  await dbAppendAuditLog({
+    id: `aud_sup_${Date.now().toString(36)}`,
+    actorId: ctx.user.telegramId,
+    action: 'support_reply_sent',
+    targetId: tid,
+    details: `[${channel}] ${rawMessage.slice(0, 120)}`,
+  });
+
+  res.json({ ok: true, ticket, message: savedMsg, telegramSent });
+});
+
+app.post('/api/admin/support/tickets/:telegramId/assign', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'support');
+  if (!ctx) return;
+  const tid = String(req.params.telegramId || '').trim();
+  if (!/^\d{3,20}$/.test(tid)) {
+    res.status(400).json({ error: "Noto'g'ri foydalanuvchi ID." });
+    return;
+  }
+  const assignedTo = req.body?.assignedTo ? String(req.body.assignedTo).trim() : null;
+  let assignedName: string | null = null;
+  if (assignedTo) {
+    const mgr = await getManagerRecord(assignedTo);
+    assignedName = mgr?.firstName || (isTelegramAdmin(assignedTo) ? 'Super Admin' : `Xodim ${assignedTo.slice(-4)}`);
+  }
+  await dbAssignSupportTicket(tid, assignedTo, assignedName);
+  const tickets = await listSupportInboxTicketsSafe();
+  const target = tickets.find((t) => t.telegramId === tid);
+  if (target) {
+    target.assignedTo = assignedTo || undefined;
+    target.assignedName = assignedName || undefined;
+    await saveSupportTicketKvFallback(target);
+  }
+  if (assignedTo && getTelegramBotToken()) {
+    await telegramApi('sendMessage', {
+      chat_id: assignedTo,
+      text: `🎧 <b>Sizga yangi Support murojaati biriktirildi</b>\n🆔 Mijoz ID: <code>${escapeTgHtml(tid)}</code>`,
+      parse_mode: 'HTML',
+    }).catch(() => {});
+  }
+  res.json({ ok: true, assignedTo, assignedName });
+});
+
+app.post('/api/admin/support/tickets/:telegramId/status', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'support');
+  if (!ctx) return;
+  const tid = String(req.params.telegramId || '').trim();
+  const statusRaw = String(req.body?.status || 'open');
+  const status: 'open' | 'pending' | 'resolved' =
+    statusRaw === 'pending' || statusRaw === 'resolved' ? statusRaw : 'open';
+  await dbUpdateSupportTicketStatus(tid, status);
+  const tickets = await listSupportInboxTicketsSafe();
+  const target = tickets.find((t) => t.telegramId === tid);
+  if (target) {
+    target.status = status;
+    await saveSupportTicketKvFallback(target);
+  }
+  res.json({ ok: true, status });
+});
+
+// =========================================================================
+// System Security Scanner, Logs & Auto-Alert Analyzer Routes
+// =========================================================================
+app.get('/api/admin/security/logs', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'security');
+  if (!ctx) return;
+  const [dbLogs, lastScanDb, lastScanKv] = await Promise.all([
+    dbListSecurityLogs(120),
+    dbGetSetting<Record<string, unknown>>('last_security_scan'),
+    kvGet<Record<string, unknown>>('app_last_security_scan'),
+  ]);
+  const logs = dbLogs || (await kvGet<DbSecurityLog[]>('app_security_logs')) || [];
+  res.json({ ok: true, logs, lastScan: lastScanDb || lastScanKv || null });
+});
+
+app.post('/api/admin/security/logs/:id/resolve', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'security');
+  if (!ctx) return;
+  const id = String(req.params.id || '').trim();
+  if (!id) {
+    res.status(400).json({ error: 'Log ID kerak.' });
+    return;
+  }
+  await dbResolveSecurityLog(id);
+  const kvLogs = (await kvGet<DbSecurityLog[]>('app_security_logs')) || [];
+  await kvSet(
+    'app_security_logs',
+    kvLogs.map((l) => (l.id === id ? { ...l, isResolved: true } : l))
+  );
+  res.json({ ok: true });
+});
+
+app.post('/api/admin/security/scan', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'security');
+  if (!ctx) return;
+
+  const [siteCfg, dbStatus, managers, dbLogs, globalPwdHash] = await Promise.all([
+    getEffectiveSiteConfig(),
+    dbGetDbStatus(),
+    listManagersAll(),
+    dbListSecurityLogs(120),
+    getAdminPasswordHash(),
+  ]);
+  const logs = dbLogs || (await kvGet<DbSecurityLog[]>('app_security_logs')) || [];
+  const unresolvedCritical = logs.filter((l) => !l.isResolved && (l.severity === 'critical' || l.severity === 'high'));
+  const hasWebhookSecret = Boolean(getTelegramWebhookSecret());
+  const hasTolovgoSecret = Boolean(getTolovgoWebhookSecret());
+  const hasSessionSecret = Boolean(getCleanEnvKey(process.env.TELEGRAM_SESSION_SECRET, 'MY_TELEGRAM_SESSION_SECRET'));
+  const hasBotToken = Boolean(getTelegramBotToken());
+  const managersWithoutPwd = managers.filter((m) => m.isActive && !m.hasPassword);
+
+  const checks: Array<{
+    id: string;
+    name: string;
+    status: 'pass' | 'warn' | 'fail';
+    severity: 'low' | 'medium' | 'high' | 'critical';
+    message: string;
+    recommendation?: string;
+  }> = [
+    {
+      id: 'webhook_secret',
+      name: 'Telegram Webhook Secret tekshiruvi',
+      status: hasWebhookSecret ? 'pass' : 'fail',
+      severity: hasWebhookSecret ? 'low' : 'critical',
+      message: hasWebhookSecret
+        ? "X-Telegram-Bot-Api-Secret-Token himoyasi faol."
+        : "TELEGRAM_WEBHOOK_SECRET kiritilmagan.",
+      recommendation: hasWebhookSecret ? undefined : "Vercel env ga TELEGRAM_WEBHOOK_SECRET qo'shing.",
+    },
+    {
+      id: 'tolovgo_secret',
+      name: 'TolovGo Webhook HMAC Signaturasi',
+      status: hasTolovgoSecret ? 'pass' : 'warn',
+      severity: hasTolovgoSecret ? 'low' : 'medium',
+      message: hasTolovgoSecret
+        ? 'TolovGo callback HMAC SHA-256 signaturasi majburiy tekshiriladi.'
+        : 'TOLOVGO_WEBHOOK_SECRET kiritilmagan (faqat server-to-server status tekshiruvi ishlaydi).',
+      recommendation: hasTolovgoSecret ? undefined : "TOLOVGO_WEBHOOK_SECRET env kalitini sozlang.",
+    },
+    {
+      id: 'session_secret',
+      name: '15 kunlik HttpOnly Cookie + HMAC kaliti',
+      status: hasSessionSecret ? 'pass' : hasBotToken ? 'warn' : 'fail',
+      severity: hasSessionSecret ? 'low' : hasBotToken ? 'medium' : 'critical',
+      message: hasSessionSecret
+        ? 'Mustaqil TELEGRAM_SESSION_SECRET bilan cookie imzolanmoqda.'
+        : hasBotToken
+          ? 'Sessiya bot tokenidan hosila kalit bilan imzolanmoqda.'
+          : 'TELEGRAM_SESSION_SECRET va bot tokeni topilmadi.',
+      recommendation: hasSessionSecret ? undefined : "Maxsus TELEGRAM_SESSION_SECRET kiriting.",
+    },
+    {
+      id: 'telegram_only',
+      name: 'Faqat Telegram Mini App kirish cheklovi',
+      status: siteCfg.telegramOnlyMode ? 'pass' : 'warn',
+      severity: siteCfg.telegramOnlyMode ? 'low' : 'medium',
+      message: siteCfg.telegramOnlyMode
+        ? 'Oddiy foydalanuvchilar faqat Telegram WebApp initData orqali kiritiladi.'
+        : "Telegram-only rejimi o'chirilgan — oddiy brauzerdan kirish ochiq.",
+      recommendation: siteCfg.telegramOnlyMode ? undefined : "Bot & Sayt sozlamasidan Telegram-only rejimini yoqing.",
+    },
+    {
+      id: 'admin_pwd',
+      name: 'Admin Scrypt paroli va xodimlar gigiyenasi',
+      status: !globalPwdHash ? 'fail' : managersWithoutPwd.length > 0 ? 'warn' : 'pass',
+      severity: !globalPwdHash ? 'critical' : managersWithoutPwd.length > 0 ? 'medium' : 'low',
+      message: !globalPwdHash
+        ? "Admin maxfiy paroli o'rnatilmagan!"
+        : managersWithoutPwd.length > 0
+          ? `${managersWithoutPwd.length} ta faol xodim shaxsiy parolsiz umumiy paroldan foydalanmoqda.`
+          : 'Barcha admin va xodimlar kuchli scrypt parollari bilan himoyalangan.',
+      recommendation: managersWithoutPwd.length > 0 ? "Xodimlarga alohida parol biriktiring." : undefined,
+    },
+    {
+      id: 'db_storage',
+      name: 'Neon PostgreSQL + TLS saqlash qatlami',
+      status: dbStatus.configured && dbStatus.ready ? 'pass' : 'warn',
+      severity: dbStatus.configured && dbStatus.ready ? 'low' : 'medium',
+      message: dbStatus.configured && dbStatus.ready
+        ? 'PostgreSQL jadvallari faol va parametrizatsiya qilingan SQL ishlamoqda.'
+        : 'Neon PostgreSQL to‘liq sozlanmagan, zaxira KV xotira ishlamoqda.',
+    },
+    {
+      id: 'threat_logs',
+      name: 'Yechilmagan yuqori xavf hodisalari',
+      status: unresolvedCritical.length === 0 ? 'pass' : unresolvedCritical.length >= 3 ? 'fail' : 'warn',
+      severity: unresolvedCritical.length === 0 ? 'low' : unresolvedCritical.length >= 3 ? 'critical' : 'high',
+      message:
+        unresolvedCritical.length === 0
+          ? 'Oxirgi loglarda yechilmagan yuqori xavf hodisasi topilmadi.'
+          : `${unresolvedCritical.length} ta yuqori/kritik xavf logi tasdiqlashni kutmoqda.`,
+      recommendation: unresolvedCritical.length > 0 ? 'Security Loglar jadvalidan xavflarni tekshiring.' : undefined,
+    },
+  ];
+
+  const passPts = checks.filter((c) => c.status === 'pass').length * 100;
+  const warnPts = checks.filter((c) => c.status === 'warn').length * 60;
+  const score = Math.round((passPts + warnPts) / checks.length);
+  const failCount = checks.filter((c) => c.status === 'fail').length;
+  const warnCount = checks.filter((c) => c.status === 'warn').length;
+  const riskLevel: 'safe' | 'moderate' | 'elevated' | 'critical' =
+    failCount >= 2 || unresolvedCritical.length >= 3
+      ? 'critical'
+      : failCount >= 1
+        ? 'elevated'
+        : warnCount >= 1
+          ? 'moderate'
+          : 'safe';
+
+  const report = {
+    scannedAt: Date.now(),
+    score,
+    riskLevel,
+    checks,
+    threatsDetected: unresolvedCritical.length + failCount,
+    summary: `Skaner yakunlandi: ${score}/100 ball · ${checks.filter((c) => c.status === 'pass').length} ta xavfsiz, ${warnCount} ta ogohlantirish, ${failCount} ta kritik xato.`,
+  };
+
+  await Promise.all([
+    dbSetSetting('last_security_scan', report),
+    kvSet('app_last_security_scan', report),
+    dbAppendAuditLog({
+      id: `aud_scan_${Date.now().toString(36)}`,
+      actorId: ctx.user.telegramId,
+      action: 'security_scan_run',
+      amount: score,
+      details: report.summary,
+    }),
+  ]);
+
+  res.json({ ok: true, report });
+});
+
+app.post('/api/admin/security/analyze', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'security');
+  if (!ctx) return;
+
+  const dbLogs = await dbListSecurityLogs(100);
+  const logs = dbLogs || (await kvGet<DbSecurityLog[]>('app_security_logs')) || [];
+  const unresolved = logs.filter((l) => !l.isResolved);
+
+  const byCategory: Record<string, number> = {};
+  const byIp: Record<string, number> = {};
+  for (const log of unresolved) {
+    byCategory[log.category] = (byCategory[log.category] || 0) + 1;
+    if (log.ipAddress) byIp[log.ipAddress] = (byIp[log.ipAddress] || 0) + 1;
+  }
+
+  const topCategories = Object.entries(byCategory).sort((a, b) => b[1] - a[1]).slice(0, 4);
+  const topIps = Object.entries(byIp).sort((a, b) => b[1] - a[1]).slice(0, 4);
+  const criticalCnt = unresolved.filter((l) => l.severity === 'critical' || l.severity === 'high').length;
+
+  let analysisText =
+    unresolved.length === 0
+      ? "Oxirgi loglar tahlili toza: shubhali urinishlar yoki faol tahdidlar aniqlanmadi."
+      : `Tahlil natijasi: ${unresolved.length} ta yechilmagan hodisa (${criticalCnt} ta yuqori/kritik). ` +
+        `Asosiy turlar: ${topCategories.map(([k, v]) => `${k} (${v})`).join(', ') || 'yo‘q'}. ` +
+        (topIps.length ? `Faol IP manzillar: ${topIps.map(([ip, c]) => `${ip} (${c}x)`).join(', ')}.` : '');
+
+  const ai = getGeminiClient();
+  if (ai && unresolved.length > 0) {
+    try {
+      const sample = unresolved.slice(0, 15).map((l) => `[${l.severity}] ${l.category}: ${l.title} (${l.ipAddress || 'no-ip'})`).join('\n');
+      const aiRes = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: `Quyidagi xavfsizlik loglarini o'zbek tilida 3 ta qisqa jumlada tahlil qil va aniq tavsiya ber:\n${sample}`,
+      });
+      if (aiRes.text && aiRes.text.trim()) {
+        analysisText = aiRes.text.trim().slice(0, 900);
+      }
+    } catch {
+      // Fallback to deterministic analysis above
+    }
+  }
+
+  const notifyOnThreats = req.body?.notifyStaff !== false;
+  if (notifyOnThreats && criticalCnt > 0) {
+    await Promise.all([
+      recordCrmEventSafe({
+        eventType: 'security_alert',
+        title: `Log Tahlilchisi: ${criticalCnt} ta faol tahdid aniqlandi`,
+        message: analysisText.slice(0, 300),
+        userId: ctx.user.telegramId,
+      }),
+      notifyStaffTelegram(
+        `🔎 <b>Tizim Log Tahlilchisi Hisoboti</b>\n\n` +
+          `⚠️ Yechilmagan xavflar: <b>${unresolved.length}</b> (Yuqori/Kritik: <b>${criticalCnt}</b>)\n\n` +
+          `${escapeTgHtml(analysisText)}`
+      ),
+    ]);
+  }
+
+  res.json({
+    ok: true,
+    unresolvedCount: unresolved.length,
+    criticalCount: criticalCnt,
+    topCategories,
+    topIps,
+    analysisText,
+    alertSent: notifyOnThreats && criticalCnt > 0,
+  });
+});
+
 app.get('/api/telegram/config', async (req, res) => {
   const token = getTelegramBotToken();
-  const botUsername = token ? await resolveTelegramBotUsername() : null;
+  const [botUsername, siteConfig] = await Promise.all([
+    token ? resolveTelegramBotUsername() : Promise.resolve(null),
+    getEffectiveSiteConfig(),
+  ]);
   const origin = getPreferredPublicOrigin(req);
   res.json({
     configured: Boolean(token),
@@ -5145,6 +6074,8 @@ app.get('/api/telegram/config', async (req, res) => {
     webhookSecretConfigured: Boolean(getTelegramWebhookSecret()),
     kvConfigured: hasPersistentStorage(),
     dbDriver: getStorageDriver(),
+    telegramOnlyMode: siteConfig.telegramOnlyMode,
+    supportUsername: siteConfig.supportUsername,
   });
 });
 
@@ -5157,10 +6088,27 @@ app.post('/api/telegram/auth/webapp', async (req, res) => {
   const initData = typeof req.body?.initData === 'string' ? req.body.initData : '';
   const profile = verifyTelegramWebAppInitData(initData, botToken);
   if (!profile) {
+    await recordSecurityEvent({
+      severity: 'medium',
+      category: 'webapp_initdata_invalid',
+      title: 'WebApp initData tekshiruvi muvaffaqiyatsiz',
+      details: "Yaroqsiz yoki muddati o'tgan Telegram WebApp initData yuborildi.",
+      req,
+    });
     res.status(401).json({ error: "Telegram WebApp ma'lumoti tasdiqlanmadi." });
     return;
   }
   const account = await getTgUserAccount(profile);
+  if (account.isBanned) {
+    await recordSecurityEvent({
+      severity: 'medium',
+      category: 'banned_user_access',
+      title: `Bloklangan foydalanuvchi kirishga urindi (ID ${profile.telegramId})`,
+      details: `${profile.firstName} Mini App orqali kirishga urindi.`,
+      req,
+      userId: profile.telegramId,
+    });
+  }
   if (account.isNewUser) {
     void notifyNewUserToCrmAndStaff(account);
   }
@@ -5171,6 +6119,7 @@ app.post('/api/telegram/auth/webapp', async (req, res) => {
     user: profile,
     isAdmin: staff.role === 'super_admin',
     isManager: staff.role === 'manager',
+    isSupport: staff.role === 'support',
     staffRole: staff.role,
     managerPermissions: staff.permissions,
     sessionToken,
@@ -5200,17 +6149,37 @@ app.post('/api/telegram/auth/verify', async (req, res) => {
     lastName: typeof payload.ln === 'string' && payload.ln ? payload.ln : undefined,
     username: typeof payload.un === 'string' && payload.un ? payload.un : undefined,
   };
+  const [staff, siteCfg] = await Promise.all([
+    resolveStaffAccess(profile.telegramId),
+    getEffectiveSiteConfig(),
+  ]);
+  if (siteCfg.telegramOnlyMode && !staff.isStaff && Boolean(getTelegramBotToken())) {
+    await recordSecurityEvent({
+      severity: 'low',
+      category: 'telegram_only_gate',
+      title: `Brauzer kirishi bloklandi (ID ${tid})`,
+      details: "Telegram-only rejimi yoqilgani sababli oddiy brauzer orqali kirish rad etildi.",
+      req,
+      userId: tid,
+    });
+    res.status(403).json({
+      error: "Bu tizim faqat Telegram ilovasi (Mini App) ichida ochiladi. Botda «🚀 Ilovani ochish» tugmasini bosing.",
+      telegramOnly: true,
+    });
+    return;
+  }
+
   const account = await getTgUserAccount(profile);
   if (account.isNewUser) {
     void notifyNewUserToCrmAndStaff(account);
   }
-  const staff = await resolveStaffAccess(profile.telegramId);
   const sessionToken = issueSessionCookieAndToken(req, res, profile);
   res.json({
     ok: true,
     user: profile,
     isAdmin: staff.role === 'super_admin',
     isManager: staff.role === 'manager',
+    isSupport: staff.role === 'support',
     staffRole: staff.role,
     managerPermissions: staff.permissions,
     sessionToken,
@@ -5243,17 +6212,37 @@ app.get('/api/telegram/auth/poll', async (req, res) => {
     lastName: typeof payload.ln === 'string' && payload.ln ? payload.ln : undefined,
     username: typeof payload.un === 'string' && payload.un ? payload.un : undefined,
   };
+  const [staff, siteCfg] = await Promise.all([
+    resolveStaffAccess(profile.telegramId),
+    getEffectiveSiteConfig(),
+  ]);
+  if (siteCfg.telegramOnlyMode && !staff.isStaff && Boolean(getTelegramBotToken())) {
+    await recordSecurityEvent({
+      severity: 'low',
+      category: 'telegram_only_gate',
+      title: `Brauzer poll kirishi bloklandi (ID ${profile.telegramId})`,
+      details: "Telegram-only rejimi yoqilgani sababli brauzer orqali kirish rad etildi.",
+      req,
+      userId: profile.telegramId,
+    });
+    res.status(403).json({
+      authenticated: false,
+      telegramOnly: true,
+      error: "Bu tizim faqat Telegram ilovasi (Mini App) orqali ochiladi. Botda «🚀 Ilovani ochish» tugmasini bosing.",
+    });
+    return;
+  }
   const account = await getTgUserAccount(profile);
   if (account.isNewUser) {
     void notifyNewUserToCrmAndStaff(account);
   }
-  const staff = await resolveStaffAccess(profile.telegramId);
   const sessionToken = issueSessionCookieAndToken(req, res, profile);
   res.json({
     authenticated: true,
     user: profile,
     isAdmin: staff.role === 'super_admin',
     isManager: staff.role === 'manager',
+    isSupport: staff.role === 'support',
     staffRole: staff.role,
     managerPermissions: staff.permissions,
     sessionToken,
@@ -5277,6 +6266,7 @@ app.get('/api/telegram/me', async (req, res) => {
     sessionToken,
     isAdmin: staff.role === 'super_admin',
     isManager: staff.role === 'manager',
+    isSupport: staff.role === 'support',
     staffRole: staff.role,
     managerPermissions: staff.permissions,
     user: {
@@ -5643,25 +6633,50 @@ app.post('/api/telegram/send-document', async (req, res) => {
     return;
   }
 
-  res.json({ ok: true, fileName: safeFileName });
+  const fileRecord: DbUserFileRecord = {
+    id: `file_${Date.now().toString(36)}_${crypto.randomBytes(3).toString('hex')}`,
+    telegramId: user.telegramId,
+    fileName: safeFileName,
+    format: (ext === 'pdf' || ext === 'docx' || ext === 'png' ? ext : 'pptx') as DbUserFileRecord['format'],
+    sizeBytes: buf.length,
+    sentToTelegram: true,
+    createdAt: Date.now(),
+  };
+  await dbRecordUserFile(fileRecord);
+  const prevFiles = (await kvGet<DbUserFileRecord[]>(`user_files:${user.telegramId}`)) || [];
+  await kvSet(`user_files:${user.telegramId}`, [fileRecord, ...prevFiles].slice(0, 50));
+
+  res.json({ ok: true, fileName: safeFileName, file: fileRecord });
 });
 
-function buildMainBotKeyboard(loginUrl: string, webAppUrl: string) {
-  return {
-    inline_keyboard: [
-      [
-        { text: '💰 Balans', callback_data: 'menu:balance' },
-        { text: "💳 Balans to'ldirish", callback_data: 'menu:topup' },
-      ],
-      [
-        { text: '📜 Tarix', callback_data: 'menu:history' },
-        { text: '🤝 Referal (1 000 so‘m)', callback_data: 'menu:referral' },
-      ],
-      [
-        { text: '🔐 Saytga kirish', url: loginUrl },
-        { text: "📱 SlaydCanva'ni ochish", web_app: { url: webAppUrl } },
-      ],
+function buildMainBotKeyboard(webAppUrl: string, staffLoginUrl?: string) {
+  const rows: Array<Array<Record<string, unknown>>> = [
+    [{ text: "🚀 Ilovani ochish (Mini App)", web_app: { url: webAppUrl } }],
+    [
+      { text: '📁 Fayllar va Amaliyotlar', callback_data: 'menu:files' },
+      { text: '💰 Balans va Tarix', callback_data: 'menu:balance' },
     ],
+    [
+      { text: "💳 Balans to'ldirish", callback_data: 'menu:topup' },
+      { text: '🎁 Promokod va Referal', callback_data: 'menu:referral' },
+    ],
+    [{ text: '🎧 Support va Yordam', callback_data: 'menu:support' }],
+  ];
+  if (staffLoginUrl) {
+    rows.push([{ text: '🔐 Xodim / Admin Web kirish', url: staffLoginUrl }]);
+  }
+  return { inline_keyboard: rows };
+}
+
+function buildBotReplyKeyboard(webAppUrl: string) {
+  return {
+    keyboard: [
+      [{ text: '🚀 Ilovani ochish', web_app: { url: webAppUrl } }],
+      [{ text: '📁 Fayllar va Amaliyotlar' }, { text: "💳 Balans va To'ldirish" }],
+      [{ text: '🎁 Promokod va Referal' }, { text: '🎧 Support va Yordam' }],
+    ],
+    resize_keyboard: true,
+    is_persistent: true,
   };
 }
 
@@ -5695,6 +6710,33 @@ function formatBotHistoryMessage(account: TgUserAccount): string {
     `💰 Joriy balans: <b>${escapeTgHtml(formatSomServer(account.balance))}</b>\n\n` +
     rows.join('\n\n')
   );
+}
+
+async function formatBotFilesMessage(telegramId: string): Promise<string> {
+  const [dbFiles, dbProjects] = await Promise.all([
+    dbListUserFiles(telegramId, 8),
+    dbListProjects(telegramId, 6),
+  ]);
+  const files = dbFiles || (await kvGet<DbUserFileRecord[]>(`user_files:${telegramId}`)) || [];
+  const projects = dbProjects || [];
+  const lines: string[] = [`📁 <b>Telegramdagi Fayllar va Loyihalaringiz</b>\n`];
+  if (files.length > 0) {
+    lines.push(`📎 <b>Saqlangan fayllar (${files.length} ta):</b>`);
+    files.slice(0, 6).forEach((f, idx) => {
+      const kb = Math.max(1, Math.round(f.sizeBytes / 1024));
+      lines.push(`${idx + 1}. <b>${escapeTgHtml(f.fileName)}</b> (${f.format.toUpperCase()} · ${kb} KB)`);
+    });
+  } else {
+    lines.push('📎 Hozircha Telegramga eksport qilingan fayllar yo‘q.');
+  }
+  if (projects.length > 0) {
+    lines.push(`\n🗂 <b>Bulutdagi loyihalar (${projects.length} ta):</b>`);
+    projects.slice(0, 5).forEach((p, idx) => {
+      lines.push(`${idx + 1}. <b>${escapeTgHtml(p.title)}</b> (${p.mode.toUpperCase()})`);
+    });
+  }
+  lines.push(`\nIlovani ochib barcha fayl va amaliyotlarni boshqarishingiz mumkin.`);
+  return lines.join('\n');
 }
 
 app.post('/api/telegram/webhook', async (req, res) => {
@@ -5744,20 +6786,46 @@ app.post('/api/telegram/webhook', async (req, res) => {
         );
         const loginUrl = `${origin}/?tg_auth=${encodeURIComponent(loginToken)}`;
 
+        const staff = await resolveStaffAccess(user.telegramId);
+        const siteCfg = await getEffectiveSiteConfig();
+        const staffLoginUrl = (!siteCfg.telegramOnlyMode || staff.isStaff) ? loginUrl : undefined;
+
         if (data === 'menu:home') {
           await telegramApi('answerCallbackQuery', { callback_query_id: cqId });
           await telegramApi('sendMessage', {
             chat_id: cid,
             text:
-              `👋 <b>SlaydCanva bot</b>\n\n` +
+              `👋 <b>SlaydCanva AI Studiya</b>\n\n` +
               `💰 Balansingiz: <b>${escapeTgHtml(formatSomServer(account.balance))}</b>\n\n` +
-              `Bu bot orqali:\n` +
-              `• Saytga tezkor kirish (Auth)\n` +
-              `• Balans va amaliyotlar tarixini ko'rish\n` +
-              `• TolovGo orqali balans to'ldirish\n` +
-              `• Tayyor PPTX/PDF/Word fayllari va bildirishnomalarni olish mumkin.`,
+              `1️⃣ <b>AI Taqdimotlar</b> — 5 dan 30 sahifagacha professional PPTX\n` +
+              `2️⃣ <b>Tikilgan Daftar & Infografika</b> — tayyor PDF/PNG dizaynlar\n` +
+              `3️⃣ <b>Telegram Fayl Arxivi</b> — barcha hujjatlar chatda saqlanadi\n` +
+              `4️⃣ <b>Promokod & Referal</b> — bonuslar jamg'aring\n` +
+              `5️⃣ <b>24/7 Support</b> — tezkor yordam va jonli chat`,
             parse_mode: 'HTML',
-            reply_markup: buildMainBotKeyboard(loginUrl, origin),
+            reply_markup: buildMainBotKeyboard(origin, staffLoginUrl),
+          });
+        } else if (data === 'menu:files') {
+          await telegramApi('answerCallbackQuery', { callback_query_id: cqId });
+          await telegramApi('sendMessage', {
+            chat_id: cid,
+            text: await formatBotFilesMessage(tid),
+            parse_mode: 'HTML',
+            reply_markup: buildMainBotKeyboard(origin, staffLoginUrl),
+          });
+        } else if (data === 'menu:support') {
+          await telegramApi('answerCallbackQuery', { callback_query_id: cqId });
+          const agent = await resolveDefaultSupportAgent();
+          const tgLink = agent.username ? `@${agent.username}` : `@${siteCfg.supportUsername}`;
+          await telegramApi('sendMessage', {
+            chat_id: cid,
+            text:
+              `🎧 <b>SlaydCanva Support va Yordam</b>\n\n` +
+              `👨‍💻 Mas'ul mutaxassis: <b>${escapeTgHtml(agent.firstName)}</b> (${escapeTgHtml(agent.roleTitle)})\n` +
+              `📬 Telegram aloqa: ${escapeTgHtml(tgLink)}\n\n` +
+              `Savol yoki muammoingizni shu chatga oddiy xabar sifatida yozib yuboring (yoki <code>/support Savol matni</code>) — xabaringiz darhol Support Inbox'ga tushadi!`,
+            parse_mode: 'HTML',
+            reply_markup: buildMainBotKeyboard(origin, staffLoginUrl),
           });
         } else if (data === 'menu:balance') {
           await telegramApi('answerCallbackQuery', { callback_query_id: cqId });
@@ -5772,6 +6840,7 @@ app.post('/api/telegram/webhook', async (req, res) => {
               inline_keyboard: [
                 [{ text: "💳 Balans to'ldirish", callback_data: 'menu:topup' }],
                 [{ text: '📜 Tarix', callback_data: 'menu:history' }],
+                [{ text: "🚀 Ilovani ochish", web_app: { url: origin } }],
               ],
             },
           });
@@ -5791,7 +6860,7 @@ app.post('/api/telegram/webhook', async (req, res) => {
             chat_id: cid,
             text: formatBotHistoryMessage(account),
             parse_mode: 'HTML',
-            reply_markup: buildMainBotKeyboard(loginUrl, origin),
+            reply_markup: buildMainBotKeyboard(origin, staffLoginUrl),
           });
         } else if (data === 'menu:referral') {
           await telegramApi('answerCallbackQuery', { callback_query_id: cqId });
@@ -5806,9 +6875,9 @@ app.post('/api/telegram/webhook', async (req, res) => {
               `🤝 <b>Referal dasturi — har bir do'stingiz uchun ${escapeTgHtml(formatSomServer(pricing.referralInviterBonus))}!</b>\n\n` +
               `👥 Taklif qilgan do'stlaringiz: <b>${account.referralCount || 0} ta</b>\n` +
               `🔗 Sizning shaxsiy havolangiz:\n<code>${escapeTgHtml(refLink)}</code>\n\n` +
-              `Havolani do'stlaringizga yuboring. Yangi foydalanuvchi botga birinchi marta kirganida sizga avtomatik <b>+${escapeTgHtml(formatSomServer(pricing.referralInviterBonus))}</b>, do'stingizga esa <b>+${escapeTgHtml(formatSomServer(pricing.welcomeBonus))}</b> bonus beriladi!`,
+              `🎁 Promokod ishlatish uchun: <code>/promo KOD</code> yozing yoki Mini App ichidan kiriting.`,
             parse_mode: 'HTML',
-            reply_markup: buildMainBotKeyboard(loginUrl, origin),
+            reply_markup: buildMainBotKeyboard(origin, staffLoginUrl),
           });
         } else if (data.startsWith('topup:')) {
           const amount = Number(data.slice(6));
@@ -5929,7 +6998,7 @@ app.post('/api/telegram/webhook', async (req, res) => {
       return;
     }
 
-    // 2) Handle incoming text commands
+    // 2) Handle incoming text commands & 5-button persistent ReplyKeyboard
     const message = (update.message || update.edited_message) as Record<string, unknown> | undefined;
     if (message && typeof message === 'object') {
       const from = (message.from || {}) as Record<string, unknown>;
@@ -5940,7 +7009,11 @@ app.post('/api/telegram/webhook', async (req, res) => {
       const isBotUser = Boolean(from.is_bot);
 
       if (!isBotUser && /^\d{3,20}$/.test(tid) && /^-?\d{3,24}$/.test(cid) && text) {
-        const pricing = await getEffectivePricingSettings();
+        const [pricing, siteCfg, staff] = await Promise.all([
+          getEffectivePricingSettings(),
+          getEffectiveSiteConfig(),
+          resolveStaffAccess(tid),
+        ]);
         const user: TgUserProfile = {
           telegramId: tid,
           chatId: cid,
@@ -5965,6 +7038,7 @@ app.post('/api/telegram/webhook', async (req, res) => {
           10 * 60 * 1000
         );
         const loginUrl = `${origin}/?tg_auth=${encodeURIComponent(loginToken)}`;
+        const staffLoginUrl = (!siteCfg.telegramOnlyMode || staff.isStaff) ? loginUrl : undefined;
 
         if (cmd === '/start' || cmd === '/login' || cmd === '/auth') {
           if (arg.startsWith('auth_')) {
@@ -6000,27 +7074,48 @@ app.post('/api/telegram/webhook', async (req, res) => {
             void notifyNewUserToCrmAndStaff(refreshedAccount, appliedInviterId);
           }
           const bonusLine = account.isNewUser && pricing.welcomeBonus > 0
-            ? `🎁 Yangi foydalanuvchi bonusi: <b>+${escapeTgHtml(formatSomServer(pricing.welcomeBonus))}</b> qo'shildi!\n`
+            ? `🎁 Xush kelibsiz bonusi: <b>+${escapeTgHtml(formatSomServer(pricing.welcomeBonus))}</b>!\n`
             : '';
 
           const greetingName = escapeTgHtml(user.firstName);
+          const caption =
+            `✨ <b>${escapeTgHtml(siteCfg.botWelcomeTitle)}</b>\n\n` +
+            `Assalomu alaykum, <b>${greetingName}</b>! 👋\n` +
+            bonusLine +
+            `💰 Balans: <b>${escapeTgHtml(formatSomServer(refreshedAccount.balance))}</b>\n\n` +
+            `📌 <b>Qanday ishlaydi (5 qadam):</b>\n` +
+            `1️⃣ Pastdagi <b>«🚀 Ilovani ochish»</b> orqali Mini App'ga kiring.\n` +
+            `2️⃣ Mavzu va sahifalar sonini kiriting — AI tayyor dizayn yaratadi.\n` +
+            `3️⃣ Barcha <b>PPTX / PDF / Word</b> fayllar chatda va «Fayllar»da saqlanadi.\n` +
+            `4️⃣ TolovGo orqali tezkor to'ldiring yoki promokod/referal ishlating.\n` +
+            `5️⃣ Savol tug'ilsa — shu botga yozing, Support darhol javob beradi.`;
+
+          await telegramSendWelcomePhoto(cid, caption, buildMainBotKeyboard(origin, staffLoginUrl));
           await telegramApi('sendMessage', {
             chat_id: cid,
             text:
-              `Assalomu alaykum, <b>${greetingName}</b>! 👋\n\n` +
-              bonusLine +
-              `<b>SlaydCanva</b> hisobingiz Telegram bilan bog'landi.\n` +
-              `💰 Joriy balans: <b>${escapeTgHtml(formatSomServer(refreshedAccount.balance))}</b>\n\n` +
-              `Pastdagi <b>«🔐 Saytga kirish»</b> tugmasini bosing (yoki agar brauzerda kirish sahifasi ochiq bo'lsa, u avtomatik ulanadi).\n\n` +
-              `Bot imkoniyatlari:\n` +
-              `• 🔔 Tayyorlangan taqdimot va to'lov bildirishnomalari\n` +
-              `• 📎 Tayyor PPTX / PDF / Word fayllarini chatga qabul qilish\n` +
-              `• 🤝 Referal havola orqali har bir do'st uchun +${escapeTgHtml(formatSomServer(pricing.referralInviterBonus))}\n` +
-              `• 💳 TolovGo orqali balans to'ldirish`,
+              `👇 Quyidagi <b>5 ta tezkor tugma</b> orqali ilovani oching yoki funksiyalarni boshqaring:` +
+              (staffLoginUrl ? `\n\n🔐 Xodim/Admin paneli kirish havolasi yuqoridagi tugmada tayyor.` : ''),
             parse_mode: 'HTML',
-            reply_markup: buildMainBotKeyboard(loginUrl, origin),
+            reply_markup: buildBotReplyKeyboard(origin),
           });
-        } else if (cmd === '/referral' || cmd === '/ref') {
+        } else if (text === '📁 Fayllar va Amaliyotlar' || cmd === '/files') {
+          await telegramApi('sendMessage', {
+            chat_id: cid,
+            text: await formatBotFilesMessage(tid),
+            parse_mode: 'HTML',
+            reply_markup: buildMainBotKeyboard(origin, staffLoginUrl),
+          });
+        } else if (text === "💳 Balans va To'ldirish" || cmd === '/balance') {
+          await telegramApi('sendMessage', {
+            chat_id: cid,
+            text:
+              `💰 <b>Joriy balansingiz:</b> ${escapeTgHtml(formatSomServer(account.balance))}\n\n` +
+              `TolovGo orqali tez to'ldirish uchun summani tanlang yoki <code>/topup 50000</code> yozing:`,
+            parse_mode: 'HTML',
+            reply_markup: buildTopUpBotKeyboard(),
+          });
+        } else if (text === '🎁 Promokod va Referal' || cmd === '/referral' || cmd === '/ref') {
           const botUsername = await resolveTelegramBotUsername();
           const refLink = botUsername
             ? `https://t.me/${botUsername}?start=ref_${tid}`
@@ -6028,33 +7123,71 @@ app.post('/api/telegram/webhook', async (req, res) => {
           await telegramApi('sendMessage', {
             chat_id: cid,
             text:
-              `🤝 <b>Referal dasturi</b>\n\n` +
+              `🎁 <b>Promokod va Referal Dasturi</b>\n\n` +
               `👥 Taklif qilgan do'stlaringiz: <b>${account.referralCount || 0} ta</b>\n` +
-              `💵 Har bir yangi do'st uchun bonus: <b>+${escapeTgHtml(formatSomServer(pricing.referralInviterBonus))}</b>\n\n` +
-              `🔗 Sizning havolangiz:\n<code>${escapeTgHtml(refLink)}</code>`,
+              `💵 Har bir yangi do'st uchun: <b>+${escapeTgHtml(formatSomServer(pricing.referralInviterBonus))}</b>\n` +
+              `🔗 Referal havolangiz:\n<code>${escapeTgHtml(refLink)}</code>\n\n` +
+              `🎟 Promokodingiz bormi? <code>/promo KOD</code> shaklida yuboring yoki ilova ichidan faollashtiring!`,
             parse_mode: 'HTML',
-            reply_markup: buildMainBotKeyboard(loginUrl, origin),
+            reply_markup: buildMainBotKeyboard(origin, staffLoginUrl),
           });
-        } else if (cmd === '/balance') {
+        } else if (text === '🎧 Support va Yordam' || cmd === '/support_info') {
+          const agent = await resolveDefaultSupportAgent();
+          const tgLink = agent.username ? `@${agent.username}` : `@${siteCfg.supportUsername}`;
           await telegramApi('sendMessage', {
             chat_id: cid,
             text:
-              `💰 <b>Joriy balansingiz:</b> ${escapeTgHtml(formatSomServer(account.balance))}\n` +
-              `To'ldirish uchun /topup buyrug'idan foydalaning.`,
+              `🎧 <b>SlaydCanva Rasmiy Support</b>\n\n` +
+              `👨‍💻 Mutaxassis: <b>${escapeTgHtml(agent.firstName)}</b> (${escapeTgHtml(agent.roleTitle)})\n` +
+              `📬 Telegram: ${escapeTgHtml(tgLink)}\n\n` +
+              `Murojaatingizni to'g'ridan-to'g'ri shu chatga yozib yuboring — xabaringiz Support Inbox tizimiga yetkaziladi va mutaxassisimiz javob beradi.`,
             parse_mode: 'HTML',
-            reply_markup: {
-              inline_keyboard: [
-                [{ text: "💳 Balans to'ldirish", callback_data: 'menu:topup' }],
-                [{ text: '📜 Tarix', callback_data: 'menu:history' }],
-              ],
-            },
+            reply_markup: buildMainBotKeyboard(origin, staffLoginUrl),
           });
+        } else if (cmd === '/promo') {
+          const rawCode = arg.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '').slice(0, 32);
+          if (rawCode.length < 3) {
+            await telegramApi('sendMessage', {
+              chat_id: cid,
+              text: "🎟 Promokod ishlatish uchun: <code>/promo KODNOMI</code> shaklida yozing.",
+              parse_mode: 'HTML',
+            });
+          } else {
+            const dbRes = await dbRedeemPromoCode({
+              code: rawCode,
+              telegramId: tid,
+              dateLabel: formatUzDate(),
+            });
+            if (dbRes && dbRes.ok) {
+              await recordCrmEventSafe({
+                eventType: 'promo_redeemed',
+                title: `Promokod (Bot): ${rawCode}`,
+                message: `${user.firstName} (${tid}) +${formatSomServer(dbRes.bonusAmount)} oldi`,
+                userId: tid,
+                amount: dbRes.bonusAmount,
+              });
+              await telegramApi('sendMessage', {
+                chat_id: cid,
+                text:
+                  `🎉 <b>Promokod faollashtirildi: ${escapeTgHtml(rawCode)}</b>\n\n` +
+                  `💵 Qo'shildi: <b>+${escapeTgHtml(formatSomServer(dbRes.bonusAmount))}</b>\n` +
+                  `💰 Yangi balans: <b>${escapeTgHtml(formatSomServer(dbRes.balance))}</b>`,
+                parse_mode: 'HTML',
+              });
+            } else {
+              await telegramApi('sendMessage', {
+                chat_id: cid,
+                text: `❌ ${escapeTgHtml(dbRes && !dbRes.ok ? dbRes.error : 'Promokod faol emas yoki topilmadi.')}`,
+                parse_mode: 'HTML',
+              });
+            }
+          }
         } else if (cmd === '/history') {
           await telegramApi('sendMessage', {
             chat_id: cid,
             text: formatBotHistoryMessage(account),
             parse_mode: 'HTML',
-            reply_markup: buildMainBotKeyboard(loginUrl, origin),
+            reply_markup: buildMainBotKeyboard(origin, staffLoginUrl),
           });
         } else if (cmd === '/topup') {
           const customAmount = Number(arg.replace(/\D/g, ''));
@@ -6098,18 +7231,81 @@ app.post('/api/telegram/webhook', async (req, res) => {
             });
           }
         } else {
-          await telegramApi('sendMessage', {
-            chat_id: cid,
-            text:
-              `📌 <b>Mavjud buyruqlar:</b>\n` +
-              `/start — Kirish va bosh menyu\n` +
-              `/balance — Balansni tekshirish\n` +
-              `/referral — Referal havola olish\n` +
-              `/topup — Balans to'ldirish\n` +
-              `/history — Amaliyotlar tarixi`,
-            parse_mode: 'HTML',
-            reply_markup: buildMainBotKeyboard(loginUrl, origin),
-          });
+          // Route /support <msg> or plain-text user messages directly into Support Inbox!
+          const supportBody =
+            cmd === '/support' ? text.replace(/^\/support(@\S+)?\s*/i, '').trim() : text;
+          if (supportBody && !supportBody.startsWith('/')) {
+            const defaultSupport = await resolveDefaultSupportAgent();
+            const ticket =
+              (await dbUpsertSupportTicket({
+                telegramId: tid,
+                userFirstName: user.firstName,
+                userUsername: user.username,
+                assignedTo: defaultSupport.telegramId,
+                assignedName: defaultSupport.firstName,
+                subject: 'Telegram bot murojaati',
+                lastMessage: supportBody,
+                incrementStaffUnread: true,
+                status: 'open',
+              })) || {
+                id: `sup_${tid}`,
+                telegramId: tid,
+                userFirstName: user.firstName,
+                userUsername: user.username,
+                assignedTo: defaultSupport.telegramId,
+                assignedName: defaultSupport.firstName,
+                status: 'open' as const,
+                subject: 'Telegram bot murojaati',
+                lastMessage: supportBody.slice(0, 400),
+                unreadForStaff: 1,
+                unreadForUser: 0,
+                createdAt: Date.now(),
+                updatedAt: Date.now(),
+              };
+            await saveSupportTicketKvFallback(ticket);
+            await appendInboxMessageSafe({
+              id: `msg_${Date.now().toString(36)}_${crypto.randomBytes(3).toString('hex')}`,
+              threadId: ticket.id,
+              telegramId: tid,
+              senderRole: 'user',
+              senderId: tid,
+              senderName: user.firstName,
+              channel: 'telegram',
+              message: supportBody,
+              isRead: false,
+            });
+            await Promise.all([
+              recordCrmEventSafe({
+                eventType: 'support_message',
+                title: `Telegram Support xabari: ${user.firstName}`,
+                message: supportBody.slice(0, 180),
+                userId: tid,
+              }),
+              notifySupportStaffTelegram(ticket, supportBody),
+            ]);
+            await telegramApi('sendMessage', {
+              chat_id: cid,
+              text:
+                `✅ <b>Murojaatingiz Support jamoasiga yuborildi!</b>\n` +
+                `🎧 Mutaxassis: <b>${escapeTgHtml(defaultSupport.firstName)}</b> tez orada shu chatga yoki ilova ichiga javob yozadi.`,
+              parse_mode: 'HTML',
+            });
+          } else {
+            await telegramApi('sendMessage', {
+              chat_id: cid,
+              text:
+                `📌 <b>Mavjud buyruqlar:</b>\n` +
+                `/start — Bosh menyu va ilovani ochish\n` +
+                `/files — Telegramdagi fayllar ro'yxati\n` +
+                `/balance — Balans va to'ldirish\n` +
+                `/promo KOD — Promokod faollashtirish\n` +
+                `/referral — Referal havola olish\n` +
+                `/support Xabar — Supportga yozish\n` +
+                `/history — Amaliyotlar tarixi`,
+              parse_mode: 'HTML',
+              reply_markup: buildMainBotKeyboard(origin, staffLoginUrl),
+            });
+          }
         }
       }
     }
@@ -6119,6 +7315,61 @@ app.post('/api/telegram/webhook', async (req, res) => {
     console.error('[Telegram Webhook Error]', err);
     res.json({ ok: true });
   }
+});
+
+app.post('/api/admin/telegram/setup-webhook', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'settings');
+  if (!ctx) return;
+  const token = getTelegramBotToken();
+  if (!token) {
+    res.status(503).json({ error: 'TELEGRAM_BOT_TOKEN sozlanmagan.' });
+    return;
+  }
+  const secret = getTelegramWebhookSecret();
+  const origin = getPreferredPublicOrigin(req);
+  const webhookUrl = `${origin}/api/telegram/webhook`;
+
+  const [setHookRes, setCmdRes, setMenuRes] = await Promise.all([
+    telegramApi('setWebhook', {
+      url: webhookUrl,
+      ...(secret ? { secret_token: secret } : {}),
+      allowed_updates: ['message', 'callback_query'],
+    }),
+    telegramApi('setMyCommands', {
+      commands: [
+        { command: 'start', description: "Bosh menyu va Mini Appni ochish" },
+        { command: 'files', description: "Saqlangan fayllar va amaliyotlar" },
+        { command: 'balance', description: "Joriy balans va to'ldirish" },
+        { command: 'promo', description: "Promokod faollashtirish" },
+        { command: 'referral', description: "Referal havola olish" },
+        { command: 'support', description: "Support mutaxassisiga yozish" },
+      ],
+    }),
+    telegramApi('setChatMenuButton', {
+      menu_button: {
+        type: 'web_app',
+        text: 'SlaydCanva',
+        web_app: { url: origin },
+      },
+    }),
+  ]);
+
+  const botUsername = await resolveTelegramBotUsername();
+  await dbAppendAuditLog({
+    id: `aud_hook_${Date.now().toString(36)}`,
+    actorId: ctx.user.telegramId,
+    action: 'telegram_webhook_synced',
+    details: `Webhook (${webhookUrl}) + MenuButton + Commands yangilandi`,
+  });
+
+  res.status(setHookRes.ok ? 200 : 502).json({
+    ok: setHookRes.ok,
+    webhookUrl,
+    botUsername,
+    commandsUpdated: setCmdRes.ok,
+    menuButtonUpdated: setMenuRes.ok,
+    telegramResponse: setHookRes,
+  });
 });
 
 app.all('/api/telegram/setup-webhook', async (req, res) => {
@@ -6152,20 +7403,30 @@ app.all('/api/telegram/setup-webhook', async (req, res) => {
   const origin = getPreferredPublicOrigin(req);
   const webhookUrl = `${origin}/api/telegram/webhook`;
 
-  const setHookRes = await telegramApi('setWebhook', {
-    url: webhookUrl,
-    ...(secret ? { secret_token: secret } : {}),
-    allowed_updates: ['message', 'callback_query'],
-  });
-
-  const setCmdRes = await telegramApi('setMyCommands', {
-    commands: [
-      { command: 'start', description: "Saytga kirish va bosh menyu" },
-      { command: 'balance', description: "Joriy balansni ko'rish" },
-      { command: 'topup', description: "TolovGo orqali balans to'ldirish" },
-      { command: 'history', description: "Amaliyotlar tarixini ko'rish" },
-    ],
-  });
+  const [setHookRes, setCmdRes, setMenuRes] = await Promise.all([
+    telegramApi('setWebhook', {
+      url: webhookUrl,
+      ...(secret ? { secret_token: secret } : {}),
+      allowed_updates: ['message', 'callback_query'],
+    }),
+    telegramApi('setMyCommands', {
+      commands: [
+        { command: 'start', description: "Bosh menyu va Mini Appni ochish" },
+        { command: 'files', description: "Saqlangan fayllar va amaliyotlar" },
+        { command: 'balance', description: "Joriy balans va to'ldirish" },
+        { command: 'promo', description: "Promokod faollashtirish" },
+        { command: 'referral', description: "Referal havola olish" },
+        { command: 'support', description: "Support mutaxassisiga yozish" },
+      ],
+    }),
+    telegramApi('setChatMenuButton', {
+      menu_button: {
+        type: 'web_app',
+        text: 'SlaydCanva',
+        web_app: { url: origin },
+      },
+    }),
+  ]);
 
   const botUsername = await resolveTelegramBotUsername();
 
@@ -6174,6 +7435,7 @@ app.all('/api/telegram/setup-webhook', async (req, res) => {
     webhookUrl,
     botUsername,
     commandsUpdated: setCmdRes.ok,
+    menuButtonUpdated: setMenuRes.ok,
     telegramResponse: setHookRes,
   });
 });

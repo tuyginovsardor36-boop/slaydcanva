@@ -1,10 +1,27 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { AlertTriangle, ArrowLeft, Megaphone, X } from 'lucide-react';
+import {
+  AlertTriangle,
+  ArrowLeft,
+  ExternalLink,
+  Headphones,
+  Loader2,
+  Megaphone,
+  Send,
+  Shield,
+  X,
+} from 'lucide-react';
 import { AdminDashboard } from './components/AdminDashboard';
 import { AiGeneratedPayload, AiServicesView } from './components/AiServicesView';
 import { CanvasWorkspace } from './components/CanvasWorkspace';
 import { MobileBottomNav } from './components/MobileBottomNav';
-import { BalanceView, HomeView, ProfileView, TopUpView } from './components/MobileViews';
+import {
+  BalanceView,
+  FilesAndOpsView,
+  HomeView,
+  ProfileView,
+  SupportClientPanel,
+  TopUpView,
+} from './components/MobileViews';
 import { TopBar } from './components/TopBar';
 import { WordWorkspace } from './components/WordWorkspace';
 import {
@@ -140,6 +157,7 @@ export default function App() {
   const [mobileServiceOpen, setMobileServiceOpen] = useState(false);
   const [desktopTopUpOpen, setDesktopTopUpOpen] = useState(false);
   const [desktopProfileOpen, setDesktopProfileOpen] = useState(false);
+  const [desktopSupportOpen, setDesktopSupportOpen] = useState(false);
   const [mobileSheetOpen, setMobileSheetOpen] = useState(false);
   const [notice, setNotice] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
   const [telegramUser, setTelegramUser] = useState<TelegramUser | null>(null);
@@ -158,8 +176,18 @@ export default function App() {
     notifyNewUsersToStaff: true,
     notifyPaymentsToStaff: true,
     defaultAiModel: 'google/gemini-2.5-flash',
+    telegramOnlyMode: true,
+    supportUsername: '',
+    botWelcomeTitle: '',
   });
   const [botUsername, setBotUsername] = useState<string | null>(null);
+  const [telegramConfigured, setTelegramConfigured] = useState(false);
+  const [inTelegramWebApp, setInTelegramWebApp] = useState(false);
+  const [authBooting, setAuthBooting] = useState(true);
+  const [showStaffGateLogin, setShowStaffGateLogin] = useState(false);
+  const [staffLoginNonce, setStaffLoginNonce] = useState('');
+  const [waitingStaffAuth, setWaitingStaffAuth] = useState(false);
+  const [staffGateError, setStaffGateError] = useState<string | null>(null);
   const [activeProjectId, setActiveProjectId] = useState<string>('');
   const [savedProjects, setSavedProjects] = useState<ProjectSummary[]>([]);
   const [syncingProject, setSyncingProject] = useState(false);
@@ -170,15 +198,54 @@ export default function App() {
 
   useEffect(() => {
     let active = true;
+    const webApp = (window as TelegramWebAppWindow).Telegram?.WebApp;
+    setInTelegramWebApp(
+      Boolean(webApp?.initData || (webApp as { initDataUnsafe?: { user?: unknown } } | undefined)?.initDataUnsafe?.user)
+    );
+
+    const bytes = new Uint8Array(9);
+    window.crypto.getRandomValues(bytes);
+    setStaffLoginNonce(Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join(''));
+
     void fetchAppPricing().then((res) => {
       if (!active || !res) return;
       if (res.pricing) setPricingSettings(res.pricing);
       if (res.botUsername) setBotUsername(res.botUsername);
-      if (res.siteConfig) setSiteConfig(res.siteConfig);
+      if (res.siteConfig) setSiteConfig((prev) => ({ ...prev, ...res.siteConfig }));
       if (res.tolovgoMode === 'test' || res.tolovgoMode === 'live') {
         setState((prev) => ({ ...prev, tolovgoMode: res.tolovgoMode }));
       }
     });
+
+    void fetch('/api/telegram/config')
+      .then((r) => (r.ok ? r.json() : null))
+      .then(
+        (
+          cfg: {
+            configured?: boolean;
+            botUsername?: string | null;
+            telegramOnlyMode?: boolean;
+            supportUsername?: string;
+          } | null
+        ) => {
+          if (!active || !cfg) return;
+          setTelegramConfigured(Boolean(cfg.configured));
+          if (cfg.botUsername) setBotUsername(cfg.botUsername);
+          setSiteConfig((prev) => ({
+            ...prev,
+            telegramOnlyMode:
+              typeof cfg.telegramOnlyMode === 'boolean'
+                ? cfg.telegramOnlyMode
+                : prev.telegramOnlyMode,
+            supportUsername:
+              typeof cfg.supportUsername === 'string'
+                ? cfg.supportUsername
+                : prev.supportUsername,
+          }));
+        }
+      )
+      .catch(() => {});
+
     return () => {
       active = false;
     };
@@ -210,6 +277,7 @@ export default function App() {
         kvConfigured?: boolean;
         isAdmin?: boolean;
         isManager?: boolean;
+        isSupport?: boolean;
         staffRole?: StaffRole;
         managerPermissions?: ManagerPermission[];
       },
@@ -217,11 +285,16 @@ export default function App() {
     ) => {
       const adminFlag = Boolean(payload.isAdmin || payload.user.isAdmin || payload.staffRole === 'super_admin');
       const managerFlag = Boolean(!adminFlag && (payload.isManager || payload.staffRole === 'manager'));
+      const supportFlag = Boolean(
+        !adminFlag && !managerFlag && (payload.isSupport || payload.staffRole === 'support')
+      );
       const resolvedRole: StaffRole = adminFlag
         ? 'super_admin'
         : managerFlag
           ? 'manager'
-          : 'user';
+          : supportFlag
+            ? 'support'
+            : 'user';
 
       setIsAdmin(adminFlag);
       setIsManager(managerFlag);
@@ -229,6 +302,8 @@ export default function App() {
       setManagerPermissions(
         Array.isArray(payload.managerPermissions) ? payload.managerPermissions : []
       );
+      setWaitingStaffAuth(false);
+      setStaffGateError(null);
 
       setTelegramUser({
         ...payload.user,
@@ -238,13 +313,14 @@ export default function App() {
         isBanned: payload.account?.isBanned ?? payload.user.isBanned ?? false,
         isAdmin: adminFlag,
         isManager: managerFlag,
+        isSupport: supportFlag,
         staffRole: resolvedRole,
         managerPermissions: payload.managerPermissions,
       });
       setTgSessionToken(payload.sessionToken);
 
-      // Restore 15-day Admin/Manager session cookie if already unlocked
-      if (adminFlag || managerFlag) {
+      // Restore 15-day Admin/Manager/Support session cookie if already unlocked
+      if (adminFlag || managerFlag || supportFlag) {
         void adminGetStatus(payload.sessionToken).then((st) => {
           if (!('error' in st) && st.adminUnlocked && st.adminToken) {
             setAdminToken(st.adminToken);
@@ -297,61 +373,18 @@ export default function App() {
   useEffect(() => {
     let active = true;
     const bootTelegramAuth = async () => {
-      const url = new URL(window.location.href);
-      const tgAuthToken = url.searchParams.get('tg_auth');
-      if (tgAuthToken) {
-        url.searchParams.delete('tg_auth');
-        window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
-        try {
-          const res = await fetch('/api/telegram/auth/verify', {
-            method: 'POST',
-            credentials: 'same-origin',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ token: tgAuthToken }),
-          });
-          const data = (await res.json().catch(() => ({}))) as {
-            ok?: boolean;
-            user?: TelegramUser;
-            sessionToken?: string;
-            account?: TelegramAccountResponse;
-            kvConfigured?: boolean;
-            isAdmin?: boolean;
-            isManager?: boolean;
-            staffRole?: StaffRole;
-            managerPermissions?: ManagerPermission[];
-          };
-          if (active && res.ok && data.user && data.sessionToken) {
-            applyTelegramAuth(
-              {
-                user: data.user,
-                sessionToken: data.sessionToken,
-                account: data.account,
-                kvConfigured: data.kvConfigured,
-                isAdmin: data.isAdmin,
-                isManager: data.isManager,
-                staffRole: data.staffRole,
-                managerPermissions: data.managerPermissions,
-              },
-              true
-            );
-            return;
-          }
-        } catch {
-          // Ignore verification errors and continue
-        }
-      }
-
-      const webApp = (window as TelegramWebAppWindow).Telegram?.WebApp;
-      if (webApp) {
-        webApp.ready?.();
-        webApp.expand?.();
-        if (webApp.initData) {
+      try {
+        const url = new URL(window.location.href);
+        const tgAuthToken = url.searchParams.get('tg_auth');
+        if (tgAuthToken) {
+          url.searchParams.delete('tg_auth');
+          window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
           try {
-            const res = await fetch('/api/telegram/auth/webapp', {
+            const res = await fetch('/api/telegram/auth/verify', {
               method: 'POST',
               credentials: 'same-origin',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ initData: webApp.initData }),
+              body: JSON.stringify({ token: tgAuthToken }),
             });
             const data = (await res.json().catch(() => ({}))) as {
               ok?: boolean;
@@ -361,6 +394,7 @@ export default function App() {
               kvConfigured?: boolean;
               isAdmin?: boolean;
               isManager?: boolean;
+              isSupport?: boolean;
               staffRole?: StaffRole;
               managerPermissions?: ManagerPermission[];
             };
@@ -373,50 +407,103 @@ export default function App() {
                   kvConfigured: data.kvConfigured,
                   isAdmin: data.isAdmin,
                   isManager: data.isManager,
+                  isSupport: data.isSupport,
                   staffRole: data.staffRole,
                   managerPermissions: data.managerPermissions,
                 },
-                false
+                true
               );
               return;
             }
           } catch {
-            // Ignore WebApp auth fallback
+            // Ignore verification errors and continue
           }
         }
-      }
 
-      try {
-        const res = await fetch('/api/telegram/me', { credentials: 'same-origin' });
-        if (!res.ok || !active) return;
-        const data = (await res.json().catch(() => ({}))) as {
-          ok?: boolean;
-          user?: TelegramUser;
-          sessionToken?: string;
-          account?: TelegramAccountResponse;
-          kvConfigured?: boolean;
-          isAdmin?: boolean;
-          isManager?: boolean;
-          staffRole?: StaffRole;
-          managerPermissions?: ManagerPermission[];
-        };
-        if (active && data.user && data.sessionToken) {
-          applyTelegramAuth(
-            {
-              user: data.user,
-              sessionToken: data.sessionToken,
-              account: data.account,
-              kvConfigured: data.kvConfigured,
-              isAdmin: data.isAdmin,
-              isManager: data.isManager,
-              staffRole: data.staffRole,
-              managerPermissions: data.managerPermissions,
-            },
-            false
-          );
+        const webApp = (window as TelegramWebAppWindow).Telegram?.WebApp;
+        if (webApp) {
+          webApp.ready?.();
+          webApp.expand?.();
+          if (webApp.initData) {
+            setInTelegramWebApp(true);
+            try {
+              const res = await fetch('/api/telegram/auth/webapp', {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ initData: webApp.initData }),
+              });
+              const data = (await res.json().catch(() => ({}))) as {
+                ok?: boolean;
+                user?: TelegramUser;
+                sessionToken?: string;
+                account?: TelegramAccountResponse;
+                kvConfigured?: boolean;
+                isAdmin?: boolean;
+                isManager?: boolean;
+                isSupport?: boolean;
+                staffRole?: StaffRole;
+                managerPermissions?: ManagerPermission[];
+              };
+              if (active && res.ok && data.user && data.sessionToken) {
+                applyTelegramAuth(
+                  {
+                    user: data.user,
+                    sessionToken: data.sessionToken,
+                    account: data.account,
+                    kvConfigured: data.kvConfigured,
+                    isAdmin: data.isAdmin,
+                    isManager: data.isManager,
+                    isSupport: data.isSupport,
+                    staffRole: data.staffRole,
+                    managerPermissions: data.managerPermissions,
+                  },
+                  false
+                );
+                return;
+              }
+            } catch {
+              // Ignore WebApp auth fallback
+            }
+          }
         }
-      } catch {
-        // Not logged in yet
+
+        try {
+          const res = await fetch('/api/telegram/me', { credentials: 'same-origin' });
+          if (!res.ok || !active) return;
+          const data = (await res.json().catch(() => ({}))) as {
+            ok?: boolean;
+            user?: TelegramUser;
+            sessionToken?: string;
+            account?: TelegramAccountResponse;
+            kvConfigured?: boolean;
+            isAdmin?: boolean;
+            isManager?: boolean;
+            isSupport?: boolean;
+            staffRole?: StaffRole;
+            managerPermissions?: ManagerPermission[];
+          };
+          if (active && data.user && data.sessionToken) {
+            applyTelegramAuth(
+              {
+                user: data.user,
+                sessionToken: data.sessionToken,
+                account: data.account,
+                kvConfigured: data.kvConfigured,
+                isAdmin: data.isAdmin,
+                isManager: data.isManager,
+                isSupport: data.isSupport,
+                staffRole: data.staffRole,
+                managerPermissions: data.managerPermissions,
+              },
+              false
+            );
+          }
+        } catch {
+          // Not logged in yet
+        }
+      } finally {
+        if (active) setAuthBooting(false);
       }
     };
 
@@ -425,6 +512,68 @@ export default function App() {
       active = false;
     };
   }, [applyTelegramAuth]);
+
+  // Poll Staff Browser Auth when Telegram-Only mode is active
+  useEffect(() => {
+    if (!waitingStaffAuth || !staffLoginNonce || telegramUser) return;
+    let active = true;
+    const poll = async () => {
+      try {
+        const res = await fetch(
+          `/api/telegram/auth/poll?nonce=${encodeURIComponent(staffLoginNonce)}`
+        );
+        const data = (await res.json().catch(() => ({}))) as {
+          authenticated?: boolean;
+          telegramOnly?: boolean;
+          error?: string;
+          user?: TelegramUser;
+          sessionToken?: string;
+          account?: TelegramAccountResponse;
+          kvConfigured?: boolean;
+          isAdmin?: boolean;
+          isManager?: boolean;
+          isSupport?: boolean;
+          staffRole?: StaffRole;
+          managerPermissions?: ManagerPermission[];
+        };
+        if (!active) return;
+        if (res.status === 403 && data.telegramOnly) {
+          setWaitingStaffAuth(false);
+          setStaffGateError(
+            data.error ||
+              "Bu hisob oddiy foydalanuvchi hisoblanadi. Telegram ilovasidagi bot orqali kiring."
+          );
+          return;
+        }
+        if (res.ok && data.authenticated && data.user && data.sessionToken) {
+          setWaitingStaffAuth(false);
+          applyTelegramAuth(
+            {
+              user: data.user,
+              sessionToken: data.sessionToken,
+              account: data.account,
+              kvConfigured: data.kvConfigured,
+              isAdmin: data.isAdmin,
+              isManager: data.isManager,
+              isSupport: data.isSupport,
+              staffRole: data.staffRole,
+              managerPermissions: data.managerPermissions,
+            },
+            true
+          );
+        }
+      } catch {
+        // Ignore transient network errors
+      }
+    };
+    const timer = window.setInterval(() => {
+      void poll();
+    }, 2500);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [waitingStaffAuth, staffLoginNonce, telegramUser, applyTelegramAuth]);
 
   const handleModeChange = (mode: WorkspaceMode) => {
     setMobileSheetOpen(false);
@@ -1103,6 +1252,111 @@ export default function App() {
     }
   };
 
+  const isStaffMember = isAdmin || isManager || staffRole === 'support';
+  const telegramOnlyBlocked =
+    !authBooting &&
+    telegramConfigured &&
+    (siteConfig.telegramOnlyMode ?? true) &&
+    !inTelegramWebApp &&
+    !isStaffMember;
+
+  if (telegramOnlyBlocked) {
+    const botHandle = botUsername || 'SlaydCanvaBot';
+    return (
+      <div className="min-h-screen w-screen bg-[#111113] text-white flex items-center justify-center p-4">
+        <div className="w-full max-w-md bg-zinc-900/95 border border-zinc-800 rounded-2xl overflow-hidden shadow-2xl">
+          <div className="aspect-video w-full bg-zinc-950 overflow-hidden relative">
+            <img
+              src="/assets/bot-welcome.jpg"
+              alt="SlaydCanva Telegram Bot"
+              className="w-full h-full object-cover"
+            />
+          </div>
+
+          <div className="p-6 space-y-4">
+            <div className="space-y-1.5">
+              <div className="text-[11px] font-mono uppercase tracking-wider text-red-400">
+                Faqat Telegram Ilovasi (Mini App)
+              </div>
+              <h1 className="font-display text-lg font-bold text-white leading-snug">
+                SlaydCanva endi faqat Telegram bot ichida ochiladi
+              </h1>
+              <p className="text-xs text-zinc-400 leading-relaxed">
+                Xavfsizlik va barcha taqdimot fayllaringiz Telegramda saqlanishi uchun ilovani bot orqali ishga tushiring:
+              </p>
+            </div>
+
+            <ol className="space-y-1.5 text-xs text-zinc-300 bg-zinc-950/70 border border-zinc-800 rounded-xl p-3.5">
+              <li>1. Quyidagi tugma orqali Telegram botni oching (@{botHandle})</li>
+              <li>2. Botga «Start» bosing va yo‘riqnomani ko‘ring</li>
+              <li>3. Pastdagi «🚀 Ilovani ochish» tugmasini bosing</li>
+            </ol>
+
+            <a
+              href={`https://t.me/${botHandle}?start=webapp`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="w-full py-3 px-4 rounded-xl bg-red-600 hover:bg-red-700 text-white text-sm font-semibold flex items-center justify-center gap-2 transition-colors"
+            >
+              <Send className="w-4 h-4" />
+              <span>Telegramda Botni Ochish</span>
+              <ExternalLink className="w-3.5 h-3.5" />
+            </a>
+
+            <div className="pt-2 border-t border-zinc-800">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowStaffGateLogin((v) => !v);
+                  setStaffGateError(null);
+                }}
+                className="w-full text-[11px] text-zinc-400 hover:text-zinc-200 flex items-center justify-center gap-1.5 py-1"
+              >
+                <Shield className="w-3.5 h-3.5 text-red-400" />
+                <span>Xodim / Admin / Support CRM kirishi</span>
+              </button>
+
+              {showStaffGateLogin && (
+                <div className="mt-3 p-3.5 rounded-xl bg-zinc-950 border border-zinc-800 space-y-2.5 text-xs">
+                  <p className="text-zinc-400 leading-relaxed">
+                    Admin, Menejer va Support xodimlari kompyuter brauzeridan CRM paneliga kirish uchun botdan tasdiqlash tugmasini bosing:
+                  </p>
+                  {staffGateError && (
+                    <div className="p-2.5 rounded-lg bg-red-950/60 border border-red-800 text-red-200 text-[11px]">
+                      {staffGateError}
+                    </div>
+                  )}
+                  <a
+                    href={`https://t.me/${botHandle}?start=auth_${staffLoginNonce}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={() => {
+                      setStaffGateError(null);
+                      setWaitingStaffAuth(true);
+                    }}
+                    className="w-full py-2.5 px-3 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-white font-semibold flex items-center justify-center gap-1.5"
+                  >
+                    {waitingStaffAuth ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin text-red-400" />
+                        <span>Bot tasdig‘i kutilmoqda...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Shield className="w-3.5 h-3.5 text-red-400" />
+                        <span>Bot orqali Xodim sifatida kirish</span>
+                      </>
+                    )}
+                  </a>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="h-screen w-screen flex flex-col overflow-hidden bg-[#F4F4F6]">
       <TopBar
@@ -1121,14 +1375,15 @@ export default function App() {
         onResetCurrent={handleResetCurrent}
         onOpenTopUp={() => setDesktopTopUpOpen(true)}
         onOpenProfile={() => setDesktopProfileOpen(true)}
-        isAdmin={isAdmin || isManager}
+        onOpenSupport={() => setDesktopSupportOpen(true)}
+        isAdmin={isStaffMember}
         staffRole={staffRole}
         onOpenAdminPanel={() => setAdminOpen(true)}
         telegramUser={telegramUser}
         isExporting={isExporting}
       />
 
-      {siteConfig.maintenanceMode && !isAdmin && !isManager && (
+      {siteConfig.maintenanceMode && !isStaffMember && (
         <div className="shrink-0 bg-amber-50 border-b border-amber-200 px-4 py-2 text-xs text-amber-900 flex items-center justify-center gap-2">
           <AlertTriangle className="w-3.5 h-3.5 text-amber-700 shrink-0" />
           <span>
@@ -1145,7 +1400,7 @@ export default function App() {
         </div>
       )}
 
-      {/* Mobile Secondary Views (Bosh sahifa, AI Xizmatlar, Balans to'ldirish, Balans, Profil) */}
+      {/* Mobile Secondary Views (Bosh sahifa, Fayllar va Amaliyotlar, Balans to'ldirish, Balans, Profil) */}
       {mobileTab !== 'editor' && (
         <div className="md:hidden flex-1 flex flex-col min-h-0 overflow-hidden">
           {mobileTab === 'home' && !mobileServiceOpen && (
@@ -1187,6 +1442,23 @@ export default function App() {
               />
             </div>
           )}
+          {mobileTab === 'files' && (
+            <FilesAndOpsView
+              telegramSessionToken={tgSessionToken}
+              telegramUser={telegramUser}
+              botUsername={botUsername}
+              savedProjects={savedProjects}
+              activeProjectId={activeProjectId}
+              transactions={state.transactions}
+              syncingProject={syncingProject}
+              onSaveProjectNow={() => void syncCurrentProjectNow(undefined, false)}
+              onLoadCloudProject={(id) => void handleLoadCloudProject(id)}
+              onDeleteCloudProject={(id) => void handleDeleteCloudProject(id)}
+              onSendCurrentToTelegram={() => void handleExportPrimary()}
+              onOpenEditor={handleOpenEditorMode}
+              onOpenTab={handleSelectMobileTab}
+            />
+          )}
           {mobileTab === 'topup' && (
             <TopUpView
               balance={state.balance}
@@ -1210,10 +1482,12 @@ export default function App() {
               balance={state.balance}
               pptxCount={state.pptxPages.length}
               pdfCount={state.pdfPages.length}
-              isAdmin={isAdmin || isManager}
+              isAdmin={isStaffMember}
               staffRole={staffRole}
               pricingSettings={pricingSettings}
               botUsername={botUsername}
+              supportUsername={siteConfig.supportUsername}
+              onNotify={showNotice}
               telegramUser={telegramUser}
               telegramSessionToken={tgSessionToken}
               onTelegramAuthenticated={(p) => applyTelegramAuth(p, true)}
@@ -1378,10 +1652,12 @@ export default function App() {
               balance={state.balance}
               pptxCount={state.pptxPages.length}
               pdfCount={state.pdfPages.length}
-              isAdmin={isAdmin || isManager}
+              isAdmin={isStaffMember}
               staffRole={staffRole}
               pricingSettings={pricingSettings}
               botUsername={botUsername}
+              supportUsername={siteConfig.supportUsername}
+              onNotify={showNotice}
               telegramUser={telegramUser}
               telegramSessionToken={tgSessionToken}
               onTelegramAuthenticated={(p) => applyTelegramAuth(p, true)}
@@ -1408,7 +1684,44 @@ export default function App() {
         </div>
       )}
 
-      {adminOpen && (isAdmin || isManager) && telegramUser && tgSessionToken && (
+      {/* Desktop Support & Help Modal */}
+      {desktopSupportOpen && (
+        <div
+          className="hidden md:flex fixed inset-0 z-50 bg-black/40 backdrop-blur-[2px] items-center justify-center p-4"
+          onClick={() => setDesktopSupportOpen(false)}
+        >
+          <div
+            className="w-full max-w-md max-h-[85vh] bg-white rounded-2xl shadow-xl overflow-hidden flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-5 py-3.5 border-b border-slate-200 flex items-center justify-between shrink-0">
+              <span className="text-sm font-semibold text-slate-900 flex items-center gap-1.5">
+                <Headphones className="w-4 h-4 text-red-600" />
+                <span>Support va Yordam Markazi</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => setDesktopSupportOpen(false)}
+                className="p-1 text-slate-500 hover:text-slate-900 rounded-md"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 overflow-y-auto">
+              <SupportClientPanel
+                telegramSessionToken={tgSessionToken}
+                telegramUser={telegramUser}
+                botUsername={botUsername}
+                supportUsername={siteConfig.supportUsername}
+                compact
+                onNotify={showNotice}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {adminOpen && isStaffMember && telegramUser && tgSessionToken && (
         <AdminDashboard
           telegramUser={telegramUser}
           telegramSessionToken={tgSessionToken}

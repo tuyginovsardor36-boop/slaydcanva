@@ -5,7 +5,6 @@ import {
   AlertTriangle,
   ArrowLeft,
   Ban,
-  BarChart3,
   Bell,
   Check,
   CheckCheck,
@@ -15,6 +14,7 @@ import {
   Download,
   Eye,
   Gift,
+  Headphones,
   KeyRound,
   LayoutDashboard,
   Loader2,
@@ -30,6 +30,7 @@ import {
   ShieldAlert,
   ShieldCheck,
   Sliders,
+  Sparkles,
   Tag,
   Trash2,
   Unlock,
@@ -50,22 +51,30 @@ import {
   AppPricingSettings,
   BroadcastLogRow,
   CrmEventRow,
+  InboxMessageRow,
   ManagerPermission,
   ManagerRecord,
   PromoCodeRow,
+  SecurityLogRow,
+  SecurityScanReport,
   SiteConfigSettings,
   StaffRole,
+  SupportTicketRow,
+  SupportTicketStatus,
   TelegramUser,
   TolovgoPaymentMode,
 } from '../types/editor';
 import {
   adminAdjustUserBalance,
+  adminAnalyzeSecurityLogs,
+  adminAssignSupportTicket,
   adminChangePassword,
   adminDeleteManager,
   adminDeletePromo,
   adminGetAnalytics,
   adminGetOverview,
   adminGetStatus,
+  adminGetSupportThread,
   adminGetUserDetail,
   adminListAuditLogs,
   adminListBroadcasts,
@@ -73,10 +82,15 @@ import {
   adminListManagers,
   adminListOrders,
   adminListPromos,
+  adminListSecurityLogs,
+  adminListSupportTickets,
   adminListUsers,
   adminLogin,
   adminLogout,
   adminMarkCrmEventsRead,
+  adminReplySupportTicket,
+  adminResolveSecurityLog,
+  adminRunSecurityScan,
   adminSavePricing,
   adminSaveSettings,
   adminSaveSiteConfig,
@@ -84,15 +98,19 @@ import {
   adminSendDirectMessage,
   adminSendTestTelegramAlert,
   adminSetupPassword,
+  adminSetupTelegramWebhook,
   adminSetUserBanned,
+  adminUpdateSupportStatus,
   adminUpdateUserCrm,
   adminUpsertManager,
   adminUpsertPromo,
   adminVerifyOrder,
 } from '../utils/telegramClient';
+import { AdminCoordinateStats } from './AdminCoordinateStats';
 
 type AdminTab =
   | 'overview'
+  | 'inbox'
   | 'users'
   | 'managers'
   | 'orders'
@@ -128,15 +146,17 @@ const SERVICE_LABELS: Array<{
 ];
 
 const MANAGER_PERMISSION_LABELS: Array<{ id: ManagerPermission; label: string }> = [
-  { id: 'overview', label: 'KPI va Analitika' },
+  { id: 'overview', label: 'KPI va 20 Kordinata Analitika' },
   { id: 'crm_events', label: 'Jonli CRM Xabarnomalar' },
+  { id: 'support', label: 'Support Inbox (TG & Sayt Chat)' },
   { id: 'users', label: 'Foydalanuvchilar & CRM Teg' },
   { id: 'balance', label: 'Balans Boshqaruvi' },
   { id: 'orders', label: 'TolovGo Buyurtmalari' },
   { id: 'pricing', label: 'Narxlar & Bonuslar' },
   { id: 'promos', label: 'Promokodlar' },
   { id: 'broadcast', label: 'Telegram Broadcast' },
-  { id: 'settings', label: 'Sayt & Gateway Sozlamalari' },
+  { id: 'settings', label: 'Sayt & Bot Sozlamalari' },
+  { id: 'security', label: 'Xavfsizlik Skaneri & Loglar' },
 ];
 
 const CRM_TAGS = ['', 'yangi', 'faol', 'vip', 'korporativ', 'muammoli'] as const;
@@ -244,11 +264,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [balanceNotifyTg, setBalanceNotifyTg] = useState(true);
   const [balanceSubmitting, setBalanceSubmitting] = useState(false);
 
-  // Managers
+  // Managers & Support Staff
   const [managers, setManagers] = useState<ManagerRecord[]>([]);
   const [mgrTelegramId, setMgrTelegramId] = useState('');
   const [mgrFirstName, setMgrFirstName] = useState('');
   const [mgrUsername, setMgrUsername] = useState('');
+  const [mgrRoleType, setMgrRoleType] = useState<'manager' | 'support'>('manager');
+  const [mgrIsSupportDefault, setMgrIsSupportDefault] = useState(false);
   const [mgrRoleTitle, setMgrRoleTitle] = useState('CRM Menejer');
   const [mgrPassword, setMgrPassword] = useState('');
   const [mgrNotifyTg, setMgrNotifyTg] = useState(true);
@@ -263,6 +285,26 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     'broadcast',
   ]);
   const [savingMgr, setSavingMgr] = useState(false);
+
+  // Support Inbox
+  const [supportTickets, setSupportTickets] = useState<SupportTicketRow[]>([]);
+  const [supportAgents, setSupportAgents] = useState<
+    Array<{
+      telegramId: string;
+      firstName: string;
+      username?: string;
+      roleTitle: string;
+      isSupportDefault?: boolean;
+    }>
+  >([]);
+  const [ticketFilter, setTicketFilter] = useState<'all' | 'open' | 'pending' | 'resolved'>('all');
+  const [ticketSearch, setTicketSearch] = useState('');
+  const [selectedTicketTid, setSelectedTicketTid] = useState<string | null>(null);
+  const [threadMessages, setThreadMessages] = useState<InboxMessageRow[]>([]);
+  const [loadingThread, setLoadingThread] = useState(false);
+  const [replyText, setReplyText] = useState('');
+  const [replyChannel, setReplyChannel] = useState<'both' | 'telegram' | 'site'>('both');
+  const [sendingReply, setSendingReply] = useState(false);
 
   // Orders & TolovGo
   const [orders, setOrders] = useState<AdminOrderRow[]>([]);
@@ -300,12 +342,31 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     notifyNewUsersToStaff: true,
     notifyPaymentsToStaff: true,
     defaultAiModel: 'google/gemini-2.5-flash',
+    telegramOnlyMode: true,
+    supportUsername: '',
+    botWelcomeTitle: '',
   });
   const [savingSiteCfg, setSavingSiteCfg] = useState(false);
   const [testingAlert, setTestingAlert] = useState(false);
+  const [syncingBotWebhook, setSyncingBotWebhook] = useState(false);
 
-  // Security & Audit
+  // Security Scanner, Threat Logs, Log Analyzer & Audit
   const [auditLogs, setAuditLogs] = useState<AdminAuditRow[]>([]);
+  const [securityLogs, setSecurityLogs] = useState<SecurityLogRow[]>([]);
+  const [securitySeverityFilter, setSecuritySeverityFilter] = useState<
+    'all' | 'unresolved' | 'critical' | 'high' | 'medium'
+  >('all');
+  const [lastScanReport, setLastScanReport] = useState<SecurityScanReport | null>(null);
+  const [runningScan, setRunningScan] = useState(false);
+  const [analyzingLogs, setAnalyzingLogs] = useState(false);
+  const [logAnalysisResult, setLogAnalysisResult] = useState<{
+    unresolvedCount: number;
+    criticalCount: number;
+    topCategories: Array<[string, number]>;
+    topIps: Array<[string, number]>;
+    analysisText: string;
+    alertSent: boolean;
+  } | null>(null);
   const [curPwd, setCurPwd] = useState('');
   const [newPwd, setNewPwd] = useState('');
   const [newPwdConfirm, setNewPwdConfirm] = useState('');
@@ -329,18 +390,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   useEffect(() => {
     const allowed: Record<AdminTab, boolean> = {
       overview: hasPerm('overview') || hasPerm('crm_events'),
+      inbox: hasPerm('support'),
       users: hasPerm('users') || hasPerm('balance'),
-      managers: true,
+      managers: isSuperAdmin,
       orders: hasPerm('orders') || hasPerm('settings'),
       pricing: hasPerm('pricing') || hasPerm('promos'),
       marketing: hasPerm('broadcast') || hasPerm('settings'),
-      security: true,
+      security: hasPerm('security') || isSuperAdmin,
     };
     if (!allowed[activeTab]) {
       const firstAllowed = (Object.keys(allowed) as AdminTab[]).find((k) => allowed[k]);
       if (firstAllowed) setActiveTab(firstAllowed);
     }
-  }, [activeTab, hasPerm]);
+  }, [activeTab, hasPerm, isSuperAdmin]);
 
   const copyText = (key: string, text: string) => {
     void navigator.clipboard?.writeText(text).then(() => {
@@ -432,6 +494,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           can('broadcast')
             ? adminListBroadcasts(telegramSessionToken, token).then((r) => setBroadcastLogs(r.logs))
             : Promise.resolve(),
+          can('support')
+            ? adminListSupportTickets(telegramSessionToken, token).then((r) => {
+                setSupportTickets(r.tickets);
+                setSupportAgents(r.supportAgents);
+              })
+            : Promise.resolve(),
+          can('security')
+            ? adminListSecurityLogs(telegramSessionToken, token).then((r) => {
+                setSecurityLogs(r.logs);
+                if (r.lastScan) setLastScanReport(r.lastScan);
+              })
+            : Promise.resolve(),
         ]);
       } finally {
         setLoadingData(false);
@@ -446,6 +520,44 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   }, [adminToken, loadAllAdminData]);
 
+  const handleOpenSupportThread = useCallback(
+    async (tid: string) => {
+      if (!adminToken) return;
+      setSelectedTicketTid(tid);
+      setLoadingThread(true);
+      try {
+        const res = await adminGetSupportThread(telegramSessionToken, adminToken, tid);
+        setThreadMessages(res.messages);
+        if (res.ticket) {
+          setSupportTickets((prev) =>
+            prev.map((t) => (t.telegramId === tid ? { ...res.ticket!, unreadForStaff: 0 } : t))
+          );
+        }
+      } finally {
+        setLoadingThread(false);
+      }
+    },
+    [adminToken, telegramSessionToken]
+  );
+
+  useEffect(() => {
+    if (!adminToken || activeTab !== 'inbox') return;
+    const timer = window.setInterval(() => {
+      void adminListSupportTickets(telegramSessionToken, adminToken).then((r) => {
+        setSupportTickets(r.tickets);
+        setSupportAgents(r.supportAgents);
+      });
+      if (selectedTicketTid) {
+        void adminGetSupportThread(telegramSessionToken, adminToken, selectedTicketTid).then(
+          (res) => {
+            setThreadMessages(res.messages);
+          }
+        );
+      }
+    }, 8000);
+    return () => window.clearInterval(timer);
+  }, [adminToken, activeTab, selectedTicketTid, telegramSessionToken]);
+
   const handleChangeAnalyticsDays = async (days: 7 | 14 | 30) => {
     setAnalyticsDays(days);
     if (!adminToken) return;
@@ -456,7 +568,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const handleAuthSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError(null);
-    const minLen = effectiveRole === 'manager' ? 6 : 8;
+    const minLen = effectiveRole === 'manager' || effectiveRole === 'support' ? 6 : 8;
     if (passwordInput.length < minLen) {
       setAuthError(`Parol kamida ${minLen} ta belgidan iborat bo'lishi kerak.`);
       return;
@@ -659,36 +771,47 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     e.preventDefault();
     if (!adminToken) return;
     if (!/^\d{3,20}$/.test(mgrTelegramId.trim())) {
-      onNotify('err', "Menejerning to'g'ri Telegram ID raqamini kiriting.");
+      onNotify('err', "Xodimning to'g'ri Telegram ID raqamini kiriting.");
       return;
     }
     setSavingMgr(true);
     try {
       const res = await adminUpsertManager(telegramSessionToken, adminToken, {
         telegramId: mgrTelegramId.trim(),
-        firstName: mgrFirstName.trim() || `Menejer ${mgrTelegramId.trim().slice(-4)}`,
+        firstName:
+          mgrFirstName.trim() ||
+          `${mgrRoleType === 'support' ? 'Support' : 'Menejer'} ${mgrTelegramId.trim().slice(-4)}`,
         username: mgrUsername.trim() || undefined,
-        roleTitle: mgrRoleTitle.trim() || 'CRM Menejer',
+        roleTitle:
+          mgrRoleTitle.trim() || (mgrRoleType === 'support' ? 'Support Mutaxassisi' : 'CRM Menejer'),
+        roleType: mgrRoleType,
+        isSupportDefault: mgrRoleType === 'support' ? mgrIsSupportDefault : false,
         permissions: mgrPerms,
         password: mgrPassword.trim() || undefined,
         isActive: mgrIsActive,
         notifyTelegram: mgrNotifyTg,
       });
       if (!res.ok) {
-        onNotify('err', res.error || "Menejerni saqlab bo'lmadi.");
+        onNotify('err', res.error || "Xodimni saqlab bo'lmadi.");
         return;
       }
-      onNotify('ok', 'Menejer saqlandi va Telegram bot orqali xabardor qilindi.');
+      onNotify(
+        'ok',
+        `${mgrRoleType === 'support' ? 'Support mutaxassisi' : 'Menejer'} saqlandi va Telegram bot orqali xabardor qilindi.`
+      );
       setMgrTelegramId('');
       setMgrFirstName('');
       setMgrUsername('');
       setMgrPassword('');
-      const [mgrRes, evRes] = await Promise.all([
+      setMgrIsSupportDefault(false);
+      const [mgrRes, evRes, supRes] = await Promise.all([
         adminListManagers(telegramSessionToken, adminToken),
         adminListCrmEvents(telegramSessionToken, adminToken),
+        adminListSupportTickets(telegramSessionToken, adminToken),
       ]);
       setManagers(mgrRes.managers);
       setCrmEvents(evRes.events);
+      setSupportAgents(supRes.supportAgents);
     } finally {
       setSavingMgr(false);
     }
@@ -910,6 +1033,151 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   };
 
+  const handleReplySupportSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!adminToken || !selectedTicketTid || !replyText.trim() || sendingReply) return;
+    setSendingReply(true);
+    try {
+      const res = await adminReplySupportTicket(
+        telegramSessionToken,
+        adminToken,
+        selectedTicketTid,
+        replyText.trim(),
+        replyChannel
+      );
+      if (!res.ok) {
+        onNotify('err', res.error || 'Javob yuborilmadi.');
+        return;
+      }
+      setReplyText('');
+      if (res.message) setThreadMessages((prev) => [...prev, res.message!]);
+      if (res.ticket) {
+        setSupportTickets((prev) =>
+          prev.map((t) => (t.telegramId === selectedTicketTid ? res.ticket! : t))
+        );
+      }
+      onNotify(
+        'ok',
+        res.telegramSent
+          ? 'Javob saytga va mijozning Telegram lichkasiga yuborildi.'
+          : 'Javob Support Inboxga saqlandi.'
+      );
+    } finally {
+      setSendingReply(false);
+    }
+  };
+
+  const handleAssignTicket = async (tid: string, assignedTo: string) => {
+    if (!adminToken) return;
+    const res = await adminAssignSupportTicket(
+      telegramSessionToken,
+      adminToken,
+      tid,
+      assignedTo || null
+    );
+    if (!res.ok) {
+      onNotify('err', res.error || 'Biriktirib bo‘lmadi.');
+      return;
+    }
+    setSupportTickets((prev) =>
+      prev.map((t) =>
+        t.telegramId === tid
+          ? {
+              ...t,
+              assignedTo: res.assignedTo || undefined,
+              assignedName: res.assignedName || undefined,
+            }
+          : t
+      )
+    );
+    onNotify('ok', res.assignedName ? `Biriktirildi: ${res.assignedName}` : 'Biriktirish yechildi.');
+  };
+
+  const handleUpdateTicketStatus = async (tid: string, status: SupportTicketStatus) => {
+    if (!adminToken) return;
+    const res = await adminUpdateSupportStatus(telegramSessionToken, adminToken, tid, status);
+    if (!res.ok) {
+      onNotify('err', res.error || "Holat o'zgartirilmadi.");
+      return;
+    }
+    setSupportTickets((prev) =>
+      prev.map((t) => (t.telegramId === tid ? { ...t, status } : t))
+    );
+    onNotify('ok', `Tiket holati: ${status}`);
+  };
+
+  const handleRunSecurityScan = async () => {
+    if (!adminToken || runningScan) return;
+    setRunningScan(true);
+    try {
+      const res = await adminRunSecurityScan(telegramSessionToken, adminToken);
+      if (!res.ok || !res.report) {
+        onNotify('err', res.error || 'Xavfsizlik skaneri ishga tushmadi.');
+        return;
+      }
+      setLastScanReport(res.report);
+      onNotify('ok', res.report.summary);
+    } finally {
+      setRunningScan(false);
+    }
+  };
+
+  const handleAnalyzeSecurityLogs = async () => {
+    if (!adminToken || analyzingLogs) return;
+    setAnalyzingLogs(true);
+    try {
+      const res = await adminAnalyzeSecurityLogs(telegramSessionToken, adminToken, true);
+      if (!res.ok) {
+        onNotify('err', res.error || 'Loglar tahlil qilinmadi.');
+        return;
+      }
+      setLogAnalysisResult({
+        unresolvedCount: res.unresolvedCount || 0,
+        criticalCount: res.criticalCount || 0,
+        topCategories: res.topCategories || [],
+        topIps: res.topIps || [],
+        analysisText: res.analysisText || '',
+        alertSent: Boolean(res.alertSent),
+      });
+      onNotify(
+        'ok',
+        res.alertSent
+          ? 'Loglar tahlil qilindi va Telegram/CRM ogohlantirish yuborildi!'
+          : 'Loglar tahlili yakunlandi.'
+      );
+    } finally {
+      setAnalyzingLogs(false);
+    }
+  };
+
+  const handleResolveSecLog = async (logId: string) => {
+    if (!adminToken) return;
+    const res = await adminResolveSecurityLog(telegramSessionToken, adminToken, logId);
+    if (!res.ok) {
+      onNotify('err', res.error || 'Yopilmadi.');
+      return;
+    }
+    setSecurityLogs((prev) =>
+      prev.map((l) => (l.id === logId ? { ...l, isResolved: true } : l))
+    );
+    onNotify('ok', 'Xavfsizlik logi hal qilingan deb belgilandi.');
+  };
+
+  const handleSyncBotWebhook = async () => {
+    if (!adminToken || syncingBotWebhook) return;
+    setSyncingBotWebhook(true);
+    try {
+      const res = await adminSetupTelegramWebhook(telegramSessionToken, adminToken);
+      if (!res.ok) {
+        onNotify('err', res.error || 'Bot webhook sozlanmadi.');
+        return;
+      }
+      onNotify('ok', `Bot Webhook, MenuButton va 6 ta buyruq yangilandi (@${res.botUsername || 'bot'})`);
+    } finally {
+      setSyncingBotWebhook(false);
+    }
+  };
+
   const filteredOrders = useMemo(() => {
     if (orderFilter === 'all') return orders;
     if (orderFilter === 'test') return orders.filter((o) => o.isTest);
@@ -931,6 +1199,26 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     return crmEvents.filter((e) => e.eventType === crmFilter);
   }, [crmEvents, crmFilter]);
 
+  const filteredTickets = useMemo(() => {
+    const q = ticketSearch.trim().toLowerCase();
+    return supportTickets.filter((t) => {
+      if (ticketFilter !== 'all' && t.status !== ticketFilter) return false;
+      if (!q) return true;
+      return (
+        t.telegramId.toLowerCase().includes(q) ||
+        t.userFirstName.toLowerCase().includes(q) ||
+        (t.userUsername || '').toLowerCase().includes(q) ||
+        t.lastMessage.toLowerCase().includes(q)
+      );
+    });
+  }, [supportTickets, ticketFilter, ticketSearch]);
+
+  const filteredSecurityLogs = useMemo(() => {
+    if (securitySeverityFilter === 'all') return securityLogs;
+    if (securitySeverityFilter === 'unresolved') return securityLogs.filter((l) => !l.isResolved);
+    return securityLogs.filter((l) => l.severity === securitySeverityFilter);
+  }, [securityLogs, securitySeverityFilter]);
+
   // =========================================================================
   // 1) Security Gate Screen (15-Day Cookie Session)
   // =========================================================================
@@ -941,7 +1229,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           <div className="flex items-center gap-2.5">
             <Shield className="w-4 h-4 text-red-500" />
             <span className="font-display text-sm font-bold tracking-tight">
-              SlaydCanva {effectiveRole === 'manager' ? 'Menejer CRM' : 'Admin CRM'} · Xavfsizlik
+              SlaydCanva{' '}
+              {effectiveRole === 'support'
+                ? 'Support CRM'
+                : effectiveRole === 'manager'
+                  ? 'Menejer CRM'
+                  : 'Admin CRM'}{' '}
+              · Xavfsizlik
             </span>
           </div>
           <button
@@ -981,15 +1275,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   <div className="flex items-center gap-2 text-xs font-mono text-zinc-500">
                     <Lock className="w-3.5 h-3.5 text-red-600" />
                     <span>
-                      {effectiveRole === 'manager' ? 'MENEJER' : 'SUPER ADMIN'} ID:{' '}
-                      {telegramUser.telegramId}
+                      {effectiveRole === 'support'
+                        ? 'SUPPORT'
+                        : effectiveRole === 'manager'
+                          ? 'MENEJER'
+                          : 'SUPER ADMIN'}{' '}
+                      ID: {telegramUser.telegramId}
                     </span>
                   </div>
                   <h1 className="font-display text-lg font-bold text-zinc-900">
                     {passwordConfigured
-                      ? effectiveRole === 'manager'
-                        ? 'Menejer CRM paneliga kirish'
-                        : 'Admin CRM paneliga kirish'
+                      ? effectiveRole === 'support'
+                        ? 'Support CRM paneliga kirish'
+                        : effectiveRole === 'manager'
+                          ? 'Menejer CRM paneliga kirish'
+                          : 'Admin CRM paneliga kirish'
                       : "1-marta kirish: Maxfiy parol o'rnatish"}
                   </h1>
                   <p className="text-xs text-zinc-500 leading-relaxed">
@@ -1025,7 +1325,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       value={passwordInput}
                       onChange={(e) => setPasswordInput(e.target.value)}
                       placeholder={
-                        effectiveRole === 'manager' ? 'Kamida 6 ta belgi' : 'Kamida 8 ta belgi'
+                        effectiveRole === 'manager' || effectiveRole === 'support'
+                          ? 'Kamida 6 ta belgi'
+                          : 'Kamida 8 ta belgi'
                       }
                       className="w-full text-sm text-zinc-900 bg-zinc-50 border border-zinc-200 focus:border-red-600 focus:bg-white rounded-xl px-3.5 py-2.5 outline-none transition-colors"
                     />
@@ -1077,6 +1379,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   // =========================================================================
   // 2) Full Admin & Manager CRM Workspace (20 Systems)
   // =========================================================================
+  const unreadSupportCount = supportTickets.reduce(
+    (sum, t) => sum + (t.unreadForStaff || 0),
+    0
+  );
+  const unresolvedCriticalLogs = securityLogs.filter(
+    (l) => !l.isResolved && (l.severity === 'critical' || l.severity === 'high')
+  ).length;
+
   const navItems: Array<{
     id: AdminTab;
     label: string;
@@ -1086,10 +1396,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   }> = [
     {
       id: 'overview',
-      label: 'CRM & Analitika',
+      label: 'CRM & 20 Statistika',
       icon: <LayoutDashboard className="w-4 h-4" />,
       visible: hasPerm('overview') || hasPerm('crm_events'),
       badge: overview.unreadCrmEvents || crmEvents.filter((e) => !e.isRead).length || undefined,
+    },
+    {
+      id: 'inbox',
+      label: 'Support Inbox',
+      icon: <Headphones className="w-4 h-4" />,
+      visible: hasPerm('support'),
+      badge: unreadSupportCount > 0 ? unreadSupportCount : undefined,
     },
     {
       id: 'users',
@@ -1099,9 +1416,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     },
     {
       id: 'managers',
-      label: 'Menejerlar Jamoasi',
+      label: 'Jamoa & Support',
       icon: <UserCheck className="w-4 h-4" />,
-      visible: true,
+      visible: isSuperAdmin,
     },
     {
       id: 'orders',
@@ -1123,16 +1440,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     },
     {
       id: 'security',
-      label: 'Xavfsizlik & Audit',
+      label: 'Xavfsizlik & Skaner',
       icon: <ShieldCheck className="w-4 h-4" />,
-      visible: true,
+      visible: hasPerm('security') || isSuperAdmin,
+      badge: unresolvedCriticalLogs > 0 ? unresolvedCriticalLogs : undefined,
     },
   ];
 
   const visibleNavItems = navItems.filter((n) => n.visible);
-  const dailyPoints = analytics?.daily || [];
-  const maxDailyRevenue = Math.max(1000, ...dailyPoints.map((d) => d.paidRevenue));
-  const maxDailyUsers = Math.max(1, ...dailyPoints.map((d) => d.newUsers));
 
   return (
     <div className="fixed inset-0 z-50 bg-[#F4F4F6] flex flex-col md:flex-row overflow-hidden">
@@ -1143,7 +1458,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             <Shield className="w-4 h-4 text-red-500 shrink-0" />
             <span className="font-display text-sm font-bold tracking-tight truncate">
               Slayd<span className="text-red-500">Canva</span>{' '}
-              {isSuperAdmin ? 'Admin' : 'Menejer'}
+              {isSuperAdmin ? 'Admin' : effectiveRole === 'support' ? 'Support' : 'Menejer'}
             </span>
           </div>
         </div>
@@ -1182,7 +1497,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               {telegramUser.username ? `@${telegramUser.username}` : telegramUser.firstName}
             </div>
             <div className="font-mono tabular-nums text-zinc-500">
-              {isSuperAdmin ? 'Super Admin' : 'Menejer'} · ID {telegramUser.telegramId}
+              {isSuperAdmin
+                ? 'Super Admin'
+                : effectiveRole === 'support'
+                  ? 'Support Mutaxassisi'
+                  : 'Menejer'}{' '}
+              · ID {telegramUser.telegramId}
             </div>
             <div className="text-[10px] text-zinc-500">15 kunlik cookie faol</div>
           </div>
@@ -1322,99 +1642,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   </div>
                 </section>
 
-                {/* #2 Revenue & Growth Analytics Charts */}
+                {/* #2 20 Coordinate-Based Statistics */}
                 {hasPerm('overview') && (
-                  <section className="bg-white border border-zinc-200 rounded-2xl p-5 space-y-4">
-                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                      <div>
-                        <h2 className="text-sm font-semibold text-zinc-900 flex items-center gap-1.5">
-                          <BarChart3 className="w-4 h-4 text-red-600" />
-                          <span>Tushum va yangi foydalanuvchilar dinamikasi</span>
-                        </h2>
-                        <p className="text-xs text-zinc-500 mt-0.5">
-                          TolovGo to‘lovlari va ro‘yxatdan o‘tgan foydalanuvchilarning kunlik statistikasi
-                        </p>
-                      </div>
-                      <div className="flex items-center gap-1 bg-zinc-100 p-1 rounded-xl self-start">
-                        {([7, 14, 30] as const).map((d) => (
-                          <button
-                            key={d}
-                            type="button"
-                            onClick={() => void handleChangeAnalyticsDays(d)}
-                            className={`px-3 py-1 rounded-lg text-xs font-mono font-medium transition-colors whitespace-nowrap ${
-                              analyticsDays === d
-                                ? 'bg-white text-zinc-900 shadow-xs'
-                                : 'text-zinc-600 hover:text-zinc-900'
-                            }`}
-                          >
-                            {d} kun
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-
-                    {dailyPoints.length === 0 ? (
-                      <div className="py-8 text-center text-xs text-zinc-400">
-                        Tanlangan davr uchun ma'lumotlar hali shakllanmagan.
-                      </div>
-                    ) : (
-                      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                        <div className="space-y-2">
-                          <div className="text-xs font-medium text-zinc-700">
-                            Kunlik TolovGo tushumi (so‘m)
-                          </div>
-                          <div className="h-36 flex items-end gap-1.5 pt-2 border-b border-zinc-200">
-                            {dailyPoints.map((pt) => {
-                              const pct = Math.max(4, Math.round((pt.paidRevenue / maxDailyRevenue) * 100));
-                              return (
-                                <div
-                                  key={`rev-${pt.day}`}
-                                  className="flex-1 flex flex-col items-center justify-end h-full group"
-                                  title={`${pt.day}: ${formatSom(pt.paidRevenue)} (${pt.paidOrders} ta)`}
-                                >
-                                  <div
-                                    style={{ height: `${pct}%` }}
-                                    className="w-full max-w-[26px] rounded-t-md bg-emerald-600/85 group-hover:bg-emerald-600 transition-colors"
-                                  />
-                                </div>
-                              );
-                            })}
-                          </div>
-                          <div className="flex justify-between text-[10px] font-mono text-zinc-400">
-                            <span>{dailyPoints[0]?.day || ''}</span>
-                            <span>{dailyPoints[dailyPoints.length - 1]?.day || ''}</span>
-                          </div>
-                        </div>
-
-                        <div className="space-y-2">
-                          <div className="text-xs font-medium text-zinc-700">
-                            Yangi foydalanuvchilar o‘sishi (kishi)
-                          </div>
-                          <div className="h-36 flex items-end gap-1.5 pt-2 border-b border-zinc-200">
-                            {dailyPoints.map((pt) => {
-                              const pct = Math.max(6, Math.round((pt.newUsers / maxDailyUsers) * 100));
-                              return (
-                                <div
-                                  key={`usr-${pt.day}`}
-                                  className="flex-1 flex flex-col items-center justify-end h-full group"
-                                  title={`${pt.day}: +${pt.newUsers} kishi`}
-                                >
-                                  <div
-                                    style={{ height: `${pct}%` }}
-                                    className="w-full max-w-[26px] rounded-t-md bg-red-600/85 group-hover:bg-red-600 transition-colors"
-                                  />
-                                </div>
-                              );
-                            })}
-                          </div>
-                          <div className="flex justify-between text-[10px] font-mono text-zinc-400">
-                            <span>{dailyPoints[0]?.day || ''}</span>
-                            <span>{dailyPoints[dailyPoints.length - 1]?.day || ''}</span>
-                          </div>
-                        </div>
-                      </div>
-                    )}
-                  </section>
+                  <AdminCoordinateStats
+                    analytics={analytics}
+                    overview={overview}
+                    days={analyticsDays}
+                    onChangeDays={(d) => void handleChangeAnalyticsDays(d)}
+                  />
                 )}
 
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -1548,6 +1783,314 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   </section>
                 </div>
               </>
+            )}
+
+            {/* ============================================================
+                TAB 1B: BIDIRECTIONAL SUPPORT INBOX (TELEGRAM LICHKA + SAYT CHAT)
+                ============================================================ */}
+            {activeTab === 'inbox' && (
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 h-[calc(100vh-140px)] min-h-[540px]">
+                {/* Left: Ticket List */}
+                <section className="bg-white border border-zinc-200 rounded-2xl overflow-hidden flex flex-col">
+                  <div className="p-3.5 border-b border-zinc-200 space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <h2 className="text-sm font-semibold text-zinc-900 flex items-center gap-1.5">
+                        <Headphones className="w-4 h-4 text-red-600" />
+                        <span>Murojaatlar ({filteredTickets.length})</span>
+                      </h2>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          adminToken &&
+                          void adminListSupportTickets(telegramSessionToken, adminToken).then((r) => {
+                            setSupportTickets(r.tickets);
+                            setSupportAgents(r.supportAgents);
+                          })
+                        }
+                        className="p-1.5 rounded-lg border border-zinc-200 text-zinc-500 hover:text-zinc-900"
+                        aria-label="Yangilash"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+
+                    <div className="relative">
+                      <Search className="w-3.5 h-3.5 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                      <input
+                        type="text"
+                        value={ticketSearch}
+                        onChange={(e) => setTicketSearch(e.target.value)}
+                        placeholder="Ism, @username, ID yoki matn..."
+                        className="w-full pl-8 pr-3 py-1.5 text-xs bg-zinc-50 border border-zinc-200 focus:border-red-600 focus:bg-white rounded-xl outline-none"
+                      />
+                    </div>
+
+                    <div className="flex items-center gap-1 bg-zinc-100 p-1 rounded-xl">
+                      {(
+                        [
+                          { id: 'all', label: 'Hammasi' },
+                          { id: 'open', label: 'Ochiq' },
+                          { id: 'pending', label: 'Jarayon' },
+                          { id: 'resolved', label: 'Yopilgan' },
+                        ] as const
+                      ).map((st) => (
+                        <button
+                          key={st.id}
+                          type="button"
+                          onClick={() => setTicketFilter(st.id)}
+                          className={`flex-1 py-1 rounded-lg text-[11px] font-medium transition-colors whitespace-nowrap ${
+                            ticketFilter === st.id
+                              ? 'bg-white text-zinc-900 shadow-xs'
+                              : 'text-zinc-600 hover:text-zinc-900'
+                          }`}
+                        >
+                          {st.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="flex-1 overflow-y-auto divide-y divide-zinc-100">
+                    {filteredTickets.length === 0 ? (
+                      <div className="py-12 px-4 text-center text-xs text-zinc-400">
+                        Hozircha murojaatlar yo‘q. Mijozlar saytdan yoki Telegram bot lichkasidan yozganda shu yerda paydo bo‘ladi.
+                      </div>
+                    ) : (
+                      filteredTickets.map((t) => {
+                        const active = selectedTicketTid === t.telegramId;
+                        return (
+                          <button
+                            key={t.telegramId}
+                            type="button"
+                            onClick={() => void handleOpenSupportThread(t.telegramId)}
+                            className={`w-full px-3.5 py-3 text-left transition-colors space-y-1 ${
+                              active ? 'bg-red-50/70 border-l-2 border-red-600' : 'hover:bg-zinc-50'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="text-xs font-semibold text-zinc-900 truncate">
+                                {t.userFirstName}{' '}
+                                {t.userUsername ? (
+                                  <span className="font-normal text-zinc-500">@{t.userUsername}</span>
+                                ) : null}
+                              </div>
+                              {t.unreadForStaff > 0 && (
+                                <span className="px-1.5 py-0.5 rounded-md bg-red-600 text-white font-mono text-[10px] font-semibold">
+                                  {t.unreadForStaff}
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-[11px] text-zinc-600 line-clamp-1">
+                              {t.lastMessage || t.subject}
+                            </div>
+                            <div className="flex items-center justify-between text-[10px] font-mono text-zinc-400">
+                              <span>
+                                {t.status === 'resolved'
+                                  ? 'Yopilgan'
+                                  : t.status === 'pending'
+                                    ? 'Jarayonda'
+                                    : 'Ochiq'}
+                                {t.assignedName ? ` · ${t.assignedName}` : ''}
+                              </span>
+                              <span>{formatDateTime(t.updatedAt)}</span>
+                            </div>
+                          </button>
+                        );
+                      })
+                    )}
+                  </div>
+                </section>
+
+                {/* Right: Active Conversation Thread */}
+                <section className="lg:col-span-2 bg-white border border-zinc-200 rounded-2xl overflow-hidden flex flex-col">
+                  {!selectedTicketTid ? (
+                    <div className="flex-1 flex flex-col items-center justify-center p-8 text-center space-y-2 text-zinc-400">
+                      <Headphones className="w-8 h-8 text-zinc-300" />
+                      <div className="text-sm font-medium text-zinc-600">
+                        Suhbatni boshlash uchun chapdan murojaat tanlang
+                      </div>
+                      <p className="text-xs max-w-sm">
+                        Javoblaringizni bir vaqtning o‘zida ham sayt ichidagi Support chatiga, ham mijozning Telegram lichkasiga yuborishingiz mumkin.
+                      </p>
+                    </div>
+                  ) : (
+                    (() => {
+                      const activeTicket = supportTickets.find(
+                        (t) => t.telegramId === selectedTicketTid
+                      );
+                      return (
+                        <>
+                          {/* Thread Header */}
+                          <div className="p-3.5 md:p-4 border-b border-zinc-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                            <div className="min-w-0">
+                              <div className="text-sm font-semibold text-zinc-900 truncate">
+                                {activeTicket?.userFirstName || selectedTicketTid}{' '}
+                                {activeTicket?.userUsername ? `@${activeTicket.userUsername}` : ''}
+                              </div>
+                              <div className="text-[11px] font-mono text-zinc-500">
+                                ID {selectedTicketTid} · Mavzu: {activeTicket?.subject || 'Yordam'}
+                              </div>
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-2">
+                              <select
+                                value={activeTicket?.assignedTo || ''}
+                                onChange={(e) =>
+                                  void handleAssignTicket(selectedTicketTid, e.target.value)
+                                }
+                                aria-label="Support mutaxassisiga biriktirish"
+                                className="text-xs bg-zinc-50 border border-zinc-200 rounded-lg px-2.5 py-1.5 outline-none"
+                              >
+                                <option value="">Biriktirilmagan</option>
+                                {supportAgents.map((ag) => (
+                                  <option key={ag.telegramId} value={ag.telegramId}>
+                                    {ag.firstName} ({ag.roleTitle})
+                                  </option>
+                                ))}
+                              </select>
+
+                              <select
+                                value={activeTicket?.status || 'open'}
+                                onChange={(e) =>
+                                  void handleUpdateTicketStatus(
+                                    selectedTicketTid,
+                                    e.target.value as SupportTicketStatus
+                                  )
+                                }
+                                aria-label="Murojaat holati"
+                                className="text-xs bg-zinc-50 border border-zinc-200 rounded-lg px-2.5 py-1.5 outline-none"
+                              >
+                                <option value="open">Ochiq</option>
+                                <option value="pending">Jarayonda</option>
+                                <option value="resolved">Hal qilindi</option>
+                              </select>
+
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setActiveTab('users');
+                                  void handleOpenUserDetail(selectedTicketTid);
+                                }}
+                                className="px-2.5 py-1.5 rounded-lg border border-zinc-200 bg-white hover:bg-zinc-50 text-xs font-medium text-zinc-700"
+                              >
+                                CRM Profil
+                              </button>
+                            </div>
+                          </div>
+
+                          {/* Messages Scroll Area */}
+                          <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-zinc-50/60">
+                            {loadingThread && threadMessages.length === 0 ? (
+                              <div className="py-10 text-center text-xs text-zinc-400">
+                                <Loader2 className="w-4 h-4 animate-spin inline mr-1.5" />
+                                Xabarlar yuklanmoqda...
+                              </div>
+                            ) : threadMessages.length === 0 ? (
+                              <div className="py-10 text-center text-xs text-zinc-400">
+                                Ushbu foydalanuvchi bilan hali xabarlar yo‘q.
+                              </div>
+                            ) : (
+                              threadMessages.map((m) => {
+                                const isStaff = m.senderRole === 'staff';
+                                return (
+                                  <div
+                                    key={m.id}
+                                    className={`flex flex-col ${isStaff ? 'items-end' : 'items-start'}`}
+                                  >
+                                    <div
+                                      className={`max-w-[82%] rounded-2xl px-3.5 py-2.5 text-xs leading-relaxed ${
+                                        isStaff
+                                          ? 'bg-[#111113] text-white rounded-br-sm'
+                                          : 'bg-white border border-zinc-200 text-zinc-900 rounded-bl-sm'
+                                      }`}
+                                    >
+                                      <div
+                                        className={`text-[10px] font-semibold mb-0.5 ${
+                                          isStaff ? 'text-red-400' : 'text-zinc-500'
+                                        }`}
+                                      >
+                                        {m.senderName} ·{' '}
+                                        {isStaff ? 'Support / Staff' : 'Mijoz'}
+                                      </div>
+                                      <div className="whitespace-pre-wrap break-words">
+                                        {m.message}
+                                      </div>
+                                      <div className="text-[10px] font-mono text-zinc-400 mt-1">
+                                        {formatDateTime(m.createdAt)} ·{' '}
+                                        {m.channel === 'both'
+                                          ? 'Sayt + TG Lichka'
+                                          : m.channel === 'telegram'
+                                            ? 'Telegram Lichka'
+                                            : 'Sayt Chat'}
+                                      </div>
+                                    </div>
+                                  </div>
+                                );
+                              })
+                            )}
+                          </div>
+
+                          {/* Reply Form */}
+                          <form
+                            onSubmit={handleReplySupportSubmit}
+                            className="p-3.5 border-t border-zinc-200 bg-white space-y-2.5"
+                          >
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <span className="text-[11px] font-medium text-zinc-600">
+                                Yuborish kanali:
+                              </span>
+                              <div className="flex items-center gap-1 bg-zinc-100 p-0.5 rounded-lg">
+                                {(
+                                  [
+                                    { id: 'both', label: 'Sayt + Telegram Lichka' },
+                                    { id: 'telegram', label: 'Faqat Telegram' },
+                                    { id: 'site', label: 'Faqat Sayt' },
+                                  ] as const
+                                ).map((ch) => (
+                                  <button
+                                    key={ch.id}
+                                    type="button"
+                                    onClick={() => setReplyChannel(ch.id)}
+                                    className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors ${
+                                      replyChannel === ch.id
+                                        ? 'bg-white text-zinc-900 shadow-xs'
+                                        : 'text-zinc-600 hover:text-zinc-900'
+                                    }`}
+                                  >
+                                    {ch.label}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-2">
+                              <input
+                                type="text"
+                                value={replyText}
+                                onChange={(e) => setReplyText(e.target.value)}
+                                placeholder="Mijozga javob yozing..."
+                                className="flex-1 text-xs bg-zinc-50 border border-zinc-200 focus:border-red-600 focus:bg-white rounded-xl px-3.5 py-2.5 outline-none"
+                              />
+                              <button
+                                type="submit"
+                                disabled={sendingReply || !replyText.trim()}
+                                className="px-4 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white text-xs font-semibold flex items-center gap-1.5 shrink-0"
+                              >
+                                {sendingReply ? (
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                ) : (
+                                  <Send className="w-3.5 h-3.5" />
+                                )}
+                                <span>Yuborish</span>
+                              </button>
+                            </div>
+                          </form>
+                        </>
+                      );
+                    })()
+                  )}
+                </section>
+              </div>
             )}
 
             {/* ============================================================
@@ -1793,6 +2336,62 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         </div>
                       </div>
 
+                      <div className="space-y-1">
+                        <label className="block text-[11px] font-medium text-zinc-700">
+                          Xodim turi (Rol)
+                        </label>
+                        <div className="grid grid-cols-2 gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setMgrRoleType('manager');
+                              setMgrIsSupportDefault(false);
+                              if (!mgrRoleTitle || mgrRoleTitle === 'Support Mutaxassisi') {
+                                setMgrRoleTitle('CRM Menejer');
+                              }
+                            }}
+                            className={`py-2 px-2.5 rounded-xl border text-xs font-medium transition-colors ${
+                              mgrRoleType === 'manager'
+                                ? 'bg-[#111113] border-[#111113] text-white'
+                                : 'bg-white border-zinc-200 text-zinc-700 hover:bg-zinc-50'
+                            }`}
+                          >
+                            Menejer
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setMgrRoleType('support');
+                              if (!mgrRoleTitle || mgrRoleTitle === 'CRM Menejer') {
+                                setMgrRoleTitle('Support Mutaxassisi');
+                              }
+                              setMgrPerms((prev) =>
+                                prev.includes('support') ? prev : [...prev, 'support']
+                              );
+                            }}
+                            className={`py-2 px-2.5 rounded-xl border text-xs font-medium transition-colors ${
+                              mgrRoleType === 'support'
+                                ? 'bg-red-600 border-red-600 text-white'
+                                : 'bg-white border-zinc-200 text-zinc-700 hover:bg-zinc-50'
+                            }`}
+                          >
+                            Support Xodimi
+                          </button>
+                        </div>
+                      </div>
+
+                      {mgrRoleType === 'support' && (
+                        <label className="flex items-center gap-2 p-2.5 rounded-xl bg-red-50/70 border border-red-200 text-xs text-red-900 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={mgrIsSupportDefault}
+                            onChange={(e) => setMgrIsSupportDefault(e.target.checked)}
+                            className="accent-red-600 w-3.5 h-3.5"
+                          />
+                          <span>Mijozlarga asosiy Support mutaxassisi sifatida ko‘rsatish</span>
+                        </label>
+                      )}
+
                       <div className="grid grid-cols-2 gap-2.5">
                         <div className="space-y-1">
                           <label className="block text-[11px] font-medium text-zinc-700">Lavozim</label>
@@ -1927,7 +2526,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                 </div>
                               </td>
                               <td className="py-3 px-4">
-                                <div className="font-medium text-zinc-800">{m.roleTitle}</div>
+                                <div className="font-medium text-zinc-800">
+                                  {m.roleTitle}{' '}
+                                  <span
+                                    className={`text-[10px] font-mono ${
+                                      m.roleType === 'support' ? 'text-red-600 font-semibold' : 'text-zinc-500'
+                                    }`}
+                                  >
+                                    [{m.roleType === 'support' ? 'SUPPORT' : 'MENEJER'}
+                                    {m.isSupportDefault ? ' · ASOSIY' : ''}]
+                                  </span>
+                                </div>
                                 <div className="text-[11px] text-zinc-500">
                                   {m.permissions.length} ta bo‘lim ruxsati
                                 </div>
@@ -1948,6 +2557,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                       setMgrFirstName(m.firstName);
                                       setMgrUsername(m.username || '');
                                       setMgrRoleTitle(m.roleTitle);
+                                      setMgrRoleType(m.roleType === 'support' ? 'support' : 'manager');
+                                      setMgrIsSupportDefault(Boolean(m.isSupportDefault));
                                       setMgrPerms(m.permissions);
                                       setMgrIsActive(m.isActive);
                                       setMgrNotifyTg(m.notifyTelegram);
@@ -2500,7 +3111,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       className="grid grid-cols-1 sm:grid-cols-5 gap-2.5 items-end"
                     >
                       <div className="space-y-1">
-                        <label className="block text-[11px] font-medium text-zinc-700">Kod</label>
+                        <div className="flex items-center justify-between gap-2">
+                          <label className="block text-[11px] font-medium text-zinc-700">Kod</label>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+                              let rnd = 'SLAYD';
+                              for (let i = 0; i < 4; i++) {
+                                rnd += chars[Math.floor(Math.random() * chars.length)];
+                              }
+                              setPromoCode(rnd);
+                            }}
+                            className="text-[11px] font-medium text-red-600 hover:underline flex items-center gap-0.5"
+                          >
+                            <Sparkles className="w-3 h-3" />
+                            <span>Tasodifiy</span>
+                          </button>
+                        </div>
                         <input
                           type="text"
                           value={promoCode}
@@ -2595,6 +3223,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                   </span>
                                 </td>
                                 <td className="py-2.5 px-4 text-right space-x-1.5 whitespace-nowrap">
+                                  {hasPerm('broadcast') && (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setBroadcastMsg(
+                                          `🎁 Yangi promokod: ${p.code}\n💰 Bonus: +${formatSom(p.bonusAmount)}\n\nBalans to'ldirish bo'limida «${p.code}» kodini kiriting!`
+                                        );
+                                        setActiveTab('marketing');
+                                      }}
+                                      className="px-2.5 py-1 rounded-lg border border-zinc-200 bg-white hover:bg-zinc-50 text-zinc-700 font-medium"
+                                    >
+                                      Botda e’lon
+                                    </button>
+                                  )}
                                   <button
                                     type="button"
                                     onClick={() => void handleTogglePromoActive(p)}
@@ -2817,11 +3459,64 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         </label>
                       </div>
 
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
+                      <label className="flex items-center justify-between gap-3 p-3 rounded-xl border border-zinc-200 bg-zinc-50 cursor-pointer">
+                        <div>
+                          <div className="text-xs font-semibold text-zinc-900">
+                            Faqat Telegram ilovasi (Mini App) orqali kirish
+                          </div>
+                          <div className="text-[11px] text-zinc-500">
+                            Yoqilganda oddiy brauzerdagi oddiy foydalanuvchilar botdagi «Ilovani ochish» tugmasiga yo‘naltiriladi (xodimlar kira oladi).
+                          </div>
+                        </div>
+                        <input
+                          type="checkbox"
+                          checked={siteConfigDraft.telegramOnlyMode}
+                          onChange={(e) =>
+                            setSiteConfigDraft((s) => ({
+                              ...s,
+                              telegramOnlyMode: e.target.checked,
+                            }))
+                          }
+                          className="accent-red-600 w-4 h-4 shrink-0"
+                        />
+                      </label>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                        <div className="space-y-1">
+                          <label className="block text-xs font-medium text-zinc-700">
+                            Zaxira Support @username
+                          </label>
+                          <input
+                            type="text"
+                            value={siteConfigDraft.supportUsername || ''}
+                            onChange={(e) =>
+                              setSiteConfigDraft((s) => ({ ...s, supportUsername: e.target.value }))
+                            }
+                            placeholder="@slaydcanva_support"
+                            className="w-full text-xs bg-zinc-50 border border-zinc-200 focus:border-red-600 focus:bg-white rounded-xl px-3 py-2 outline-none"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <label className="block text-xs font-medium text-zinc-700">
+                            Bot /start sarlavhasi
+                          </label>
+                          <input
+                            type="text"
+                            value={siteConfigDraft.botWelcomeTitle || ''}
+                            onChange={(e) =>
+                              setSiteConfigDraft((s) => ({ ...s, botWelcomeTitle: e.target.value }))
+                            }
+                            placeholder="SlaydCanva AI — Telegramda Tezkor Taqdimot!"
+                            className="w-full text-xs bg-zinc-50 border border-zinc-200 focus:border-red-600 focus:bg-white rounded-xl px-3 py-2 outline-none"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1">
                         <button
                           type="submit"
                           disabled={savingSiteCfg}
-                          className="py-2.5 px-4 rounded-xl bg-[#111113] hover:bg-zinc-800 disabled:opacity-50 text-white text-xs font-semibold flex items-center justify-center gap-1.5"
+                          className="py-2.5 px-3 rounded-xl bg-[#111113] hover:bg-zinc-800 disabled:opacity-50 text-white text-xs font-semibold flex items-center justify-center gap-1.5"
                         >
                           <Save className="w-3.5 h-3.5" />
                           <span>Sozlamalarni saqlash</span>
@@ -2830,10 +3525,23 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           type="button"
                           disabled={testingAlert}
                           onClick={() => void handleTestTelegramAlert()}
-                          className="py-2.5 px-4 rounded-xl border border-zinc-200 bg-white hover:bg-zinc-50 text-zinc-800 text-xs font-semibold flex items-center justify-center gap-1.5"
+                          className="py-2.5 px-3 rounded-xl border border-zinc-200 bg-white hover:bg-zinc-50 text-zinc-800 text-xs font-semibold flex items-center justify-center gap-1.5"
                         >
                           <Bell className="w-3.5 h-3.5 text-red-600" />
                           <span>{testingAlert ? 'Yuborilmoqda...' : 'Sinov Bot Alert'}</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={syncingBotWebhook}
+                          onClick={() => void handleSyncBotWebhook()}
+                          className="py-2.5 px-3 rounded-xl border border-red-200 bg-red-50 hover:bg-red-100 text-red-700 text-xs font-semibold flex items-center justify-center gap-1.5"
+                        >
+                          {syncingBotWebhook ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <Sparkles className="w-3.5 h-3.5" />
+                          )}
+                          <span>Bot Webhook + 5 Tugma</span>
                         </button>
                       </div>
                     </form>
@@ -2847,6 +3555,266 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 ============================================================ */}
             {activeTab === 'security' && (
               <div className="space-y-6">
+                {/* Security Scanner & Automatic Log Analyzer */}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  {/* Scanner Card */}
+                  <section className="bg-white border border-zinc-200 rounded-2xl p-5 space-y-4">
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <h2 className="text-sm font-semibold text-zinc-900 flex items-center gap-1.5">
+                          <ShieldCheck className="w-4 h-4 text-red-600" />
+                          <span>Tizim Xavfsizlik Skaneri</span>
+                        </h2>
+                        <p className="text-xs text-zinc-500 mt-0.5">
+                          Env kalitlar, TolovGo HMAC, Telegram-only darvozasi va shubhali loglarni tekshirish.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={runningScan}
+                        onClick={() => void handleRunSecurityScan()}
+                        className="px-3.5 py-2 rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-55 text-white text-xs font-semibold flex items-center gap-1.5 shrink-0"
+                      >
+                        {runningScan ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <ShieldAlert className="w-3.5 h-3.5" />
+                        )}
+                        <span>{runningScan ? 'Skanerlanmoqda...' : 'Skanerlash'}</span>
+                      </button>
+                    </div>
+
+                    {lastScanReport ? (
+                      <div className="space-y-3">
+                        <div className="p-3 rounded-xl bg-zinc-50 border border-zinc-200 flex items-center justify-between gap-3">
+                          <div>
+                            <div className="text-xs font-semibold text-zinc-900">
+                              {lastScanReport.summary}
+                            </div>
+                            <div className="text-[11px] font-mono text-zinc-500 mt-0.5">
+                              Xavf darajasi: {lastScanReport.riskLevel.toUpperCase()} · Tahdidlar:{' '}
+                              {lastScanReport.threatsDetected} · {formatDateTime(lastScanReport.scannedAt)}
+                            </div>
+                          </div>
+                          <div
+                            className={`text-xl font-bold font-mono tabular-nums shrink-0 ${
+                              lastScanReport.score >= 85
+                                ? 'text-emerald-700'
+                                : lastScanReport.score >= 60
+                                  ? 'text-amber-700'
+                                  : 'text-red-600'
+                            }`}
+                          >
+                            {lastScanReport.score}/100
+                          </div>
+                        </div>
+
+                        <div className="divide-y divide-zinc-100 border border-zinc-200 rounded-xl max-h-56 overflow-y-auto">
+                          {lastScanReport.checks.map((chk) => (
+                            <div key={chk.id} className="p-2.5 flex items-start justify-between gap-2 text-xs">
+                              <div className="min-w-0">
+                                <div className="font-semibold text-zinc-900">{chk.name}</div>
+                                <div className="text-[11px] text-zinc-600">{chk.message}</div>
+                                {chk.recommendation && (
+                                  <div className="text-[10px] text-amber-700 mt-0.5">
+                                    Tavsiya: {chk.recommendation}
+                                  </div>
+                                )}
+                              </div>
+                              <span
+                                className={`font-mono text-[11px] font-semibold uppercase shrink-0 ${
+                                  chk.status === 'pass'
+                                    ? 'text-emerald-700'
+                                    : chk.status === 'warn'
+                                      ? 'text-amber-700'
+                                      : 'text-red-600'
+                                }`}
+                              >
+                                {chk.status}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="py-8 text-center text-xs text-zinc-400 border border-dashed border-zinc-200 rounded-xl">
+                        Tizim himoyasini tekshirish uchun «Skanerlash» tugmasini bosing.
+                      </div>
+                    )}
+                  </section>
+
+                  {/* Auto Log Analyzer Card */}
+                  <section className="bg-white border border-zinc-200 rounded-2xl p-5 space-y-4">
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <h2 className="text-sm font-semibold text-zinc-900 flex items-center gap-1.5">
+                          <Activity className="w-4 h-4 text-red-600" />
+                          <span>Log Tahlilchisi & Avto-Xabarnoma</span>
+                        </h2>
+                        <p className="text-xs text-zinc-500 mt-0.5">
+                          Xavfsizlik loglarini tahlil qilib xavfli IP va hujumlarni darhol Telegram botga yuboradi.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={analyzingLogs}
+                        onClick={() => void handleAnalyzeSecurityLogs()}
+                        className="px-3.5 py-2 rounded-xl bg-[#111113] hover:bg-zinc-800 disabled:opacity-55 text-white text-xs font-semibold flex items-center gap-1.5 shrink-0"
+                      >
+                        {analyzingLogs ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Sparkles className="w-3.5 h-3.5 text-red-400" />
+                        )}
+                        <span>{analyzingLogs ? 'Tahlil...' : 'Loglarni Tahlil Qilish'}</span>
+                      </button>
+                    </div>
+
+                    {logAnalysisResult ? (
+                      <div className="space-y-3">
+                        <div className="grid grid-cols-3 gap-2 text-xs">
+                          <div className="p-2.5 rounded-xl bg-zinc-50 border border-zinc-200">
+                            <div className="text-[11px] text-zinc-500">Yopilmagan</div>
+                            <div className="font-mono tabular-nums font-bold text-zinc-900">
+                              {logAnalysisResult.unresolvedCount}
+                            </div>
+                          </div>
+                          <div className="p-2.5 rounded-xl bg-red-50 border border-red-200">
+                            <div className="text-[11px] text-red-700">Kritik</div>
+                            <div className="font-mono tabular-nums font-bold text-red-700">
+                              {logAnalysisResult.criticalCount}
+                            </div>
+                          </div>
+                          <div className="p-2.5 rounded-xl bg-zinc-50 border border-zinc-200">
+                            <div className="text-[11px] text-zinc-500">Bot Alert</div>
+                            <div className="font-mono font-bold text-zinc-900">
+                              {logAnalysisResult.alertSent ? 'Yuborildi' : 'Kerak emas'}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="p-3 rounded-xl bg-zinc-50 border border-zinc-200 text-xs text-zinc-700 leading-relaxed">
+                          {logAnalysisResult.analysisText}
+                        </div>
+
+                        {logAnalysisResult.topIps.length > 0 && (
+                          <div className="text-[11px] font-mono text-zinc-600">
+                            Shubhali IP manzillar:{' '}
+                            {logAnalysisResult.topIps.map(([ip, cnt]) => `${ip} (${cnt}x)`).join(' · ')}
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="py-8 text-center text-xs text-zinc-400 border border-dashed border-zinc-200 rounded-xl">
+                        Oxirgi 150 ta xavfsizlik hodisasini tahlil qilish va xavflarni aniqlash uchun bosing.
+                      </div>
+                    )}
+                  </section>
+                </div>
+
+                {/* Threat / Security Logs Table */}
+                <section className="bg-white border border-zinc-200 rounded-2xl overflow-hidden">
+                  <div className="px-5 py-3.5 border-b border-zinc-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <div>
+                      <h2 className="text-sm font-semibold text-zinc-900">
+                        Real vaqt Xavfsizlik & Tahdid Loglari ({filteredSecurityLogs.length})
+                      </h2>
+                      <p className="text-xs text-zinc-500 mt-0.5">
+                        Noto‘g‘ri TolovGo imzosi, admin parol xatolari, yaroqsiz WebApp va Telegram-only urinishlari avtomatik qayd etiladi.
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-1 bg-zinc-100 p-1 rounded-xl">
+                      {(
+                        [
+                          { id: 'all', label: 'Barchasi' },
+                          { id: 'unresolved', label: 'Ochiq' },
+                          { id: 'critical', label: 'Kritik' },
+                          { id: 'high', label: 'Yuqori' },
+                          { id: 'medium', label: "O'rta" },
+                        ] as const
+                      ).map((sf) => (
+                        <button
+                          key={sf.id}
+                          type="button"
+                          onClick={() => setSecuritySeverityFilter(sf.id)}
+                          className={`px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors ${
+                            securitySeverityFilter === sf.id
+                              ? 'bg-white text-zinc-900 shadow-xs'
+                              : 'text-zinc-600 hover:text-zinc-900'
+                          }`}
+                        >
+                          {sf.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="border-b border-zinc-200 bg-zinc-50/70 text-zinc-500">
+                          <th className="py-2.5 px-4 font-medium">Vaqt</th>
+                          <th className="py-2.5 px-4 font-medium">Daraja</th>
+                          <th className="py-2.5 px-4 font-medium">Hodisa</th>
+                          <th className="py-2.5 px-4 font-medium">IP / User</th>
+                          <th className="py-2.5 px-4 font-medium text-right">Holat</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-zinc-100">
+                        {filteredSecurityLogs.length === 0 ? (
+                          <tr>
+                            <td colSpan={5} className="py-8 text-center text-zinc-400">
+                              Hozircha xavfsizlik tahdidlari qayd etilmagan.
+                            </td>
+                          </tr>
+                        ) : (
+                          filteredSecurityLogs.slice(0, 60).map((log) => (
+                            <tr key={log.id} className="hover:bg-zinc-50/70">
+                              <td className="py-2.5 px-4 font-mono tabular-nums text-zinc-500 whitespace-nowrap">
+                                {formatDateTime(log.createdAt)}
+                              </td>
+                              <td className="py-2.5 px-4 font-mono uppercase font-semibold">
+                                <span
+                                  className={
+                                    log.severity === 'critical'
+                                      ? 'text-red-600'
+                                      : log.severity === 'high'
+                                        ? 'text-amber-700'
+                                        : 'text-zinc-600'
+                                  }
+                                >
+                                  {log.severity}
+                                </span>
+                              </td>
+                              <td className="py-2.5 px-4">
+                                <div className="font-semibold text-zinc-900">{log.title}</div>
+                                <div className="text-[11px] text-zinc-500">{log.details}</div>
+                              </td>
+                              <td className="py-2.5 px-4 font-mono text-[11px] text-zinc-600">
+                                <div>{log.ipAddress || '—'}</div>
+                                {log.userId && <div>ID {log.userId}</div>}
+                              </td>
+                              <td className="py-2.5 px-4 text-right whitespace-nowrap">
+                                {log.isResolved ? (
+                                  <span className="text-emerald-700 font-medium">Hal qilingan</span>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => void handleResolveSecLog(log.id)}
+                                    className="px-2.5 py-1 rounded-lg border border-zinc-200 bg-white hover:bg-zinc-50 text-zinc-800 font-medium"
+                                  >
+                                    Hal qilindi
+                                  </button>
+                                )}
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                   {/* System Status & Webhook Reference + CSV Export */}
                   <section className="bg-white border border-zinc-200 rounded-2xl p-5 space-y-4">
