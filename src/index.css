@@ -1,0 +1,128 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-display: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+    --font-body: 'DM Sans', system-ui, -apple-system, sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+  }
+
+  body {
+    font-family: var(--font-body);
+    background-color: #f4f5f7;
+    color: #0f172a;
+    margin: 0;
+    overflow: hidden;
+  }
+
+  h1, h2, h3, .font-display {
+    font-family: var(--font-display);
+  }
+}
+
+/* Word rich-text paper typography */
+.word-editor-content {
+  outline: none;
+  color: #0f172a;
+  line-height: 1.65;
+  word-break: break-word;
+}
+
+.word-editor-content h1 {
+  font-family: var(--font-display);
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.25;
+  margin: 0 0 14px 0;
+  color: #0f172a;
+}
+
+.word-editor-content h2 {
+  font-family: var(--font-display);
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.3;
+  margin: 18px 0 10px 0;
+  color: #1e293b;
+}
+
+.word-editor-content h3 {
+  font-family: var(--font-display);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.4;
+  margin: 14px 0 8px 0;
+  color: #334155;
+}
+
+.word-editor-content p {
+  margin: 0 0 10px 0;
+}
+
+.word-editor-content ul {
+  list-style-type: disc;
+  padding-left: 24px;
+  margin: 8px 0 12px 0;
+}
+
+.word-editor-content ol {
+  list-style-type: decimal;
+  padding-left: 24px;
+  margin: 8px 0 12px 0;
+}
+
+.word-editor-content li {
+  margin-bottom: 4px;
+}
+
+.word-editor-content table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 14px 0;
+}
+
+.word-editor-content td,
+.word-editor-content th {
+  border: 1px solid #cbd5e1;
+  padding: 8px 10px;
+  min-width: 60px;
+  vertical-align: top;
+}
+
+.word-editor-content th {
+  background-color: #f8fafc;
+  font-weight: 600;
+  text-align: left;
+}
+
+.word-editor-content hr {
+  border: none;
+  border-top: 1px solid #e2e8f0;
+  margin: 18px 0;
+}
+
+.word-editor-content img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 4px;
+  margin: 10px 0;
+}
+
+/* Subtle workspace scrollbars */
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
