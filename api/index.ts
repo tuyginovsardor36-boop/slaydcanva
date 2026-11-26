@@ -2015,6 +2015,10 @@ app.post('/api/ai/generate', async (req, res) => {
   };
 
   try {
+    if (!checkIpRateLimit(req, 'ai_generate', 25, 60_000)) {
+      res.status(429).json({ error: 'Juda ko‘p so‘rov yuborildi. Iltimos 1 daqiqa kuting.' });
+      return;
+    }
     const body = (req.body || {}) as GenerateRequestBody;
     const rawTopic = typeof body.topic === 'string' ? body.topic.trim() : '';
     if (!rawTopic) {
@@ -3747,6 +3751,26 @@ function extractClientIp(req?: express.Request): string | undefined {
 }
 
 const recentSecurityBurst = new Map<string, number[]>();
+const ipRateLimitMap = new Map<string, number[]>();
+
+function checkIpRateLimit(
+  req: express.Request,
+  category: string,
+  maxPerWindow: number,
+  windowMs: number
+): boolean {
+  const ip = extractClientIp(req) || 'unknown_ip';
+  const key = `${category}:${ip}`;
+  const now = Date.now();
+  const hits = (ipRateLimitMap.get(key) || []).filter((ts) => now - ts < windowMs);
+  hits.push(now);
+  ipRateLimitMap.set(key, hits);
+  if (ipRateLimitMap.size > 1000) {
+    const oldestKey = ipRateLimitMap.keys().next().value;
+    if (oldestKey) ipRateLimitMap.delete(oldestKey);
+  }
+  return hits.length <= maxPerWindow;
+}
 
 async function recordSecurityEvent(params: {
   severity: DbSecurityLog['severity'];
@@ -4773,6 +4797,10 @@ app.get('/api/payments/tolovgo/status/:orderId', async (req, res) => {
 });
 
 app.all('/api/payments/tolovgo/callback', async (req, res) => {
+  if (!checkIpRateLimit(req, 'tolovgo_callback', 60, 60_000)) {
+    res.status(429).json({ ok: false, error: 'Rate limit exceeded' });
+    return;
+  }
   try {
     const body = (req.body || {}) as Record<string, unknown>;
     const rawOrderId =
@@ -5081,6 +5109,10 @@ app.post('/api/admin/setup-password', async (req, res) => {
 });
 
 app.post('/api/admin/login', async (req, res) => {
+  if (!checkIpRateLimit(req, 'admin_login', 15, 60_000)) {
+    res.status(429).json({ error: "Juda ko'p urinish. 1 daqiqadan so'ng urinib ko'ring." });
+    return;
+  }
   const ctx = await requireStaffTelegram(req, res);
   if (!ctx) return;
   const { user, staff } = ctx;
@@ -7228,6 +7260,10 @@ async function formatBotFilesMessage(telegramId: string): Promise<string> {
 }
 
 app.post('/api/telegram/webhook', async (req, res) => {
+  if (!checkIpRateLimit(req, 'telegram_webhook', 120, 60_000)) {
+    res.status(429).json({ ok: false, error: 'Rate limit exceeded' });
+    return;
+  }
   try {
     const expectedSecret = getTelegramWebhookSecret();
     if (expectedSecret) {
