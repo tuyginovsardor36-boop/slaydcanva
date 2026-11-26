@@ -102,8 +102,9 @@ export async function exportCanvasPagesToPdf(
   pages: CanvasPage[],
   title: string,
   kind: 'pptx' | 'pdf',
-  orientation: PdfOrientation = 'portrait'
-): Promise<void> {
+  orientation: PdfOrientation = 'portrait',
+  options?: { download?: boolean }
+): Promise<{ blob: Blob; fileName: string }> {
   const dims = kind === 'pptx' ? PPTX_CANVAS : getPdfDimensions(orientation);
   const isLandscape = dims.width > dims.height;
 
@@ -141,7 +142,12 @@ export async function exportCanvasPagesToPdf(
     }
 
     const safeName = (title || 'SlaydCanva').trim().replace(/[\\/:*?"<>|]/g, '_');
-    pdf.save(`${safeName}.pdf`);
+    const fileName = `${safeName}.pdf`;
+    const blob = pdf.output('blob');
+    if (options?.download !== false) {
+      pdf.save(fileName);
+    }
+    return { blob, fileName };
   } finally {
     document.body.removeChild(host);
   }
@@ -151,8 +157,9 @@ export async function exportCanvasPageToPng(
   page: CanvasPage,
   title: string,
   kind: 'pptx' | 'pdf',
-  orientation: PdfOrientation = 'portrait'
-): Promise<void> {
+  orientation: PdfOrientation = 'portrait',
+  options?: { download?: boolean }
+): Promise<{ blob: Blob; fileName: string }> {
   const dims = kind === 'pptx' ? PPTX_CANVAS : getPdfDimensions(orientation);
   const host = document.createElement('div');
   host.style.position = 'fixed';
@@ -170,11 +177,16 @@ export async function exportCanvasPageToPng(
       pixelRatio: 2,
       cacheBust: true,
     });
-    const a = document.createElement('a');
     const safeName = (title || 'SlaydCanva').trim().replace(/[\\/:*?"<>|]/g, '_');
-    a.href = dataUrl;
-    a.download = `${safeName}.png`;
-    a.click();
+    const fileName = `${safeName}.png`;
+    if (options?.download !== false) {
+      const a = document.createElement('a');
+      a.href = dataUrl;
+      a.download = fileName;
+      a.click();
+    }
+    const blob = await (await fetch(dataUrl)).blob();
+    return { blob, fileName };
   } finally {
     document.body.removeChild(host);
   }
@@ -182,8 +194,9 @@ export async function exportCanvasPageToPng(
 
 export async function exportWordElementToPdf(
   element: HTMLElement,
-  title: string
-): Promise<void> {
+  title: string,
+  options?: { download?: boolean }
+): Promise<{ blob: Blob; fileName: string }> {
   const pageW = 794;
   const pageH = 1123;
 
@@ -224,5 +237,10 @@ export async function exportWordElementToPdf(
   }
 
   const safeName = (title || 'SlaydCanva-hujjat').trim().replace(/[\\/:*?"<>|]/g, '_');
-  pdf.save(`${safeName}.pdf`);
+  const fileName = `${safeName}.pdf`;
+  const blob = pdf.output('blob');
+  if (options?.download !== false) {
+    pdf.save(fileName);
+  }
+  return { blob, fileName };
 }

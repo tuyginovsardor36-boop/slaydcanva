@@ -1,15 +1,18 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowRight,
+  Bell,
   Check,
   CheckCircle2,
   ExternalLink,
   FileText,
   FileType2,
   Loader2,
+  LogOut,
   Plus,
   Presentation,
   RefreshCw,
+  Send,
   ShieldCheck,
   Sparkles,
   Wallet,
@@ -20,10 +23,17 @@ import {
   AiServiceId,
   BalanceTransaction,
   MobileTab,
+  TelegramUser,
   TolovgoPaymentMode,
   UserProfile,
   WorkspaceMode,
 } from '../types/editor';
+import {
+  formatTelegramDisplayName,
+  getTelegramAuthHeaders,
+  TelegramAccountResponse,
+  TelegramConfigResponse,
+} from '../utils/telegramClient';
 import { ServiceThumbnail } from './AiServicesView';
 
 interface HomeViewProps {
@@ -207,6 +217,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
 interface TopUpViewProps {
   balance: number;
   tolovgoMode?: TolovgoPaymentMode;
+  telegramSessionToken?: string | null;
   onTopUp: (amount: number, method: string, externalOrderId?: string) => void;
   onNotify?: (type: 'ok' | 'err', text: string) => void;
 }
@@ -226,6 +237,7 @@ const PAYMENT_METHODS = ['Click', 'Payme', 'Uzum / Karta'];
 export const TopUpView: React.FC<TopUpViewProps> = ({
   balance,
   tolovgoMode = 'live',
+  telegramSessionToken = null,
   onTopUp,
   onNotify,
 }) => {
@@ -291,7 +303,10 @@ export const TopUpView: React.FC<TopUpViewProps> = ({
     try {
       const modeParam = order.isTest ? 'test' : 'live';
       const res = await fetch(
-        `/api/payments/tolovgo/status/${encodeURIComponent(order.orderId)}?mode=${modeParam}`
+        `/api/payments/tolovgo/status/${encodeURIComponent(order.orderId)}?mode=${modeParam}`,
+        {
+          headers: getTelegramAuthHeaders(telegramSessionToken),
+        }
       );
       const data = (await res.json().catch(() => ({}))) as {
         status?: PendingTolovgoOrder['status'];
@@ -366,7 +381,10 @@ export const TopUpView: React.FC<TopUpViewProps> = ({
     try {
       const res = await fetch('/api/payments/tolovgo/create', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...getTelegramAuthHeaders(telegramSessionToken),
+        },
         body: JSON.stringify({
           amount: parsedAmount,
           providerHint: method,
@@ -666,6 +684,16 @@ interface ProfileViewProps {
   pptxCount: number;
   pdfCount: number;
   tolovgoMode: TolovgoPaymentMode;
+  telegramUser?: TelegramUser | null;
+  telegramSessionToken?: string | null;
+  onTelegramAuthenticated?: (payload: {
+    user: TelegramUser;
+    sessionToken: string;
+    account?: TelegramAccountResponse;
+    kvConfigured?: boolean;
+  }) => void;
+  onUpdateTelegramPrefs?: (prefs: { autoSendFiles?: boolean; notifyOnActivity?: boolean }) => void;
+  onTelegramLogout?: () => void;
   onChangeTolovgoMode: (mode: TolovgoPaymentMode) => void;
   onSaveProfile: (profile: UserProfile) => void;
   onOpenTab: (tab: MobileTab) => void;
@@ -677,6 +705,11 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
   pptxCount,
   pdfCount,
   tolovgoMode,
+  telegramUser,
+  telegramSessionToken,
+  onTelegramAuthenticated,
+  onUpdateTelegramPrefs,
+  onTelegramLogout,
   onChangeTolovgoMode,
   onSaveProfile,
   onOpenTab,
@@ -688,6 +721,14 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
     hasLiveKey: boolean;
     hasTestKey: boolean;
   } | null>(null);
+  const [tgConfig, setTgConfig] = useState<TelegramConfigResponse | null>(null);
+  const [loginNonce, setLoginNonce] = useState<string>('');
+  const [waitingTelegramAuth, setWaitingTelegramAuth] = useState(false);
+
+  useEffect(() => {
+    setFullName(profile.fullName);
+    setContact(profile.contact);
+  }, [profile.fullName, profile.contact]);
 
   useEffect(() => {
     let active = true;
@@ -702,10 +743,64 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
         }
       })
       .catch(() => {});
+
+    fetch('/api/telegram/config')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((cfg: TelegramConfigResponse | null) => {
+        if (active && cfg) {
+          setTgConfig(cfg);
+        }
+      })
+      .catch(() => {});
+
+    const bytes = new Uint8Array(9);
+    window.crypto.getRandomValues(bytes);
+    setLoginNonce(
+      Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+    );
+
     return () => {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!waitingTelegramAuth || !loginNonce || telegramUser) return;
+    let active = true;
+    const poll = async () => {
+      try {
+        const res = await fetch(
+          `/api/telegram/auth/poll?nonce=${encodeURIComponent(loginNonce)}`
+        );
+        if (!res.ok || !active) return;
+        const data = (await res.json()) as {
+          authenticated?: boolean;
+          user?: TelegramUser;
+          sessionToken?: string;
+          account?: TelegramAccountResponse;
+          kvConfigured?: boolean;
+        };
+        if (data.authenticated && data.user && data.sessionToken && active) {
+          setWaitingTelegramAuth(false);
+          onTelegramAuthenticated?.({
+            user: data.user,
+            sessionToken: data.sessionToken,
+            account: data.account,
+            kvConfigured: data.kvConfigured,
+          });
+        }
+      } catch {
+        // Ignore transient network failures during polling
+      }
+    };
+    const timer = window.setInterval(() => {
+      void poll();
+    }, 2500);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [waitingTelegramAuth, loginNonce, telegramUser, onTelegramAuthenticated]);
 
   const initials = (fullName || 'F')
     .trim()
@@ -724,6 +819,13 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
     window.setTimeout(() => setSaved(false), 2000);
   };
 
+  const botDeepLink =
+    tgConfig?.botUsername && loginNonce
+      ? `https://t.me/${tgConfig.botUsername}?start=auth_${loginNonce}`
+      : tgConfig?.botUsername
+        ? `https://t.me/${tgConfig.botUsername}`
+        : null;
+
   return (
     <main className="flex-1 overflow-y-auto bg-[#F4F5F7] px-4 py-5 space-y-5">
       <section className="max-w-md mx-auto bg-white border border-slate-200 rounded-2xl p-5 flex items-center gap-3.5">
@@ -735,7 +837,9 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
             {profile.fullName || 'Foydalanuvchi'}
           </div>
           <div className="text-xs text-slate-500 truncate">
-            {profile.contact || "Kontakt kiritilmagan"}
+            {telegramUser
+              ? formatTelegramDisplayName(telegramUser)
+              : profile.contact || "Kontakt kiritilmagan"}
           </div>
         </div>
       </section>
@@ -763,6 +867,131 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
           </div>
           <div className="text-[11px] text-zinc-500 mt-0.5">Balans (so'm)</div>
         </button>
+      </section>
+
+      {/* Telegram Bot & Auth Card */}
+      <section className="max-w-md mx-auto bg-white border border-zinc-200 rounded-2xl p-5 space-y-3.5">
+        <div className="flex items-start justify-between gap-2">
+          <div>
+            <h2 className="text-sm font-semibold text-zinc-900 flex items-center gap-1.5">
+              <Send className="w-4 h-4 text-sky-600" />
+              <span>Telegram Bot va Auth</span>
+            </h2>
+            <p className="text-[11px] text-zinc-500 mt-0.5 leading-snug">
+              Bildirishnomalar, tarix, TolovGo balans to'ldirish va tayyor fayllar Telegram chatga boradi
+            </p>
+          </div>
+          <span
+            className={`px-2 py-0.5 rounded-md text-[11px] font-semibold border shrink-0 ${
+              telegramUser
+                ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
+                : 'bg-zinc-100 border-zinc-200 text-zinc-600'
+            }`}
+          >
+            {telegramUser ? 'Ulangan' : 'Ulanmagan'}
+          </span>
+        </div>
+
+        {telegramUser ? (
+          <div className="space-y-3">
+            <div className="p-3 rounded-xl bg-sky-50/60 border border-sky-200/80 flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <div className="text-xs font-semibold text-slate-900 truncate">
+                  {formatTelegramDisplayName(telegramUser)}
+                </div>
+                <div className="text-[11px] text-slate-500 font-mono">
+                  Telegram ID: {telegramUser.telegramId}
+                </div>
+              </div>
+              {tgConfig?.botUsername && (
+                <a
+                  href={`https://t.me/${tgConfig.botUsername}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="px-2.5 py-1.5 rounded-lg bg-white border border-sky-200 text-sky-700 text-[11px] font-medium hover:bg-sky-50 flex items-center gap-1 shrink-0"
+                >
+                  <span>Bot</span>
+                  <ExternalLink className="w-3 h-3" />
+                </a>
+              )}
+            </div>
+
+            <label className="flex items-center justify-between gap-3 p-2.5 rounded-xl border border-zinc-200 cursor-pointer hover:bg-zinc-50 transition-colors">
+              <div className="flex items-center gap-2 min-w-0">
+                <Send className="w-3.5 h-3.5 text-sky-600 shrink-0" />
+                <span className="text-xs font-medium text-zinc-800">
+                  Tayyor fayllarni Telegramga yuborish
+                </span>
+              </div>
+              <input
+                type="checkbox"
+                checked={telegramUser.autoSendFiles !== false}
+                onChange={(e) => onUpdateTelegramPrefs?.({ autoSendFiles: e.target.checked })}
+                className="accent-red-600 w-4 h-4 shrink-0"
+              />
+            </label>
+
+            <label className="flex items-center justify-between gap-3 p-2.5 rounded-xl border border-zinc-200 cursor-pointer hover:bg-zinc-50 transition-colors">
+              <div className="flex items-center gap-2 min-w-0">
+                <Bell className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                <span className="text-xs font-medium text-zinc-800">
+                  To'lov va AI bildirishnomalari
+                </span>
+              </div>
+              <input
+                type="checkbox"
+                checked={telegramUser.notifyOnActivity !== false}
+                onChange={(e) => onUpdateTelegramPrefs?.({ notifyOnActivity: e.target.checked })}
+                className="accent-red-600 w-4 h-4 shrink-0"
+              />
+            </label>
+
+            {onTelegramLogout && (
+              <button
+                type="button"
+                onClick={onTelegramLogout}
+                className="w-full py-2 px-3 rounded-full border border-zinc-200 text-xs font-medium text-zinc-600 hover:bg-zinc-50 transition-colors flex items-center justify-center gap-1.5"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+                <span>Telegram hisobidan chiqish</span>
+              </button>
+            )}
+          </div>
+        ) : tgConfig?.configured && botDeepLink ? (
+          <div className="space-y-2.5">
+            <a
+              href={botDeepLink}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={() => setWaitingTelegramAuth(true)}
+              className="w-full py-2.5 px-4 rounded-full text-xs font-semibold text-white bg-sky-600 hover:bg-sky-700 transition-colors flex items-center justify-center gap-2"
+            >
+              <Send className="w-3.5 h-3.5" />
+              <span>Telegram bot orqali kirish (@{tgConfig.botUsername})</span>
+            </a>
+
+            {waitingTelegramAuth && (
+              <div className="p-2.5 rounded-xl bg-sky-50 border border-sky-200 text-[11px] text-sky-800 flex items-center gap-2">
+                <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                <span>
+                  Botda <strong>Start</strong> bosing — kirish avtomatik tasdiqlanadi (yoki botdagi «Saytga kirish» tugmasini bosing).
+                </span>
+              </div>
+            )}
+
+            {!telegramSessionToken && (
+              <p className="text-[11px] text-zinc-500 leading-relaxed">
+                Botga kirib <code>/start</code> bossangiz, barcha tayyor slayd va hujjatlaringiz hamda balans tarixi Telegram chatda ko'rinadi.
+              </p>
+            )}
+          </div>
+        ) : (
+          <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-[11px] text-amber-800 leading-relaxed">
+            Telegram botni ulash uchun Vercel Environment Variables bo'limida{' '}
+            <code>TELEGRAM_BOT_TOKEN</code>, <code>TELEGRAM_BOT_USERNAME</code> va{' '}
+            <code>TELEGRAM_WEBHOOK_SECRET</code> o'zgaruvchilarini kiriting.
+          </div>
+        )}
       </section>
 
       {/* Vaqtinchalik TolovGo rejimi sozlamasi */}

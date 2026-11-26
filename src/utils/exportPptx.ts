@@ -81,7 +81,16 @@ async function prepareImageForPptx(
   });
 }
 
-export async function exportToPptx(pages: CanvasPage[], title: string): Promise<void> {
+export interface ExportedFileResult {
+  blob: Blob;
+  fileName: string;
+}
+
+export async function exportToPptx(
+  pages: CanvasPage[],
+  title: string,
+  options?: { download?: boolean }
+): Promise<ExportedFileResult> {
   const pptx = new PptxGenJS();
   pptx.layout = 'LAYOUT_16x9'; // 10 x 5.625 inches
   pptx.title = title || 'SlaydCanva Taqdimot';
@@ -173,5 +182,15 @@ export async function exportToPptx(pages: CanvasPage[], title: string): Promise<
   }
 
   const safeName = (title || 'SlaydCanva-taqdimot').trim().replace(/[\\/:*?"<>|]/g, '_');
-  await pptx.writeFile({ fileName: `${safeName}.pptx` });
+  const fileName = `${safeName}.pptx`;
+  const rawBlob = (await pptx.write({ outputType: 'blob' })) as Blob;
+  if (options?.download !== false) {
+    const url = URL.createObjectURL(rawBlob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName;
+    a.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  return { blob: rawBlob, fileName };
 }

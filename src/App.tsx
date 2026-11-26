@@ -21,6 +21,7 @@ import {
   MobileTab,
   PdfOrientation,
   SlaydCanvaState,
+  TelegramUser,
   TolovgoPaymentMode,
   UserProfile,
   WorkspaceMode,
@@ -32,6 +33,13 @@ import {
   exportWordElementToPdf,
 } from './utils/exportPdf';
 import { exportToPptx } from './utils/exportPptx';
+import {
+  getTelegramAuthHeaders,
+  logTelegramActivity,
+  sendBlobToTelegram,
+  TelegramAccountResponse,
+  TelegramWebAppWindow,
+} from './utils/telegramClient';
 
 const STORAGE_KEY = 'slaydcanva_workspace_v1';
 
@@ -118,10 +126,12 @@ export default function App() {
   const [desktopProfileOpen, setDesktopProfileOpen] = useState(false);
   const [mobileSheetOpen, setMobileSheetOpen] = useState(false);
   const [notice, setNotice] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const [telegramUser, setTelegramUser] = useState<TelegramUser | null>(null);
+  const [tgSessionToken, setTgSessionToken] = useState<string | null>(null);
 
   const wordPaperRef = useRef<HTMLDivElement | null>(null);
 
-  // Persist workspace to localStorage
+  // Persist workspace to localStorage (never persist session tokens)
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
@@ -136,6 +146,183 @@ export default function App() {
       setNotice((curr) => (curr?.text === text ? null : curr));
     }, 3200);
   }, []);
+
+  const applyTelegramAuth = useCallback(
+    (
+      payload: {
+        user: TelegramUser;
+        sessionToken: string;
+        account?: TelegramAccountResponse;
+        kvConfigured?: boolean;
+      },
+      announce = true
+    ) => {
+      setTelegramUser({
+        ...payload.user,
+        autoSendFiles: payload.account?.autoSendFiles ?? payload.user.autoSendFiles ?? true,
+        notifyOnActivity: payload.account?.notifyOnActivity ?? payload.user.notifyOnActivity ?? true,
+      });
+      setTgSessionToken(payload.sessionToken);
+
+      setState((prev) => {
+        const displayName = [payload.user.firstName, payload.user.lastName]
+          .filter(Boolean)
+          .join(' ')
+          .trim();
+        const nextProfile: UserProfile = {
+          fullName:
+            prev.profile.fullName === 'Foydalanuvchi' && displayName
+              ? displayName
+              : prev.profile.fullName,
+          contact:
+            payload.user.username && (!prev.profile.contact || prev.profile.contact === 'tuyginovsardor4@gmail.com')
+              ? `@${payload.user.username}`
+              : prev.profile.contact,
+        };
+
+        let nextBalance = prev.balance;
+        let nextTransactions = prev.transactions;
+
+        if (payload.account) {
+          const existingIds = new Set(prev.transactions.map((t) => t.id));
+          const unseenServerTxs = payload.account.transactions.filter(
+            (tx) => !existingIds.has(tx.id) && tx.id !== 'tx_init_1'
+          );
+          if (unseenServerTxs.length > 0) {
+            nextTransactions = [...unseenServerTxs, ...prev.transactions];
+          }
+          if (payload.kvConfigured) {
+            nextBalance = payload.account.balance;
+          } else if (unseenServerTxs.length > 0) {
+            const addedSum = unseenServerTxs
+              .filter((t) => t.id.startsWith('tolovgo_'))
+              .reduce((acc, t) => acc + Math.max(0, t.amount), 0);
+            nextBalance = prev.balance + addedSum;
+          }
+        }
+
+        return {
+          ...prev,
+          profile: nextProfile,
+          balance: nextBalance,
+          transactions: nextTransactions,
+        };
+      });
+
+      if (announce) {
+        const label = payload.user.username ? `@${payload.user.username}` : payload.user.firstName;
+        showNotice('ok', `Telegram orqali kirildi: ${label}`);
+      }
+    },
+    [showNotice]
+  );
+
+  // Telegram WebApp / Magic Link (?tg_auth=) / Existing HttpOnly Session Auto-Auth
+  useEffect(() => {
+    let active = true;
+    const bootTelegramAuth = async () => {
+      const url = new URL(window.location.href);
+      const tgAuthToken = url.searchParams.get('tg_auth');
+      if (tgAuthToken) {
+        url.searchParams.delete('tg_auth');
+        window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
+        try {
+          const res = await fetch('/api/telegram/auth/verify', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token: tgAuthToken }),
+          });
+          const data = (await res.json().catch(() => ({}))) as {
+            ok?: boolean;
+            user?: TelegramUser;
+            sessionToken?: string;
+            account?: TelegramAccountResponse;
+            kvConfigured?: boolean;
+          };
+          if (active && res.ok && data.user && data.sessionToken) {
+            applyTelegramAuth(
+              {
+                user: data.user,
+                sessionToken: data.sessionToken,
+                account: data.account,
+                kvConfigured: data.kvConfigured,
+              },
+              true
+            );
+            return;
+          }
+        } catch {
+          // Ignore verification errors and continue
+        }
+      }
+
+      const webApp = (window as TelegramWebAppWindow).Telegram?.WebApp;
+      if (webApp) {
+        webApp.ready?.();
+        webApp.expand?.();
+        if (webApp.initData) {
+          try {
+            const res = await fetch('/api/telegram/auth/webapp', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ initData: webApp.initData }),
+            });
+            const data = (await res.json().catch(() => ({}))) as {
+              ok?: boolean;
+              user?: TelegramUser;
+              sessionToken?: string;
+              account?: TelegramAccountResponse;
+              kvConfigured?: boolean;
+            };
+            if (active && res.ok && data.user && data.sessionToken) {
+              applyTelegramAuth(
+                {
+                  user: data.user,
+                  sessionToken: data.sessionToken,
+                  account: data.account,
+                  kvConfigured: data.kvConfigured,
+                },
+                false
+              );
+              return;
+            }
+          } catch {
+            // Ignore WebApp auth fallback
+          }
+        }
+      }
+
+      try {
+        const res = await fetch('/api/telegram/me');
+        if (!res.ok || !active) return;
+        const data = (await res.json().catch(() => ({}))) as {
+          ok?: boolean;
+          user?: TelegramUser;
+          sessionToken?: string;
+          account?: TelegramAccountResponse;
+          kvConfigured?: boolean;
+        };
+        if (active && data.user && data.sessionToken) {
+          applyTelegramAuth(
+            {
+              user: data.user,
+              sessionToken: data.sessionToken,
+              account: data.account,
+              kvConfigured: data.kvConfigured,
+            },
+            false
+          );
+        }
+      } catch {
+        // Not logged in yet
+      }
+    };
+
+    void bootTelegramAuth();
+    return () => {
+      active = false;
+    };
+  }, [applyTelegramAuth]);
 
   const handleModeChange = (mode: WorkspaceMode) => {
     setMobileSheetOpen(false);
@@ -266,24 +453,47 @@ export default function App() {
     [pptxHistory, pdfHistory]
   );
 
+  const deliverExportToTelegram = useCallback(
+    async (blob: Blob, fileName: string, baseMessage: string) => {
+      if (!tgSessionToken || telegramUser?.autoSendFiles === false) {
+        showNotice('ok', baseMessage);
+        return;
+      }
+      const res = await sendBlobToTelegram(
+        blob,
+        fileName,
+        tgSessionToken,
+        `📄 ${fileName} — SlaydCanva`
+      );
+      if (res.ok && !res.skipped) {
+        showNotice('ok', `${baseMessage} Telegramga ham yuborildi.`);
+      } else if (res.tooLarge) {
+        showNotice('ok', `${baseMessage} (3.2 MB dan katta — Telegramga yuborilmadi).`);
+      } else {
+        showNotice('ok', baseMessage);
+      }
+    },
+    [tgSessionToken, telegramUser, showNotice]
+  );
+
   const handleExportPrimary = async () => {
     if (isExporting) return;
     setIsExporting(true);
     try {
       if (state.mode === 'pptx') {
-        await exportToPptx(state.pptxPages, state.docTitle);
-        showNotice('ok', 'PPTX fayli yuklab olindi.');
+        const res = await exportToPptx(state.pptxPages, state.docTitle);
+        await deliverExportToTelegram(res.blob, res.fileName, 'PPTX fayli yuklab olindi.');
       } else if (state.mode === 'word') {
-        await exportToDocx(state.wordDoc, state.docTitle);
-        showNotice('ok', 'Word (.docx) fayli yuklab olindi.');
+        const res = await exportToDocx(state.wordDoc, state.docTitle);
+        await deliverExportToTelegram(res.blob, res.fileName, 'Word (.docx) fayli yuklab olindi.');
       } else {
-        await exportCanvasPagesToPdf(
+        const res = await exportCanvasPagesToPdf(
           state.pdfPages,
           state.docTitle,
           'pdf',
           state.pdfOrientation
         );
-        showNotice('ok', 'PDF fayli yuklab olindi.');
+        await deliverExportToTelegram(res.blob, res.fileName, 'PDF fayli yuklab olindi.');
       }
     } catch {
       showNotice('err', "Eksport qilishda xatolik yuz berdi. Qaytadan urinib ko'ring.");
@@ -297,11 +507,14 @@ export default function App() {
     setIsExporting(true);
     try {
       if (state.mode === 'pptx') {
-        await exportCanvasPagesToPdf(state.pptxPages, state.docTitle, 'pptx');
+        const res = await exportCanvasPagesToPdf(state.pptxPages, state.docTitle, 'pptx');
+        await deliverExportToTelegram(res.blob, res.fileName, 'PDF fayli yuklab olindi.');
       } else if (state.mode === 'word' && wordPaperRef.current) {
-        await exportWordElementToPdf(wordPaperRef.current, state.docTitle);
+        const res = await exportWordElementToPdf(wordPaperRef.current, state.docTitle);
+        await deliverExportToTelegram(res.blob, res.fileName, 'PDF fayli yuklab olindi.');
+      } else {
+        showNotice('ok', 'PDF fayli yuklab olindi.');
       }
-      showNotice('ok', 'PDF fayli yuklab olindi.');
     } catch {
       showNotice('err', 'PDF yaratishda xatolik yuz berdi.');
     } finally {
@@ -317,16 +530,17 @@ export default function App() {
         const active =
           state.pptxPages.find((p) => p.id === state.activePptxId) || state.pptxPages[0];
         if (active) {
-          await exportCanvasPageToPng(active, state.docTitle, 'pptx');
+          const res = await exportCanvasPageToPng(active, state.docTitle, 'pptx');
+          await deliverExportToTelegram(res.blob, res.fileName, 'PNG rasm yuklab olindi.');
         }
       } else {
         const active =
           state.pdfPages.find((p) => p.id === state.activePdfId) || state.pdfPages[0];
         if (active) {
-          await exportCanvasPageToPng(active, state.docTitle, 'pdf', state.pdfOrientation);
+          const res = await exportCanvasPageToPng(active, state.docTitle, 'pdf', state.pdfOrientation);
+          await deliverExportToTelegram(res.blob, res.fileName, 'PNG rasm yuklab olindi.');
         }
       }
-      showNotice('ok', 'PNG rasm yuklab olindi.');
     } catch {
       showNotice('err', 'PNG rasm yaratishda xatolik yuz berdi.');
     } finally {
@@ -416,6 +630,40 @@ export default function App() {
     );
   };
 
+  const handleUpdateTelegramPrefs = async (prefs: {
+    autoSendFiles?: boolean;
+    notifyOnActivity?: boolean;
+  }) => {
+    if (!tgSessionToken) return;
+    setTelegramUser((prev) => (prev ? { ...prev, ...prefs } : prev));
+    try {
+      await fetch('/api/telegram/preferences', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...getTelegramAuthHeaders(tgSessionToken),
+        },
+        body: JSON.stringify(prefs),
+      });
+    } catch {
+      // Ignore network hiccup
+    }
+  };
+
+  const handleTelegramLogout = async () => {
+    try {
+      await fetch('/api/telegram/logout', {
+        method: 'POST',
+        headers: getTelegramAuthHeaders(tgSessionToken),
+      });
+    } catch {
+      // Ignore
+    }
+    setTelegramUser(null);
+    setTgSessionToken(null);
+    showNotice('ok', 'Telegram hisobidan chiqildi.');
+  };
+
   const handleAiGenerated = (result: AiGeneratedPayload) => {
     const now = new Date();
     const dateStr = `${String(now.getDate()).padStart(2, '0')}.${String(now.getMonth() + 1).padStart(2, '0')}.${now.getFullYear()}`;
@@ -460,6 +708,49 @@ export default function App() {
     setMobileServiceOpen(false);
     setMobileTab('editor');
     showNotice('ok', `${result.serviceTitle} tayyorlandi.`);
+
+    if (tgSessionToken) {
+      const tokenSnapshot = tgSessionToken;
+      const shouldSendFile = telegramUser?.autoSendFiles !== false;
+      void (async () => {
+        await logTelegramActivity(
+          `${result.serviceTitle}: ${result.docTitle}`,
+          'AI Xizmat',
+          -result.price,
+          tokenSnapshot
+        );
+        if (!shouldSendFile) return;
+        try {
+          if (result.targetMode === 'pptx') {
+            const exported = await exportToPptx(result.pages, result.docTitle, {
+              download: false,
+            });
+            await sendBlobToTelegram(
+              exported.blob,
+              exported.fileName,
+              tokenSnapshot,
+              `✨ ${result.serviceTitle}: ${result.docTitle}`
+            );
+          } else if (result.targetMode === 'pdf') {
+            const exported = await exportCanvasPagesToPdf(
+              result.pages,
+              result.docTitle,
+              'pdf',
+              result.pdfOrientation || stateRef.current.pdfOrientation,
+              { download: false }
+            );
+            await sendBlobToTelegram(
+              exported.blob,
+              exported.fileName,
+              tokenSnapshot,
+              `✨ ${result.serviceTitle}: ${result.docTitle}`
+            );
+          }
+        } catch {
+          // Non-blocking Telegram background export
+        }
+      })();
+    }
   };
 
   return (
@@ -480,6 +771,7 @@ export default function App() {
         onResetCurrent={handleResetCurrent}
         onOpenTopUp={() => setDesktopTopUpOpen(true)}
         onOpenProfile={() => setDesktopProfileOpen(true)}
+        telegramUser={telegramUser}
         isExporting={isExporting}
       />
 
@@ -526,6 +818,7 @@ export default function App() {
             <TopUpView
               balance={state.balance}
               tolovgoMode={state.tolovgoMode || 'live'}
+              telegramSessionToken={tgSessionToken}
               onTopUp={handleTopUp}
               onNotify={showNotice}
             />
@@ -544,6 +837,11 @@ export default function App() {
               pptxCount={state.pptxPages.length}
               pdfCount={state.pdfPages.length}
               tolovgoMode={state.tolovgoMode || 'live'}
+              telegramUser={telegramUser}
+              telegramSessionToken={tgSessionToken}
+              onTelegramAuthenticated={(p) => applyTelegramAuth(p, true)}
+              onUpdateTelegramPrefs={handleUpdateTelegramPrefs}
+              onTelegramLogout={handleTelegramLogout}
               onChangeTolovgoMode={handleChangeTolovgoMode}
               onSaveProfile={handleSaveProfile}
               onOpenTab={handleSelectMobileTab}
@@ -660,6 +958,7 @@ export default function App() {
             <TopUpView
               balance={state.balance}
               tolovgoMode={state.tolovgoMode || 'live'}
+              telegramSessionToken={tgSessionToken}
               onTopUp={handleTopUp}
               onNotify={showNotice}
             />
@@ -678,7 +977,7 @@ export default function App() {
             onClick={(e) => e.stopPropagation()}
           >
             <div className="px-5 py-3.5 border-b border-slate-200 flex items-center justify-between shrink-0">
-              <span className="text-sm font-semibold text-slate-900">Profil va sozlamalar</span>
+              <span className="text-sm font-semibold text-slate-900">Profil, Telegram va sozlamalar</span>
               <button
                 type="button"
                 onClick={() => setDesktopProfileOpen(false)}
@@ -693,6 +992,11 @@ export default function App() {
               pptxCount={state.pptxPages.length}
               pdfCount={state.pdfPages.length}
               tolovgoMode={state.tolovgoMode || 'live'}
+              telegramUser={telegramUser}
+              telegramSessionToken={tgSessionToken}
+              onTelegramAuthenticated={(p) => applyTelegramAuth(p, true)}
+              onUpdateTelegramPrefs={handleUpdateTelegramPrefs}
+              onTelegramLogout={handleTelegramLogout}
               onChangeTolovgoMode={handleChangeTolovgoMode}
               onSaveProfile={handleSaveProfile}
               onOpenTab={() => {

@@ -124,7 +124,11 @@ function dataUrlToUint8Array(dataUrl: string): { data: Uint8Array; type: 'png' |
   }
 }
 
-export async function exportToDocx(docData: WordDocumentData, title: string): Promise<void> {
+export async function exportToDocx(
+  docData: WordDocumentData,
+  title: string,
+  options?: { download?: boolean }
+): Promise<{ blob: Blob; fileName: string }> {
   const parser = new DOMParser();
   const parsed = parser.parseFromString(`<div>${docData.html}</div>`, 'text/html');
   const root = parsed.body.firstElementChild as HTMLElement | null;
@@ -317,11 +321,15 @@ export async function exportToDocx(docData: WordDocumentData, title: string): Pr
   });
 
   const blob = await Packer.toBlob(doc);
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
   const safeName = (title || 'SlaydCanva-hujjat').trim().replace(/[\\/:*?"<>|]/g, '_');
-  a.href = url;
-  a.download = `${safeName}.docx`;
-  a.click();
-  URL.revokeObjectURL(url);
+  const fileName = `${safeName}.docx`;
+  if (options?.download !== false) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+  return { blob, fileName };
 }

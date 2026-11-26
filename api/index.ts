@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import crypto from 'node:crypto';
 import express from 'express';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 
@@ -1253,6 +1254,9 @@ interface TolovgoOrderRecord {
   isTest: boolean;
   credited: boolean;
   createdAt: number;
+  telegramId?: string;
+  chatId?: string;
+  method?: string;
 }
 
 const tolovgoOrders = new Map<string, TolovgoOrderRecord>();
@@ -1465,7 +1469,7 @@ async function fetchRemoteTolovgoStatus(
 }
 
 const app = express();
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ extended: false, limit: '1mb' }));
 
 // Restore original /api/* path when invoked via Vercel rewrite
@@ -2126,6 +2130,654 @@ Qoidalar:
 });
 
 // =========================================================================
+// Telegram Bot, Auth, Notifications, History & Document Delivery Helpers
+// =========================================================================
+const DEFAULT_PUBLIC_ORIGIN = 'https://slaydcanva.vercel.app';
+const SESSION_COOKIE_NAME = 'slaydcanva_session';
+const MAX_TG_DOCUMENT_BYTES = 3_200_000; // Fits safely under Vercel 4.5MB request limit after base64
+const MODULE_EPHEMERAL_SECRET = crypto.randomBytes(32);
+
+interface TgUserProfile {
+  telegramId: string;
+  chatId: string;
+  firstName: string;
+  lastName?: string;
+  username?: string;
+}
+
+interface TgTransaction {
+  id: string;
+  title: string;
+  method: string;
+  amount: number;
+  date: string;
+}
+
+interface TgUserAccount {
+  telegramId: string;
+  chatId: string;
+  firstName: string;
+  lastName?: string;
+  username?: string;
+  balance: number;
+  transactions: TgTransaction[];
+  notifyOnActivity: boolean;
+  autoSendFiles: boolean;
+  updatedAt: number;
+}
+
+interface MemoryKvEntry {
+  value: string;
+  expiresAt?: number;
+}
+
+const memoryKvStore = new Map<string, MemoryKvEntry>();
+let cachedBotUsername: string | null = null;
+
+function getKvCredentials(): { url: string; token: string } | null {
+  const url =
+    getCleanEnvKey(process.env.KV_REST_API_URL, 'MY_KV_REST_API_URL') ||
+    getCleanEnvKey(process.env.UPSTASH_REDIS_REST_URL, 'MY_KV_REST_API_URL');
+  const token =
+    getCleanEnvKey(process.env.KV_REST_API_TOKEN, 'MY_KV_REST_API_TOKEN') ||
+    getCleanEnvKey(process.env.UPSTASH_REDIS_REST_TOKEN, 'MY_KV_REST_API_TOKEN');
+  if (!url || !token) return null;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'https:') return null;
+    return { url: parsed.toString().replace(/\/+$/, ''), token };
+  } catch {
+    return null;
+  }
+}
+
+async function kvGet<T>(key: string): Promise<T | null> {
+  const creds = getKvCredentials();
+  if (creds) {
+    try {
+      const res = await fetch(`${creds.url}/get/${encodeURIComponent(key)}`, {
+        headers: { Authorization: `Bearer ${creds.token}` },
+        signal: AbortSignal.timeout(5000),
+      });
+      if (res.ok) {
+        const data = (await res.json()) as { result?: unknown };
+        if (typeof data.result === 'string' && data.result) {
+          return JSON.parse(data.result) as T;
+        }
+        return null;
+      }
+    } catch {
+      // Fallback to in-memory store
+    }
+  }
+  const entry = memoryKvStore.get(key);
+  if (!entry) return null;
+  if (entry.expiresAt && entry.expiresAt < Date.now()) {
+    memoryKvStore.delete(key);
+    return null;
+  }
+  try {
+    return JSON.parse(entry.value) as T;
+  } catch {
+    return null;
+  }
+}
+
+async function kvSet(key: string, value: unknown, ttlSeconds?: number): Promise<void> {
+  const serialized = JSON.stringify(value);
+  memoryKvStore.set(key, {
+    value: serialized,
+    expiresAt: ttlSeconds ? Date.now() + ttlSeconds * 1000 : undefined,
+  });
+  if (memoryKvStore.size > 1500) {
+    const firstKey = memoryKvStore.keys().next().value;
+    if (firstKey) memoryKvStore.delete(firstKey);
+  }
+
+  const creds = getKvCredentials();
+  if (creds) {
+    try {
+      const endpoint =
+        ttlSeconds && ttlSeconds > 0
+          ? `${creds.url}/set/${encodeURIComponent(key)}?EX=${Math.floor(ttlSeconds)}`
+          : `${creds.url}/set/${encodeURIComponent(key)}`;
+      await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${creds.token}`,
+          'Content-Type': 'text/plain; charset=utf-8',
+        },
+        body: serialized,
+        signal: AbortSignal.timeout(5000),
+      });
+    } catch {
+      // Ignore transient KV write failures; memory fallback still holds it
+    }
+  }
+}
+
+function getTelegramBotToken(): string | null {
+  return getCleanEnvKey(process.env.TELEGRAM_BOT_TOKEN, 'MY_TELEGRAM_BOT_TOKEN');
+}
+
+function getTelegramWebhookSecret(): string | null {
+  return getCleanEnvKey(process.env.TELEGRAM_WEBHOOK_SECRET, 'MY_TELEGRAM_WEBHOOK_SECRET');
+}
+
+function getSigningKey(): Buffer {
+  const explicit = getCleanEnvKey(process.env.TELEGRAM_SESSION_SECRET, 'MY_TELEGRAM_SESSION_SECRET');
+  if (explicit) {
+    return crypto.createHash('sha256').update(explicit).digest();
+  }
+  const botToken = getTelegramBotToken();
+  if (botToken) {
+    return crypto.createHmac('sha256', 'slaydcanva-session-v1').update(botToken).digest();
+  }
+  return MODULE_EPHEMERAL_SECRET;
+}
+
+function signToken(payload: Record<string, unknown>, ttlMs: number): string {
+  const body = { ...payload, exp: Date.now() + ttlMs };
+  const encoded = Buffer.from(JSON.stringify(body), 'utf8').toString('base64url');
+  const sig = crypto.createHmac('sha256', getSigningKey()).update(encoded).digest('base64url');
+  return `${encoded}.${sig}`;
+}
+
+function verifySignedToken(token: unknown): Record<string, unknown> | null {
+  if (typeof token !== 'string') return null;
+  const trimmed = token.trim();
+  const dotIdx = trimmed.indexOf('.');
+  if (dotIdx <= 0 || dotIdx === trimmed.length - 1) return null;
+  const encoded = trimmed.slice(0, dotIdx);
+  const sig = trimmed.slice(dotIdx + 1);
+  if (!/^[A-Za-z0-9_-]+$/.test(encoded) || !/^[A-Za-z0-9_-]+$/.test(sig)) return null;
+
+  const expectedSig = crypto.createHmac('sha256', getSigningKey()).update(encoded).digest();
+  let actualSig: Buffer;
+  try {
+    actualSig = Buffer.from(sig, 'base64url');
+  } catch {
+    return null;
+  }
+  if (actualSig.length !== expectedSig.length || !crypto.timingSafeEqual(actualSig, expectedSig)) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')) as Record<
+      string,
+      unknown
+    >;
+    if (typeof parsed.exp !== 'number' || parsed.exp < Date.now()) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function safeTimingEqual(a: string, b: string): boolean {
+  const aBuf = Buffer.from(a, 'utf8');
+  const bBuf = Buffer.from(b, 'utf8');
+  if (aBuf.length !== bBuf.length) return false;
+  return crypto.timingSafeEqual(aBuf, bBuf);
+}
+
+function verifyTelegramWebAppInitData(initData: string, botToken: string): TgUserProfile | null {
+  if (!initData || typeof initData !== 'string' || initData.length > 8192) return null;
+  const params = new URLSearchParams(initData);
+  const hash = params.get('hash');
+  if (!hash || !/^[a-f0-9]{64}$/i.test(hash)) return null;
+
+  const authDate = Number(params.get('auth_date'));
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (!Number.isFinite(authDate) || authDate > nowSec + 300 || nowSec - authDate > 86400) {
+    return null;
+  }
+
+  const pairs: string[] = [];
+  for (const [k, v] of params.entries()) {
+    if (k === 'hash') continue;
+    pairs.push(`${k}=${v}`);
+  }
+  pairs.sort();
+  const dataCheckString = pairs.join('\n');
+
+  const secretKey = crypto.createHmac('sha256', 'WebAppData').update(botToken).digest();
+  const computedHash = crypto
+    .createHmac('sha256', secretKey)
+    .update(dataCheckString)
+    .digest('hex');
+
+  if (!safeTimingEqual(computedHash.toLowerCase(), hash.toLowerCase())) {
+    return null;
+  }
+
+  const rawUser = params.get('user');
+  if (!rawUser) return null;
+  try {
+    const u = JSON.parse(rawUser) as Record<string, unknown>;
+    const id = u.id !== undefined && u.id !== null ? String(u.id).trim() : '';
+    if (!/^\d{3,20}$/.test(id)) return null;
+    return {
+      telegramId: id,
+      chatId: id,
+      firstName: typeof u.first_name === 'string' && u.first_name.trim() ? u.first_name.trim().slice(0, 80) : 'Telegram',
+      lastName: typeof u.last_name === 'string' && u.last_name.trim() ? u.last_name.trim().slice(0, 80) : undefined,
+      username: typeof u.username === 'string' && u.username.trim() ? u.username.trim().slice(0, 64) : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function parseCookies(cookieHeader: string | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!cookieHeader) return out;
+  for (const part of cookieHeader.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx <= 0) continue;
+    const k = part.slice(0, idx).trim();
+    const v = part.slice(idx + 1).trim();
+    if (k) {
+      try {
+        out[k] = decodeURIComponent(v);
+      } catch {
+        out[k] = v;
+      }
+    }
+  }
+  return out;
+}
+
+function getAuthenticatedTelegramUser(req: express.Request): TgUserProfile | null {
+  const authHeader = req.get('authorization');
+  let rawToken: string | undefined;
+  let usedCookie = false;
+
+  if (authHeader && authHeader.toLowerCase().startsWith('bearer ')) {
+    rawToken = authHeader.slice(7).trim();
+  } else {
+    const cookies = parseCookies(req.get('cookie'));
+    rawToken = cookies[SESSION_COOKIE_NAME];
+    usedCookie = Boolean(rawToken);
+  }
+
+  if (!rawToken) return null;
+
+  // CSRF check if relying purely on cookie on mutating methods
+  if (usedCookie && req.method !== 'GET' && req.method !== 'HEAD') {
+    const origin = req.get('origin');
+    const host = (req.get('x-forwarded-host') || req.get('host') || '').split(',')[0].trim();
+    if (origin) {
+      try {
+        const originHost = new URL(origin).host;
+        if (host && originHost !== host) return null;
+      } catch {
+        return null;
+      }
+    } else if (req.get('x-requested-with') !== 'SlaydCanva') {
+      return null;
+    }
+  }
+
+  const payload = verifySignedToken(rawToken);
+  if (!payload || payload.kind !== 'session') return null;
+  const tid = typeof payload.tid === 'string' ? payload.tid : '';
+  const cid = typeof payload.cid === 'string' ? payload.cid : tid;
+  if (!/^\d{3,20}$/.test(tid) || !/^-?\d{3,24}$/.test(cid)) return null;
+
+  return {
+    telegramId: tid,
+    chatId: cid,
+    firstName: typeof payload.fn === 'string' && payload.fn ? payload.fn : 'Foydalanuvchi',
+    lastName: typeof payload.ln === 'string' && payload.ln ? payload.ln : undefined,
+    username: typeof payload.un === 'string' && payload.un ? payload.un : undefined,
+  };
+}
+
+function issueSessionCookieAndToken(
+  req: express.Request,
+  res: express.Response,
+  user: TgUserProfile
+): string {
+  const token = signToken(
+    {
+      kind: 'session',
+      tid: user.telegramId,
+      cid: user.chatId,
+      fn: user.firstName,
+      ln: user.lastName || '',
+      un: user.username || '',
+    },
+    30 * 24 * 60 * 60 * 1000
+  );
+
+  const isHttps =
+    req.secure ||
+    req.get('x-forwarded-proto') === 'https' ||
+    Boolean(process.env.VERCEL);
+
+  const cookieParts = [
+    `${SESSION_COOKIE_NAME}=${encodeURIComponent(token)}`,
+    'Path=/',
+    'HttpOnly',
+    `Max-Age=${30 * 24 * 60 * 60}`,
+    isHttps ? 'SameSite=None' : 'SameSite=Lax',
+    ...(isHttps ? ['Secure', 'Partitioned'] : []),
+  ];
+  res.setHeader('Set-Cookie', cookieParts.join('; '));
+  return token;
+}
+
+function clearSessionCookie(req: express.Request, res: express.Response): void {
+  const isHttps =
+    req.secure ||
+    req.get('x-forwarded-proto') === 'https' ||
+    Boolean(process.env.VERCEL);
+  const cookieParts = [
+    `${SESSION_COOKIE_NAME}=`,
+    'Path=/',
+    'HttpOnly',
+    'Max-Age=0',
+    isHttps ? 'SameSite=None' : 'SameSite=Lax',
+    ...(isHttps ? ['Secure', 'Partitioned'] : []),
+  ];
+  res.setHeader('Set-Cookie', cookieParts.join('; '));
+}
+
+function formatUzDate(d = new Date()): string {
+  return `${String(d.getDate()).padStart(2, '0')}.${String(d.getMonth() + 1).padStart(2, '0')}.${d.getFullYear()}`;
+}
+
+function formatSomServer(amount: number): string {
+  return `${Math.round(amount).toLocaleString('uz-UZ').replace(/,/g, ' ')} so'm`;
+}
+
+function escapeTgHtml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+async function getTgUserAccount(profile: TgUserProfile): Promise<TgUserAccount> {
+  const key = `tg_user:${profile.telegramId}`;
+  const existing = await kvGet<TgUserAccount>(key);
+  if (existing) {
+    const updated: TgUserAccount = {
+      ...existing,
+      chatId: profile.chatId || existing.chatId,
+      firstName: profile.firstName || existing.firstName,
+      lastName: profile.lastName ?? existing.lastName,
+      username: profile.username ?? existing.username,
+      notifyOnActivity: existing.notifyOnActivity !== false,
+      autoSendFiles: existing.autoSendFiles !== false,
+    };
+    if (
+      updated.chatId !== existing.chatId ||
+      updated.firstName !== existing.firstName ||
+      updated.username !== existing.username
+    ) {
+      updated.updatedAt = Date.now();
+      await kvSet(key, updated);
+    }
+    return updated;
+  }
+
+  const fresh: TgUserAccount = {
+    telegramId: profile.telegramId,
+    chatId: profile.chatId,
+    firstName: profile.firstName,
+    lastName: profile.lastName,
+    username: profile.username,
+    balance: 50000,
+    transactions: [
+      {
+        id: 'tx_init_1',
+        title: "Boshlang'ich hisob",
+        method: 'Tizim',
+        amount: 50000,
+        date: formatUzDate(),
+      },
+    ],
+    notifyOnActivity: true,
+    autoSendFiles: true,
+    updatedAt: Date.now(),
+  };
+  await kvSet(key, fresh);
+  return fresh;
+}
+
+async function saveTgUserAccount(account: TgUserAccount): Promise<void> {
+  account.updatedAt = Date.now();
+  account.transactions = account.transactions.slice(0, 40);
+  await kvSet(`tg_user:${account.telegramId}`, account);
+}
+
+async function creditTgUserTopUp(
+  telegramId: string,
+  chatId: string,
+  amount: number,
+  orderId: string,
+  methodLabel: string
+): Promise<boolean> {
+  const key = `tg_user:${telegramId}`;
+  const existing = await kvGet<TgUserAccount>(key);
+  const txId = `tolovgo_${orderId}`;
+  if (existing && existing.transactions.some((t) => t.id === txId)) {
+    return false;
+  }
+  const account: TgUserAccount = existing || {
+    telegramId,
+    chatId,
+    firstName: 'Foydalanuvchi',
+    balance: 50000,
+    transactions: [],
+    notifyOnActivity: true,
+    autoSendFiles: true,
+    updatedAt: Date.now(),
+  };
+  account.balance = Math.max(0, account.balance + amount);
+  account.transactions.unshift({
+    id: txId,
+    title: `Balans to'ldirish (#${orderId})`,
+    method: methodLabel,
+    amount,
+    date: formatUzDate(),
+  });
+  await saveTgUserAccount(account);
+  return true;
+}
+
+async function telegramApi(
+  method: string,
+  payload: Record<string, unknown>
+): Promise<{ ok: boolean; result?: unknown; description?: string }> {
+  const token = getTelegramBotToken();
+  if (!token) return { ok: false, description: 'TELEGRAM_BOT_TOKEN not configured' };
+  const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(12000),
+  });
+  const data = (await res.json().catch(() => ({ ok: false }))) as {
+    ok: boolean;
+    result?: unknown;
+    description?: string;
+  };
+  return data;
+}
+
+async function telegramSendDocument(
+  chatId: string,
+  fileName: string,
+  mimeType: string,
+  buffer: Buffer,
+  caption?: string
+): Promise<{ ok: boolean; description?: string }> {
+  const token = getTelegramBotToken();
+  if (!token) return { ok: false, description: 'TELEGRAM_BOT_TOKEN not configured' };
+
+  const form = new FormData();
+  form.append('chat_id', chatId);
+  if (caption) {
+    form.append('caption', caption.slice(0, 900));
+  }
+  const uint8 = new Uint8Array(buffer);
+  const blob = new Blob([uint8], { type: mimeType });
+  form.append('document', blob, fileName);
+
+  const res = await fetch(`https://api.telegram.org/bot${token}/sendDocument`, {
+    method: 'POST',
+    body: form,
+    signal: AbortSignal.timeout(25000),
+  });
+  return (await res.json().catch(() => ({ ok: false }))) as {
+    ok: boolean;
+    description?: string;
+  };
+}
+
+async function resolveTelegramBotUsername(): Promise<string | null> {
+  const envName = getCleanEnvKey(process.env.TELEGRAM_BOT_USERNAME, 'MY_TELEGRAM_BOT_USERNAME');
+  if (envName) {
+    return envName.replace(/^@+/, '');
+  }
+  if (cachedBotUsername) return cachedBotUsername;
+  const me = await telegramApi('getMe', {});
+  const result = me.result as Record<string, unknown> | undefined;
+  if (me.ok && result && typeof result.username === 'string' && result.username) {
+    cachedBotUsername = result.username.replace(/^@+/, '');
+    return cachedBotUsername;
+  }
+  return null;
+}
+
+function getPreferredPublicOrigin(req: express.Request): string {
+  return getPublicBaseOrigin(req) || DEFAULT_PUBLIC_ORIGIN;
+}
+
+async function createTolovgoOrderForBot(
+  req: express.Request,
+  amount: number,
+  telegramId: string,
+  chatId: string,
+  providerHint = 'Telegram Bot'
+): Promise<{ orderId: string; payUrl: string; amount: number; isTest: boolean } | { error: string }> {
+  const cred = resolveTolovgoCredential();
+  if (!cred) {
+    return { error: "TolovGo API kaliti sozlanmagan (TOLOVGO_API_KEY yoki TOLOVGO_TEST_API)." };
+  }
+
+  const origin = getPreferredPublicOrigin(req);
+  const callbackUrl = `${origin}/api/payments/tolovgo/callback`;
+  const returnUrl = `${origin}/`;
+  const baseUrl = getTolovgoBaseUrl();
+
+  const formParams = new URLSearchParams();
+  formParams.set('amount', String(amount));
+  formParams.set('note', `SlaydCanva balans (${providerHint})`);
+  formParams.set('callback_url', callbackUrl);
+  formParams.set('return_url', returnUrl);
+
+  let upstreamRes = await fetch(`${baseUrl}/create`, {
+    method: 'POST',
+    headers: {
+      'X-Api-Key': cred.apiKey,
+      'Content-Type': 'application/x-www-form-urlencoded',
+      Accept: 'application/json',
+    },
+    body: formParams.toString(),
+    signal: AbortSignal.timeout(15000),
+  });
+
+  if (upstreamRes.status === 415) {
+    upstreamRes = await fetch(`${baseUrl}/create`, {
+      method: 'POST',
+      headers: {
+        'X-Api-Key': cred.apiKey,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({
+        amount,
+        note: `SlaydCanva balans (${providerHint})`,
+        callback_url: callbackUrl,
+        return_url: returnUrl,
+      }),
+      signal: AbortSignal.timeout(15000),
+    });
+  }
+
+  const rawText = await upstreamRes.text();
+  let data: Record<string, unknown> = {};
+  try {
+    data = JSON.parse(rawText) as Record<string, unknown>;
+  } catch {
+    data = {};
+  }
+
+  if (!upstreamRes.ok || data.ok === false) {
+    return {
+      error: mapTolovgoErrorMessage(
+        upstreamRes.status,
+        data,
+        "TolovGo bilan hisob-faktura yaratib bo'lmadi."
+      ),
+    };
+  }
+
+  const orderId = String(data.order_id ?? data.orderId ?? data.id ?? '').trim();
+  const payUrl = validateTolovgoPayUrl(data.pay_url ?? data.payUrl);
+  if (!/^[a-zA-Z0-9_-]{1,64}$/.test(orderId) || !payUrl) {
+    return { error: "TolovGo noto'g'ri to'lov javobini qaytardi." };
+  }
+
+  const verifiedAmount = Number(data.amount);
+  const finalAmount =
+    Number.isFinite(verifiedAmount) && verifiedAmount >= 1000 ? Math.round(verifiedAmount) : amount;
+  const isTest = Boolean(data.test) || cred.isTest;
+
+  const rec: TolovgoOrderRecord = {
+    orderId,
+    amount: finalAmount,
+    payUrl,
+    status: normalizeTolovgoStatus(data.status),
+    isTest,
+    credited: false,
+    createdAt: Date.now(),
+    telegramId,
+    chatId,
+    method: providerHint,
+  };
+  tolovgoOrders.set(orderId, rec);
+  await kvSet(`tolovgo_order:${orderId}`, rec, 86400);
+
+  return { orderId, payUrl, amount: finalAmount, isTest };
+}
+
+async function notifyTelegramPaymentPaid(
+  chatId: string,
+  amount: number,
+  orderId: string,
+  isTest: boolean
+): Promise<void> {
+  if (!chatId || !getTelegramBotToken()) return;
+  const text =
+    `✅ <b>Balans to'ldirildi${isTest ? ' (Sinov)' : ''}!</b>\n\n` +
+    `💵 Summa: <b>+${escapeTgHtml(formatSomServer(amount))}</b>\n` +
+    `🧾 Buyurtma: <code>#${escapeTgHtml(orderId)}</code>`;
+  await telegramApi('sendMessage', {
+    chat_id: chatId,
+    text,
+    parse_mode: 'HTML',
+  }).catch(() => {});
+}
+
+// =========================================================================
 // TolovGo (tolovgo.uz) UZS Payment Gateway Proxy Routes
 // =========================================================================
 app.get('/api/payments/tolovgo/config', (_req, res) => {
@@ -2191,6 +2843,8 @@ app.post('/api/payments/tolovgo/create', async (req, res) => {
     const callbackUrl = origin ? `${origin}/api/payments/tolovgo/callback` : undefined;
     const returnUrl = origin ? `${origin}/` : undefined;
     const baseUrl = getTolovgoBaseUrl();
+
+    const tgUser = getAuthenticatedTelegramUser(req);
 
     // Match TolovGo documented curl -d / form-urlencoded format
     const formParams = new URLSearchParams();
@@ -2269,7 +2923,7 @@ app.post('/api/payments/tolovgo/create', async (req, res) => {
         : rawAmount;
 
     pruneOldTolovgoOrders();
-    tolovgoOrders.set(orderId, {
+    const rec: TolovgoOrderRecord = {
       orderId,
       amount: finalAmount,
       payUrl,
@@ -2277,7 +2931,12 @@ app.post('/api/payments/tolovgo/create', async (req, res) => {
       isTest: Boolean(data.test) || cred.isTest,
       credited: false,
       createdAt: Date.now(),
-    });
+      telegramId: tgUser?.telegramId,
+      chatId: tgUser?.chatId,
+      method: hint ? `TolovGo · ${hint}` : 'TolovGo',
+    };
+    tolovgoOrders.set(orderId, rec);
+    await kvSet(`tolovgo_order:${orderId}`, rec, 86400);
 
     res.status(201).json({
       ok: true,
@@ -2285,7 +2944,7 @@ app.post('/api/payments/tolovgo/create', async (req, res) => {
       amount: finalAmount,
       payUrl,
       status: 'pending',
-      test: Boolean(data.test) || cred.isTest,
+      test: rec.isTest,
       providers: data.providers && typeof data.providers === 'object' ? data.providers : {},
     });
   } catch (err) {
@@ -2304,7 +2963,8 @@ app.get('/api/payments/tolovgo/status/:orderId', async (req, res) => {
       return;
     }
 
-    const existing = tolovgoOrders.get(orderId);
+    const existing =
+      tolovgoOrders.get(orderId) || (await kvGet<TolovgoOrderRecord>(`tolovgo_order:${orderId}`)) || undefined;
     const queryMode =
       req.query.mode === 'test' || req.query.mode === 'live'
         ? req.query.mode
@@ -2321,19 +2981,25 @@ app.get('/api/payments/tolovgo/status/:orderId', async (req, res) => {
       return;
     }
 
+    const tgUser = getAuthenticatedTelegramUser(req);
     const remote = await fetchRemoteTolovgoStatus(orderId, cred.apiKey);
     const trustedAmount = existing?.amount ?? remote.amount ?? 0;
 
     let newlyCredited = false;
     if (remote.status === 'paid') {
+      const targetTgId = existing?.telegramId || tgUser?.telegramId;
+      const targetChatId = existing?.chatId || tgUser?.chatId || targetTgId;
+
       if (existing) {
         existing.status = 'paid';
         if (!existing.credited && trustedAmount >= 1000) {
           existing.credited = true;
           newlyCredited = true;
         }
+        tolovgoOrders.set(orderId, existing);
+        await kvSet(`tolovgo_order:${orderId}`, existing, 86400);
       } else if (trustedAmount >= 1000) {
-        tolovgoOrders.set(orderId, {
+        const rec: TolovgoOrderRecord = {
           orderId,
           amount: trustedAmount,
           payUrl: '',
@@ -2341,11 +3007,28 @@ app.get('/api/payments/tolovgo/status/:orderId', async (req, res) => {
           isTest: cred.isTest,
           credited: true,
           createdAt: Date.now(),
-        });
+          telegramId: targetTgId,
+          chatId: targetChatId,
+        };
+        tolovgoOrders.set(orderId, rec);
+        await kvSet(`tolovgo_order:${orderId}`, rec, 86400);
         newlyCredited = true;
+      }
+
+      if (newlyCredited && targetTgId && targetChatId && trustedAmount >= 1000) {
+        await creditTgUserTopUp(
+          targetTgId,
+          targetChatId,
+          trustedAmount,
+          orderId,
+          existing?.method || (cred.isTest ? 'TolovGo (Sinov)' : 'TolovGo')
+        );
+        await notifyTelegramPaymentPaid(targetChatId, trustedAmount, orderId, cred.isTest);
       }
     } else if (existing) {
       existing.status = remote.status;
+      tolovgoOrders.set(orderId, existing);
+      await kvSet(`tolovgo_order:${orderId}`, existing, 86400);
     }
 
     res.json({
@@ -2379,7 +3062,8 @@ app.all('/api/payments/tolovgo/callback', async (req, res) => {
       return;
     }
 
-    const existing = tolovgoOrders.get(orderId);
+    const existing =
+      tolovgoOrders.get(orderId) || (await kvGet<TolovgoOrderRecord>(`tolovgo_order:${orderId}`)) || undefined;
     const cred = resolveTolovgoCredential(
       existing ? (existing.isTest ? 'test' : 'live') : undefined
     );
@@ -2390,18 +3074,42 @@ app.all('/api/payments/tolovgo/callback', async (req, res) => {
 
     // Always verify callback server-to-server via TolovGo status endpoint
     const remote = await fetchRemoteTolovgoStatus(orderId, cred.apiKey);
+    const trustedAmount = existing?.amount ?? remote.amount ?? 0;
+
     if (existing) {
       existing.status = remote.status;
+      if (remote.status === 'paid' && !existing.credited && trustedAmount >= 1000) {
+        existing.credited = true;
+        if (existing.telegramId && existing.chatId) {
+          await creditTgUserTopUp(
+            existing.telegramId,
+            existing.chatId,
+            trustedAmount,
+            orderId,
+            existing.method || (existing.isTest ? 'TolovGo (Sinov)' : 'TolovGo')
+          );
+          await notifyTelegramPaymentPaid(
+            existing.chatId,
+            trustedAmount,
+            orderId,
+            existing.isTest
+          );
+        }
+      }
+      tolovgoOrders.set(orderId, existing);
+      await kvSet(`tolovgo_order:${orderId}`, existing, 86400);
     } else if (remote.amount) {
-      tolovgoOrders.set(orderId, {
+      const rec: TolovgoOrderRecord = {
         orderId,
         amount: remote.amount,
         payUrl: '',
         status: remote.status,
         isTest: cred.isTest,
-        credited: false,
+        credited: remote.status === 'paid',
         createdAt: Date.now(),
-      });
+      };
+      tolovgoOrders.set(orderId, rec);
+      await kvSet(`tolovgo_order:${orderId}`, rec, 86400);
     }
 
     res.json({ ok: true, orderId, status: remote.status });
@@ -2409,6 +3117,726 @@ app.all('/api/payments/tolovgo/callback', async (req, res) => {
     console.error('[TolovGo Callback Error]', err);
     res.status(500).json({ ok: false });
   }
+});
+
+// =========================================================================
+// Telegram Bot & Auth Routes
+// =========================================================================
+app.get('/api/telegram/config', async (req, res) => {
+  const token = getTelegramBotToken();
+  const botUsername = token ? await resolveTelegramBotUsername() : null;
+  const origin = getPreferredPublicOrigin(req);
+  res.json({
+    configured: Boolean(token),
+    botUsername,
+    webhookUrl: `${origin}/api/telegram/webhook`,
+    webhookSecretConfigured: Boolean(getTelegramWebhookSecret()),
+    kvConfigured: Boolean(getKvCredentials()),
+  });
+});
+
+app.post('/api/telegram/auth/webapp', async (req, res) => {
+  const botToken = getTelegramBotToken();
+  if (!botToken) {
+    res.status(503).json({ error: "TELEGRAM_BOT_TOKEN sozlanmagan." });
+    return;
+  }
+  const initData = typeof req.body?.initData === 'string' ? req.body.initData : '';
+  const profile = verifyTelegramWebAppInitData(initData, botToken);
+  if (!profile) {
+    res.status(401).json({ error: "Telegram WebApp ma'lumoti tasdiqlanmadi." });
+    return;
+  }
+  const account = await getTgUserAccount(profile);
+  const sessionToken = issueSessionCookieAndToken(req, res, profile);
+  res.json({ ok: true, user: profile, sessionToken, account, kvConfigured: Boolean(getKvCredentials()) });
+});
+
+app.post('/api/telegram/auth/verify', async (req, res) => {
+  const rawToken = typeof req.body?.token === 'string' ? req.body.token : '';
+  const payload = verifySignedToken(rawToken);
+  if (!payload || payload.kind !== 'tg_login') {
+    res.status(401).json({ error: "Kirish havolasi eskirgan yoki noto'g'ri. Botdan /start bosing." });
+    return;
+  }
+  const tid = typeof payload.tid === 'string' ? payload.tid : '';
+  const cid = typeof payload.cid === 'string' ? payload.cid : tid;
+  if (!/^\d{3,20}$/.test(tid) || !/^-?\d{3,24}$/.test(cid)) {
+    res.status(401).json({ error: "Noto'g'ri Telegram foydalanuvchi identifikatori." });
+    return;
+  }
+  const profile: TgUserProfile = {
+    telegramId: tid,
+    chatId: cid,
+    firstName: typeof payload.fn === 'string' && payload.fn ? payload.fn : 'Foydalanuvchi',
+    lastName: typeof payload.ln === 'string' && payload.ln ? payload.ln : undefined,
+    username: typeof payload.un === 'string' && payload.un ? payload.un : undefined,
+  };
+  const account = await getTgUserAccount(profile);
+  const sessionToken = issueSessionCookieAndToken(req, res, profile);
+  res.json({ ok: true, user: profile, sessionToken, account, kvConfigured: Boolean(getKvCredentials()) });
+});
+
+app.get('/api/telegram/auth/poll', async (req, res) => {
+  const nonce = typeof req.query.nonce === 'string' ? req.query.nonce.trim() : '';
+  if (!/^[a-zA-Z0-9_-]{8,48}$/.test(nonce)) {
+    res.status(400).json({ error: "Noto'g'ri kirish kodi." });
+    return;
+  }
+  const record = await kvGet<{ loginToken: string }>(`tg_nonce:${nonce}`);
+  if (!record?.loginToken) {
+    res.json({ authenticated: false });
+    return;
+  }
+  const payload = verifySignedToken(record.loginToken);
+  if (!payload || payload.kind !== 'tg_login') {
+    res.json({ authenticated: false });
+    return;
+  }
+  const profile: TgUserProfile = {
+    telegramId: String(payload.tid),
+    chatId: String(payload.cid || payload.tid),
+    firstName: typeof payload.fn === 'string' && payload.fn ? payload.fn : 'Foydalanuvchi',
+    lastName: typeof payload.ln === 'string' && payload.ln ? payload.ln : undefined,
+    username: typeof payload.un === 'string' && payload.un ? payload.un : undefined,
+  };
+  const account = await getTgUserAccount(profile);
+  const sessionToken = issueSessionCookieAndToken(req, res, profile);
+  res.json({
+    authenticated: true,
+    user: profile,
+    sessionToken,
+    account,
+    kvConfigured: Boolean(getKvCredentials()),
+  });
+});
+
+app.get('/api/telegram/me', async (req, res) => {
+  const user = getAuthenticatedTelegramUser(req);
+  if (!user) {
+    res.status(401).json({ error: 'Telegram autentifikatsiyasi talab qilinadi.' });
+    return;
+  }
+  const account = await getTgUserAccount(user);
+  const sessionToken = issueSessionCookieAndToken(req, res, user);
+  res.json({
+    ok: true,
+    sessionToken,
+    user: {
+      ...user,
+      autoSendFiles: account.autoSendFiles,
+      notifyOnActivity: account.notifyOnActivity,
+    },
+    account,
+    kvConfigured: Boolean(getKvCredentials()),
+  });
+});
+
+app.post('/api/telegram/preferences', async (req, res) => {
+  const user = getAuthenticatedTelegramUser(req);
+  if (!user) {
+    res.status(401).json({ error: 'Telegram autentifikatsiyasi talab qilinadi.' });
+    return;
+  }
+  const account = await getTgUserAccount(user);
+  if (typeof req.body?.autoSendFiles === 'boolean') {
+    account.autoSendFiles = req.body.autoSendFiles;
+  }
+  if (typeof req.body?.notifyOnActivity === 'boolean') {
+    account.notifyOnActivity = req.body.notifyOnActivity;
+  }
+  await saveTgUserAccount(account);
+  res.json({
+    ok: true,
+    autoSendFiles: account.autoSendFiles,
+    notifyOnActivity: account.notifyOnActivity,
+  });
+});
+
+app.post('/api/telegram/logout', (req, res) => {
+  clearSessionCookie(req, res);
+  res.json({ ok: true });
+});
+
+app.post('/api/telegram/notify', async (req, res) => {
+  const user = getAuthenticatedTelegramUser(req);
+  if (!user) {
+    res.status(401).json({ error: 'Telegram autentifikatsiyasi talab qilinadi.' });
+    return;
+  }
+  const rawMessage = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+  if (!rawMessage) {
+    res.status(400).json({ error: 'Xabar matni bo\'sh.' });
+    return;
+  }
+  const account = await getTgUserAccount(user);
+  if (!account.notifyOnActivity) {
+    res.json({ ok: true, skipped: true });
+    return;
+  }
+  const result = await telegramApi('sendMessage', {
+    chat_id: account.chatId,
+    text: `🔔 ${escapeTgHtml(rawMessage.slice(0, 800))}`,
+    parse_mode: 'HTML',
+  });
+  res.json({ ok: result.ok });
+});
+
+app.post('/api/telegram/log-activity', async (req, res) => {
+  const user = getAuthenticatedTelegramUser(req);
+  if (!user) {
+    res.status(401).json({ error: 'Telegram autentifikatsiyasi talab qilinadi.' });
+    return;
+  }
+  const title = typeof req.body?.title === 'string' ? req.body.title.trim().slice(0, 140) : '';
+  const method = typeof req.body?.method === 'string' ? req.body.method.trim().slice(0, 60) : 'AI Xizmat';
+  const rawDelta = Number(req.body?.amountDelta ?? 0);
+  // Only allow spend/zero deductions from client; positive top-ups come exclusively from verified TolovGo
+  const safeDelta =
+    Number.isFinite(rawDelta) && rawDelta <= 0 && rawDelta >= -500_000 ? Math.round(rawDelta) : 0;
+
+  if (!title) {
+    res.status(400).json({ error: 'Amaliyot nomi kerak.' });
+    return;
+  }
+
+  const account = await getTgUserAccount(user);
+  if (safeDelta < 0) {
+    account.balance = Math.max(0, account.balance + safeDelta);
+  }
+  account.transactions.unshift({
+    id: `act_${Date.now().toString(36)}_${crypto.randomBytes(3).toString('hex')}`,
+    title,
+    method,
+    amount: safeDelta,
+    date: formatUzDate(),
+  });
+  await saveTgUserAccount(account);
+
+  if (account.notifyOnActivity) {
+    const costLine = safeDelta < 0 ? `\n💳 Xarajat: <b>-${escapeTgHtml(formatSomServer(Math.abs(safeDelta)))}</b>` : '';
+    const balLine = `\n💰 Qoldiq: <b>${escapeTgHtml(formatSomServer(account.balance))}</b>`;
+    await telegramApi('sendMessage', {
+      chat_id: account.chatId,
+      text: `✨ <b>${escapeTgHtml(title)}</b> tayyorlandi!${costLine}${balLine}`,
+      parse_mode: 'HTML',
+    }).catch(() => {});
+  }
+
+  res.json({ ok: true, balance: account.balance, transactions: account.transactions });
+});
+
+app.post('/api/telegram/send-document', async (req, res) => {
+  const user = getAuthenticatedTelegramUser(req);
+  if (!user) {
+    res.status(401).json({ error: 'Telegram autentifikatsiyasi talab qilinadi.' });
+    return;
+  }
+  const account = await getTgUserAccount(user);
+  if (!account.autoSendFiles && req.body?.force !== true) {
+    res.json({ ok: true, skipped: true });
+    return;
+  }
+
+  const rawFileName = typeof req.body?.fileName === 'string' ? req.body.fileName.trim() : '';
+  const safeFileName = rawFileName.replace(/[^a-zA-Z0-9._\-\s]/g, '_').slice(0, 120);
+  if (!safeFileName || !/\.(pptx|pdf|docx|png)$/i.test(safeFileName)) {
+    res.status(400).json({ error: "Faqat .pptx, .pdf, .docx yoki .png fayllari qo'llab-quvvatlanadi." });
+    return;
+  }
+
+  const fileBase64 = typeof req.body?.fileBase64 === 'string' ? req.body.fileBase64.trim() : '';
+  if (!fileBase64) {
+    res.status(400).json({ error: "Fayl ma'lumoti bo'sh." });
+    return;
+  }
+
+  const cleanBase64 = fileBase64.includes(',') ? fileBase64.split(',').pop() || '' : fileBase64;
+  const approxBytes = Math.floor((cleanBase64.length * 3) / 4);
+  if (approxBytes <= 0 || approxBytes > MAX_TG_DOCUMENT_BYTES) {
+    res.status(413).json({
+      error: "Fayl hajmi 3.2 MB dan oshdi — Telegram bot orqali yuborish uchun fayl juda katta.",
+    });
+    return;
+  }
+
+  const buf = Buffer.from(cleanBase64, 'base64');
+  if (buf.length === 0 || buf.length > MAX_TG_DOCUMENT_BYTES) {
+    res.status(413).json({ error: "Fayl hajmi ruxsat etilgan chegaradan oshdi." });
+    return;
+  }
+
+  const ext = safeFileName.split('.').pop()?.toLowerCase();
+  const mimeType =
+    ext === 'pptx'
+      ? 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+      : ext === 'docx'
+        ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        : ext === 'pdf'
+          ? 'application/pdf'
+          : 'image/png';
+
+  const caption =
+    typeof req.body?.caption === 'string' && req.body.caption.trim()
+      ? req.body.caption.trim().slice(0, 400)
+      : `📄 ${safeFileName} — SlaydCanva orqali tayyorlandi`;
+
+  const sent = await telegramSendDocument(account.chatId, safeFileName, mimeType, buf, caption);
+  if (!sent.ok) {
+    res.status(502).json({
+      error: sent.description || "Faylni Telegram botga yuborishda xatolik yuz berdi.",
+    });
+    return;
+  }
+
+  res.json({ ok: true, fileName: safeFileName });
+});
+
+function buildMainBotKeyboard(loginUrl: string, webAppUrl: string) {
+  return {
+    inline_keyboard: [
+      [
+        { text: '💰 Balans', callback_data: 'menu:balance' },
+        { text: "💳 Balans to'ldirish", callback_data: 'menu:topup' },
+      ],
+      [
+        { text: '📜 Tarix', callback_data: 'menu:history' },
+        { text: '🔐 Saytga kirish', url: loginUrl },
+      ],
+      [{ text: "📱 SlaydCanva'ni ochish", web_app: { url: webAppUrl } }],
+    ],
+  };
+}
+
+function buildTopUpBotKeyboard() {
+  return {
+    inline_keyboard: [
+      [
+        { text: "25 000 so'm", callback_data: 'topup:25000' },
+        { text: "50 000 so'm", callback_data: 'topup:50000' },
+      ],
+      [
+        { text: "100 000 so'm", callback_data: 'topup:100000' },
+        { text: "250 000 so'm", callback_data: 'topup:250000' },
+      ],
+      [{ text: '⬅️ Bosh menyu', callback_data: 'menu:home' }],
+    ],
+  };
+}
+
+function formatBotHistoryMessage(account: TgUserAccount): string {
+  if (!account.transactions.length) {
+    return "📜 <b>Amaliyotlar tarixi</b>\n\nHozircha amaliyotlar mavjud emas.";
+  }
+  const rows = account.transactions.slice(0, 10).map((tx, idx) => {
+    const sign = tx.amount < 0 ? '-' : '+';
+    const amt = formatSomServer(Math.abs(tx.amount));
+    return `${idx + 1}. <b>${escapeTgHtml(tx.title)}</b>\n    ${sign}${escapeTgHtml(amt)} · ${escapeTgHtml(tx.method)} · ${escapeTgHtml(tx.date)}`;
+  });
+  return (
+    `📜 <b>Oxirgi amaliyotlar tarixi</b>\n` +
+    `💰 Joriy balans: <b>${escapeTgHtml(formatSomServer(account.balance))}</b>\n\n` +
+    rows.join('\n\n')
+  );
+}
+
+app.post('/api/telegram/webhook', async (req, res) => {
+  try {
+    const expectedSecret = getTelegramWebhookSecret();
+    if (expectedSecret) {
+      const provided = req.get('x-telegram-bot-api-secret-token') || '';
+      if (!safeTimingEqual(provided, expectedSecret)) {
+        res.status(401).json({ ok: false, error: 'Unauthorized webhook' });
+        return;
+      }
+    }
+
+    const update = (req.body || {}) as Record<string, unknown>;
+    const origin = getPreferredPublicOrigin(req);
+
+    // 1) Handle inline button callback queries
+    if (update.callback_query && typeof update.callback_query === 'object') {
+      const cq = update.callback_query as Record<string, unknown>;
+      const cqId = String(cq.id || '');
+      const from = (cq.from || {}) as Record<string, unknown>;
+      const msg = (cq.message || {}) as Record<string, unknown>;
+      const chat = (msg.chat || {}) as Record<string, unknown>;
+      const data = typeof cq.data === 'string' ? cq.data : '';
+
+      const tid = from.id !== undefined ? String(from.id) : '';
+      const cid = chat.id !== undefined ? String(chat.id) : tid;
+      if (/^\d{3,20}$/.test(tid) && /^-?\d{3,24}$/.test(cid)) {
+        const user: TgUserProfile = {
+          telegramId: tid,
+          chatId: cid,
+          firstName: typeof from.first_name === 'string' ? from.first_name : 'Foydalanuvchi',
+          lastName: typeof from.last_name === 'string' ? from.last_name : undefined,
+          username: typeof from.username === 'string' ? from.username : undefined,
+        };
+        const account = await getTgUserAccount(user);
+        const loginToken = signToken(
+          {
+            kind: 'tg_login',
+            tid: user.telegramId,
+            cid: user.chatId,
+            fn: user.firstName,
+            ln: user.lastName || '',
+            un: user.username || '',
+          },
+          10 * 60 * 1000
+        );
+        const loginUrl = `${origin}/?tg_auth=${encodeURIComponent(loginToken)}`;
+
+        if (data === 'menu:home') {
+          await telegramApi('answerCallbackQuery', { callback_query_id: cqId });
+          await telegramApi('sendMessage', {
+            chat_id: cid,
+            text:
+              `👋 <b>SlaydCanva bot</b>\n\n` +
+              `💰 Balansingiz: <b>${escapeTgHtml(formatSomServer(account.balance))}</b>\n\n` +
+              `Bu bot orqali:\n` +
+              `• Saytga tezkor kirish (Auth)\n` +
+              `• Balans va amaliyotlar tarixini ko'rish\n` +
+              `• TolovGo orqali balans to'ldirish\n` +
+              `• Tayyor PPTX/PDF/Word fayllari va bildirishnomalarni olish mumkin.`,
+            parse_mode: 'HTML',
+            reply_markup: buildMainBotKeyboard(loginUrl, origin),
+          });
+        } else if (data === 'menu:balance') {
+          await telegramApi('answerCallbackQuery', { callback_query_id: cqId });
+          await telegramApi('sendMessage', {
+            chat_id: cid,
+            text:
+              `💰 <b>Joriy balansingiz:</b> ${escapeTgHtml(formatSomServer(account.balance))}\n` +
+              `🔔 Bildirishnomalar: <b>${account.notifyOnActivity ? 'Yoqilgan' : "O'chirilgan"}</b>\n` +
+              `📎 Tayyor fayllar yuborilishi: <b>${account.autoSendFiles ? 'Yoqilgan' : "O'chirilgan"}</b>`,
+            parse_mode: 'HTML',
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: "💳 Balans to'ldirish", callback_data: 'menu:topup' }],
+                [{ text: '📜 Tarix', callback_data: 'menu:history' }],
+              ],
+            },
+          });
+        } else if (data === 'menu:topup') {
+          await telegramApi('answerCallbackQuery', { callback_query_id: cqId });
+          await telegramApi('sendMessage', {
+            chat_id: cid,
+            text:
+              `💳 <b>Balansni to'ldirish (TolovGo · UZS)</b>\n\n` +
+              `Quyidagi summalardan birini tanlang yoki <code>/topup 75000</code> shaklida yozing:`,
+            parse_mode: 'HTML',
+            reply_markup: buildTopUpBotKeyboard(),
+          });
+        } else if (data === 'menu:history') {
+          await telegramApi('answerCallbackQuery', { callback_query_id: cqId });
+          await telegramApi('sendMessage', {
+            chat_id: cid,
+            text: formatBotHistoryMessage(account),
+            parse_mode: 'HTML',
+            reply_markup: buildMainBotKeyboard(loginUrl, origin),
+          });
+        } else if (data.startsWith('topup:')) {
+          const amount = Number(data.slice(6));
+          if (Number.isInteger(amount) && amount >= 1000 && amount <= 99_999_999) {
+            await telegramApi('answerCallbackQuery', {
+              callback_query_id: cqId,
+              text: "To'lov havolasi yaratilmoqda...",
+            });
+            const created = await createTolovgoOrderForBot(req, amount, tid, cid);
+            if ('error' in created) {
+              await telegramApi('sendMessage', {
+                chat_id: cid,
+                text: `❌ ${escapeTgHtml(created.error)}`,
+                parse_mode: 'HTML',
+              });
+            } else {
+              await telegramApi('sendMessage', {
+                chat_id: cid,
+                text:
+                  `💳 <b>TolovGo hisob-fakturasi${created.isTest ? ' (Sinov)' : ''}</b>\n\n` +
+                  `💵 Summa: <b>${escapeTgHtml(formatSomServer(created.amount))}</b>\n` +
+                  `🧾 Buyurtma: <code>#${escapeTgHtml(created.orderId)}</code>\n\n` +
+                  `Quyidagi havola orqali to'lang, so'ng «To'lovni tekshirish» tugmasini bosing:`,
+                parse_mode: 'HTML',
+                reply_markup: {
+                  inline_keyboard: [
+                    [{ text: "💳 TolovGo sahifasida to'lash", url: created.payUrl }],
+                    [
+                      {
+                        text: "🔄 To'lovni tekshirish",
+                        callback_data: `check_pay:${created.orderId}:${created.isTest ? 'test' : 'live'}`,
+                      },
+                    ],
+                  ],
+                },
+              });
+            }
+          } else {
+            await telegramApi('answerCallbackQuery', { callback_query_id: cqId });
+          }
+        } else if (data.startsWith('check_pay:')) {
+          const [, orderId, modeFlag] = data.split(':');
+          const rec =
+            tolovgoOrders.get(orderId) || (await kvGet<TolovgoOrderRecord>(`tolovgo_order:${orderId}`)) || undefined;
+          const cred = resolveTolovgoCredential(
+            modeFlag === 'test' || rec?.isTest ? 'test' : 'live'
+          );
+          if (!cred || !/^[a-zA-Z0-9_-]{1,64}$/.test(orderId || '')) {
+            await telegramApi('answerCallbackQuery', {
+              callback_query_id: cqId,
+              text: "Buyurtmani tekshirib bo'lmadi.",
+              show_alert: true,
+            });
+          } else {
+            const remote = await fetchRemoteTolovgoStatus(orderId, cred.apiKey).catch(() => null);
+            if (!remote) {
+              await telegramApi('answerCallbackQuery', {
+                callback_query_id: cqId,
+                text: "TolovGo serveriga ulanib bo'lmadi.",
+                show_alert: true,
+              });
+            } else if (remote.status === 'paid') {
+              const finalAmount = rec?.amount ?? remote.amount ?? 0;
+              const wasNew =
+                finalAmount >= 1000
+                  ? await creditTgUserTopUp(
+                      tid,
+                      cid,
+                      finalAmount,
+                      orderId,
+                      cred.isTest ? 'TolovGo (Sinov)' : 'TolovGo'
+                    )
+                  : false;
+              if (rec) {
+                rec.status = 'paid';
+                rec.credited = true;
+                await kvSet(`tolovgo_order:${orderId}`, rec, 86400);
+              }
+              await telegramApi('answerCallbackQuery', {
+                callback_query_id: cqId,
+                text: wasNew ? "To'lov tasdiqlandi! Balansga qo'shildi." : "Bu to'lov allaqachon tasdiqlangan.",
+              });
+              if (wasNew) {
+                await notifyTelegramPaymentPaid(cid, finalAmount, orderId, cred.isTest);
+              }
+            } else {
+              await telegramApi('answerCallbackQuery', {
+                callback_query_id: cqId,
+                text: `Holat: ${remote.status}. Hali to'lanmagan.`,
+                show_alert: true,
+              });
+            }
+          }
+        } else {
+          await telegramApi('answerCallbackQuery', { callback_query_id: cqId });
+        }
+      } else if (cqId) {
+        await telegramApi('answerCallbackQuery', { callback_query_id: cqId });
+      }
+
+      res.json({ ok: true });
+      return;
+    }
+
+    // 2) Handle incoming text commands
+    const message = (update.message || update.edited_message) as Record<string, unknown> | undefined;
+    if (message && typeof message === 'object') {
+      const from = (message.from || {}) as Record<string, unknown>;
+      const chat = (message.chat || {}) as Record<string, unknown>;
+      const text = typeof message.text === 'string' ? message.text.trim() : '';
+      const tid = from.id !== undefined ? String(from.id) : '';
+      const cid = chat.id !== undefined ? String(chat.id) : tid;
+
+      if (/^\d{3,20}$/.test(tid) && /^-?\d{3,24}$/.test(cid) && text) {
+        const user: TgUserProfile = {
+          telegramId: tid,
+          chatId: cid,
+          firstName: typeof from.first_name === 'string' ? from.first_name : 'Foydalanuvchi',
+          lastName: typeof from.last_name === 'string' ? from.last_name : undefined,
+          username: typeof from.username === 'string' ? from.username : undefined,
+        };
+        const account = await getTgUserAccount(user);
+        const cmdParts = text.split(/\s+/);
+        const cmd = cmdParts[0].toLowerCase().split('@')[0];
+        const arg = cmdParts[1] || '';
+
+        const loginToken = signToken(
+          {
+            kind: 'tg_login',
+            tid: user.telegramId,
+            cid: user.chatId,
+            fn: user.firstName,
+            ln: user.lastName || '',
+            un: user.username || '',
+          },
+          10 * 60 * 1000
+        );
+        const loginUrl = `${origin}/?tg_auth=${encodeURIComponent(loginToken)}`;
+
+        if (cmd === '/start' || cmd === '/login' || cmd === '/auth') {
+          if (arg.startsWith('auth_')) {
+            const nonce = arg.slice(5).trim();
+            if (/^[a-zA-Z0-9_-]{8,48}$/.test(nonce)) {
+              await kvSet(`tg_nonce:${nonce}`, { loginToken }, 600);
+            }
+          }
+          const greetingName = escapeTgHtml(user.firstName);
+          await telegramApi('sendMessage', {
+            chat_id: cid,
+            text:
+              `Assalomu alaykum, <b>${greetingName}</b>! 👋\n\n` +
+              `<b>SlaydCanva</b> hisobingiz Telegram bilan bog'landi.\n` +
+              `💰 Joriy balans: <b>${escapeTgHtml(formatSomServer(account.balance))}</b>\n\n` +
+              `Pastdagi <b>«🔐 Saytga kirish»</b> tugmasini bosing (yoki agar brauzerda kirish sahifasi ochiq bo'lsa, u avtomatik ulanadi).\n\n` +
+              `Bot imkoniyatlari:\n` +
+              `• 🔔 Tayyorlangan taqdimot va to'lov bildirishnomalari\n` +
+              `• 📎 Tayyor PPTX / PDF / Word fayllarini chatga qabul qilish\n` +
+              `• 💳 TolovGo orqali balans to'ldirish\n` +
+              `• 📜 Amaliyotlar tarixini ko'rish`,
+            parse_mode: 'HTML',
+            reply_markup: buildMainBotKeyboard(loginUrl, origin),
+          });
+        } else if (cmd === '/balance') {
+          await telegramApi('sendMessage', {
+            chat_id: cid,
+            text:
+              `💰 <b>Joriy balansingiz:</b> ${escapeTgHtml(formatSomServer(account.balance))}\n` +
+              `To'ldirish uchun /topup buyrug'idan foydalaning.`,
+            parse_mode: 'HTML',
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: "💳 Balans to'ldirish", callback_data: 'menu:topup' }],
+                [{ text: '📜 Tarix', callback_data: 'menu:history' }],
+              ],
+            },
+          });
+        } else if (cmd === '/history') {
+          await telegramApi('sendMessage', {
+            chat_id: cid,
+            text: formatBotHistoryMessage(account),
+            parse_mode: 'HTML',
+            reply_markup: buildMainBotKeyboard(loginUrl, origin),
+          });
+        } else if (cmd === '/topup') {
+          const customAmount = Number(arg.replace(/\D/g, ''));
+          if (arg && Number.isInteger(customAmount) && customAmount >= 1000 && customAmount <= 99_999_999) {
+            const created = await createTolovgoOrderForBot(req, customAmount, tid, cid);
+            if ('error' in created) {
+              await telegramApi('sendMessage', {
+                chat_id: cid,
+                text: `❌ ${escapeTgHtml(created.error)}`,
+                parse_mode: 'HTML',
+              });
+            } else {
+              await telegramApi('sendMessage', {
+                chat_id: cid,
+                text:
+                  `💳 <b>TolovGo hisob-fakturasi${created.isTest ? ' (Sinov)' : ''}</b>\n\n` +
+                  `💵 Summa: <b>${escapeTgHtml(formatSomServer(created.amount))}</b>\n` +
+                  `🧾 Buyurtma: <code>#${escapeTgHtml(created.orderId)}</code>`,
+                parse_mode: 'HTML',
+                reply_markup: {
+                  inline_keyboard: [
+                    [{ text: "💳 TolovGo sahifasida to'lash", url: created.payUrl }],
+                    [
+                      {
+                        text: "🔄 To'lovni tekshirish",
+                        callback_data: `check_pay:${created.orderId}:${created.isTest ? 'test' : 'live'}`,
+                      },
+                    ],
+                  ],
+                },
+              });
+            }
+          } else {
+            await telegramApi('sendMessage', {
+              chat_id: cid,
+              text:
+                `💳 <b>Balansni to'ldirish (TolovGo · UZS)</b>\n\n` +
+                `Summani tanlang yoki <code>/topup 50000</code> shaklida kiriting:`,
+              parse_mode: 'HTML',
+              reply_markup: buildTopUpBotKeyboard(),
+            });
+          }
+        } else {
+          await telegramApi('sendMessage', {
+            chat_id: cid,
+            text:
+              `📌 <b>Mavjud buyruqlar:</b>\n` +
+              `/start — Kirish va bosh menyu\n` +
+              `/balance — Balansni tekshirish\n` +
+              `/topup — Balansni to'ldirish\n` +
+              `/history — Amaliyotlar tarixi`,
+            parse_mode: 'HTML',
+            reply_markup: buildMainBotKeyboard(loginUrl, origin),
+          });
+        }
+      }
+    }
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[Telegram Webhook Error]', err);
+    res.json({ ok: true });
+  }
+});
+
+app.all('/api/telegram/setup-webhook', async (req, res) => {
+  const token = getTelegramBotToken();
+  if (!token) {
+    res.status(503).json({
+      error: "TELEGRAM_BOT_TOKEN sozlanmagan. Vercel Environment Variables bo'limida kiriting.",
+    });
+    return;
+  }
+
+  const secret = getTelegramWebhookSecret();
+  const isProd = Boolean(process.env.VERCEL);
+  if (secret) {
+    const provided = String(
+      req.get('x-admin-secret') || req.query.secret || req.body?.secret || ''
+    ).trim();
+    if (!provided || !safeTimingEqual(provided, secret)) {
+      res.status(401).json({
+        error: "Webhook sozlash uchun secret noto'g'ri (X-Admin-Secret yoki ?secret=).",
+      });
+      return;
+    }
+  } else if (isProd) {
+    res.status(503).json({
+      error: "Production muhitida TELEGRAM_WEBHOOK_SECRET majburiy. Vercel Environment Variables ga qo'shing.",
+    });
+    return;
+  }
+
+  const origin = getPreferredPublicOrigin(req);
+  const webhookUrl = `${origin}/api/telegram/webhook`;
+
+  const setHookRes = await telegramApi('setWebhook', {
+    url: webhookUrl,
+    ...(secret ? { secret_token: secret } : {}),
+    allowed_updates: ['message', 'callback_query'],
+  });
+
+  const setCmdRes = await telegramApi('setMyCommands', {
+    commands: [
+      { command: 'start', description: "Saytga kirish va bosh menyu" },
+      { command: 'balance', description: "Joriy balansni ko'rish" },
+      { command: 'topup', description: "TolovGo orqali balans to'ldirish" },
+      { command: 'history', description: "Amaliyotlar tarixini ko'rish" },
+    ],
+  });
+
+  const botUsername = await resolveTelegramBotUsername();
+
+  res.status(setHookRes.ok ? 200 : 502).json({
+    ok: setHookRes.ok,
+    webhookUrl,
+    botUsername,
+    commandsUpdated: setCmdRes.ok,
+    telegramResponse: setHookRes,
+  });
 });
 
 export default app;

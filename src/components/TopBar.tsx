@@ -12,7 +12,7 @@ import {
   Wallet,
 } from 'lucide-react';
 import { formatSom } from '../data/defaults';
-import { DesktopView, MobileTab, WorkspaceMode } from '../types/editor';
+import { DesktopView, MobileTab, TelegramUser, WorkspaceMode } from '../types/editor';
 import { BrandLogo } from './BrandLogo';
 
 interface TopBarProps {
@@ -31,6 +31,7 @@ interface TopBarProps {
   onResetCurrent: () => void;
   onOpenTopUp?: () => void;
   onOpenProfile?: () => void;
+  telegramUser?: TelegramUser | null;
   isExporting: boolean;
 }
 
@@ -58,6 +59,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   onResetCurrent,
   onOpenTopUp,
   onOpenProfile,
+  telegramUser,
   isExporting,
 }) => {
   const primaryLabel =
@@ -189,11 +191,22 @@ export const TopBar: React.FC<TopBarProps> = ({
               <button
                 type="button"
                 onClick={onOpenProfile}
-                title="Profil va sozlamalar"
+                title="Profil, Telegram va sozlamalar"
                 className="flex items-center gap-1.5 text-xs bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 rounded-md px-2.5 py-1.5 text-zinc-300 hover:text-white transition-colors"
               >
-                <User className="w-3.5 h-3.5" />
-                <span>Profil</span>
+                {telegramUser ? (
+                  <>
+                    <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
+                    <span className="max-w-[110px] truncate">
+                      {telegramUser.username ? `@${telegramUser.username}` : telegramUser.firstName}
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <User className="w-3.5 h-3.5" />
+                    <span>Telegram · Profil</span>
+                  </>
+                )}
               </button>
             )}
           </div>

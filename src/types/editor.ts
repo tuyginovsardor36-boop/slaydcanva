@@ -77,6 +77,16 @@ export interface UserProfile {
 
 export type TolovgoPaymentMode = 'live' | 'test';
 
+export interface TelegramUser {
+  telegramId: string;
+  chatId: string;
+  firstName: string;
+  lastName?: string;
+  username?: string;
+  autoSendFiles?: boolean;
+  notifyOnActivity?: boolean;
+}
+
 export interface SlaydCanvaState {
   mode: WorkspaceMode;
   docTitle: string;
@@ -90,4 +100,6 @@ export interface SlaydCanvaState {
   transactions: BalanceTransaction[];
   profile: UserProfile;
   tolovgoMode?: TolovgoPaymentMode;
+  telegramUser?: TelegramUser | null;
+  telegramSessionToken?: string;
 }
