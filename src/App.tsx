@@ -362,24 +362,36 @@ export default function App() {
     }
   };
 
-  const handleTopUp = (amount: number, method: string) => {
+  const handleTopUp = (amount: number, method: string, externalOrderId?: string) => {
     const now = new Date();
     const dateStr = `${String(now.getDate()).padStart(2, '0')}.${String(now.getMonth() + 1).padStart(2, '0')}.${now.getFullYear()}`;
-    setState((prev) => ({
-      ...prev,
-      balance: prev.balance + amount,
-      transactions: [
-        {
-          id: uid('tx'),
-          title: "Balans to'ldirish",
-          method,
-          amount,
-          date: dateStr,
-        },
-        ...prev.transactions,
-      ],
-    }));
-    showNotice('ok', `${formatSom(amount)} qo'shildi.`);
+    const txId = externalOrderId ? `tolovgo_${externalOrderId}` : uid('tx');
+    let credited = false;
+
+    setState((prev) => {
+      if (externalOrderId && prev.transactions.some((t) => t.id === txId)) {
+        return prev;
+      }
+      credited = true;
+      return {
+        ...prev,
+        balance: prev.balance + amount,
+        transactions: [
+          {
+            id: txId,
+            title: externalOrderId ? `Balans to'ldirish (#${externalOrderId})` : "Balans to'ldirish",
+            method,
+            amount,
+            date: dateStr,
+          },
+          ...prev.transactions,
+        ],
+      };
+    });
+
+    if (credited) {
+      showNotice('ok', `${formatSom(amount)} qo'shildi.`);
+    }
     setDesktopTopUpOpen(false);
     if (mobileTab === 'topup') {
       setMobileTab('balance');
@@ -496,7 +508,7 @@ export default function App() {
             </div>
           )}
           {mobileTab === 'topup' && (
-            <TopUpView balance={state.balance} onTopUp={handleTopUp} />
+            <TopUpView balance={state.balance} onTopUp={handleTopUp} onNotify={showNotice} />
           )}
           {mobileTab === 'balance' && (
             <BalanceView
@@ -623,7 +635,7 @@ export default function App() {
                 <X className="w-4 h-4" />
               </button>
             </div>
-            <TopUpView balance={state.balance} onTopUp={handleTopUp} />
+            <TopUpView balance={state.balance} onTopUp={handleTopUp} onNotify={showNotice} />
           </div>
         </div>
       )}

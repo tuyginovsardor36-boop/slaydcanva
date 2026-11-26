@@ -1888,6 +1888,382 @@ Qoidalar:
     }
   });
 
+  // =========================================================================
+  // TolovGo (tolovgo.uz) UZS Payment Gateway Proxy Routes
+  // =========================================================================
+  const TOLOVGO_DEFAULT_BASE = 'https://pay.tolovgo.uz/api';
+  type TolovgoOrderStatus = 'pending' | 'paid' | 'expired' | 'cancelled' | 'refunded';
+
+  interface TolovgoOrderRecord {
+    orderId: string;
+    amount: number;
+    payUrl: string;
+    status: TolovgoOrderStatus;
+    credited: boolean;
+    createdAt: number;
+  }
+
+  const tolovgoOrders = new Map<string, TolovgoOrderRecord>();
+
+  function getTolovgoApiKey(): string | null {
+    const raw = process.env.TOLOVGO_API_KEY?.trim();
+    if (!raw || raw === 'MY_TOLOVGO_API_KEY') return null;
+    return raw;
+  }
+
+  function getTolovgoBaseUrl(): string {
+    const raw = process.env.TOLOVGO_API_BASE?.trim();
+    if (!raw) return TOLOVGO_DEFAULT_BASE;
+    try {
+      const parsed = new URL(raw);
+      const host = parsed.hostname.toLowerCase();
+      if (
+        parsed.protocol === 'https:' &&
+        !parsed.username &&
+        !parsed.password &&
+        host !== 'localhost' &&
+        host !== '127.0.0.1' &&
+        host !== '::1' &&
+        !host.startsWith('10.') &&
+        !host.startsWith('192.168.') &&
+        !/^172\.(1[6-9]|2\d|3[0-1])\./.test(host)
+      ) {
+        return parsed.toString().replace(/\/+$/, '');
+      }
+    } catch {
+      // Fallback to default official endpoint if custom URL is malformed
+    }
+    return TOLOVGO_DEFAULT_BASE;
+  }
+
+  function validateTolovgoPayUrl(rawUrl: unknown): string | null {
+    if (typeof rawUrl !== 'string' || !rawUrl.trim()) return null;
+    try {
+      const parsed = new URL(rawUrl.trim());
+      const host = parsed.hostname.toLowerCase();
+      if (
+        parsed.protocol === 'https:' &&
+        !parsed.username &&
+        !parsed.password &&
+        (host === 'tolovgo.uz' || host.endsWith('.tolovgo.uz'))
+      ) {
+        return parsed.toString();
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+
+  function buildTolovgoCallbackUrl(req: express.Request): string | undefined {
+    const envAppUrl = process.env.APP_URL?.trim();
+    if (envAppUrl && envAppUrl !== 'MY_APP_URL') {
+      try {
+        const parsed = new URL(envAppUrl);
+        if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+          return `${parsed.toString().replace(/\/+$/, '')}/api/payments/tolovgo/callback`;
+        }
+      } catch {
+        // Ignore invalid APP_URL
+      }
+    }
+    const host = req.get('host');
+    if (host && !host.startsWith('localhost') && !host.startsWith('127.0.0.1')) {
+      return `https://${host}/api/payments/tolovgo/callback`;
+    }
+    return undefined;
+  }
+
+  function normalizeTolovgoStatus(raw: unknown): TolovgoOrderStatus {
+    const s = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+    if (s === 'paid' || s === 'expired' || s === 'cancelled' || s === 'refunded') {
+      return s;
+    }
+    return 'pending';
+  }
+
+  function pruneOldTolovgoOrders() {
+    if (tolovgoOrders.size <= 300) return;
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    for (const [key, rec] of tolovgoOrders.entries()) {
+      if (rec.createdAt < cutoff || tolovgoOrders.size > 400) {
+        tolovgoOrders.delete(key);
+      }
+    }
+  }
+
+  async function fetchRemoteTolovgoStatus(
+    orderId: string,
+    apiKey: string
+  ): Promise<{ status: TolovgoOrderStatus; amount?: number; raw: Record<string, unknown> }> {
+    const baseUrl = getTolovgoBaseUrl();
+    const res = await fetch(`${baseUrl}/status/${encodeURIComponent(orderId)}`, {
+      method: 'GET',
+      headers: {
+        'X-Api-Key': apiKey,
+        Accept: 'application/json',
+      },
+      signal: AbortSignal.timeout(12000),
+    });
+
+    const text = await res.text();
+    let parsed: Record<string, unknown> = {};
+    try {
+      parsed = JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      parsed = {};
+    }
+
+    if (!res.ok) {
+      const errMsg =
+        typeof parsed.error === 'string'
+          ? parsed.error
+          : typeof parsed.message === 'string'
+            ? parsed.message
+            : `TolovGo HTTP ${res.status}`;
+      throw new Error(errMsg);
+    }
+
+    const status = normalizeTolovgoStatus(
+      parsed.status ?? (parsed.order as Record<string, unknown> | undefined)?.status
+    );
+    const rawAmount = parsed.amount ?? (parsed.order as Record<string, unknown> | undefined)?.amount;
+    const numAmount = typeof rawAmount === 'number' ? rawAmount : Number(rawAmount);
+
+    return {
+      status,
+      amount: Number.isFinite(numAmount) && numAmount >= 1000 ? Math.round(numAmount) : undefined,
+      raw: parsed,
+    };
+  }
+
+  app.get('/api/payments/tolovgo/config', (_req, res) => {
+    res.json({
+      configured: Boolean(getTolovgoApiKey()),
+      provider: 'TolovGo',
+      currency: 'UZS',
+    });
+  });
+
+  app.post('/api/payments/tolovgo/create', async (req, res) => {
+    try {
+      const apiKey = getTolovgoApiKey();
+      if (!apiKey) {
+        res.status(503).json({
+          error:
+            "TOLOVGO_API_KEY sozlanmagan. Settings > Secrets bo'limidan tolovgo.uz API kalitingizni qo'shing.",
+        });
+        return;
+      }
+
+      const body = (req.body || {}) as { amount?: unknown; providerHint?: unknown };
+      const rawAmount = Number(body.amount);
+      if (
+        !Number.isFinite(rawAmount) ||
+        !Number.isInteger(rawAmount) ||
+        rawAmount < 1000 ||
+        rawAmount > 50_000_000
+      ) {
+        res.status(400).json({
+          error: "To'lov summasi 1 000 so'mdan 50 000 000 so'mgacha butun son bo'lishi kerak.",
+        });
+        return;
+      }
+
+      const hint =
+        typeof body.providerHint === 'string'
+          ? body.providerHint.replace(/[^\w\s/()-]/g, '').trim().slice(0, 40)
+          : '';
+      const note = hint
+        ? `SlaydCanva balans to'ldirish (${hint})`
+        : 'SlaydCanva balans to‘ldirish';
+      const callbackUrl = buildTolovgoCallbackUrl(req);
+      const baseUrl = getTolovgoBaseUrl();
+
+      const upstreamRes = await fetch(`${baseUrl}/create`, {
+        method: 'POST',
+        headers: {
+          'X-Api-Key': apiKey,
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({
+          amount: rawAmount,
+          note,
+          ...(callbackUrl ? { callback_url: callbackUrl } : {}),
+        }),
+        signal: AbortSignal.timeout(15000),
+      });
+
+      const rawText = await upstreamRes.text();
+      let data: Record<string, unknown> = {};
+      try {
+        data = JSON.parse(rawText) as Record<string, unknown>;
+      } catch {
+        data = {};
+      }
+
+      if (!upstreamRes.ok || data.ok === false) {
+        const msg =
+          typeof data.error === 'string'
+            ? data.error
+            : typeof data.message === 'string'
+              ? data.message
+              : "TolovGo bilan hisob-faktura yaratib bo'lmadi.";
+        res.status(upstreamRes.status >= 400 && upstreamRes.status < 500 ? upstreamRes.status : 502).json({
+          error: msg,
+        });
+        return;
+      }
+
+      const orderIdRaw = data.order_id ?? data.orderId ?? data.id;
+      const orderId = orderIdRaw !== undefined && orderIdRaw !== null ? String(orderIdRaw).trim() : '';
+      if (!/^[a-zA-Z0-9_-]{1,64}$/.test(orderId)) {
+        res.status(502).json({ error: "TolovGo noto'g'ri buyurtma raqamini qaytardi." });
+        return;
+      }
+
+      const payUrl = validateTolovgoPayUrl(data.pay_url ?? data.payUrl);
+      if (!payUrl) {
+        res.status(502).json({ error: "TolovGo xavfsiz to'lov havolasini qaytarmadi." });
+        return;
+      }
+
+      const verifiedAmount = Number(data.amount);
+      const finalAmount =
+        Number.isFinite(verifiedAmount) && verifiedAmount >= 1000
+          ? Math.round(verifiedAmount)
+          : rawAmount;
+
+      pruneOldTolovgoOrders();
+      tolovgoOrders.set(orderId, {
+        orderId,
+        amount: finalAmount,
+        payUrl,
+        status: normalizeTolovgoStatus(data.status),
+        credited: false,
+        createdAt: Date.now(),
+      });
+
+      res.status(201).json({
+        ok: true,
+        orderId,
+        amount: finalAmount,
+        payUrl,
+        status: 'pending',
+        providers: data.providers && typeof data.providers === 'object' ? data.providers : {},
+      });
+    } catch (err) {
+      console.error('[TolovGo Create Error]', err);
+      res.status(502).json({
+        error: "TolovGo serveri bilan bog'lanishda xatolik yuz berdi. Birozdan so'ng urinib ko'ring.",
+      });
+    }
+  });
+
+  app.get('/api/payments/tolovgo/status/:orderId', async (req, res) => {
+    try {
+      const orderId = String(req.params.orderId || '').trim();
+      if (!/^[a-zA-Z0-9_-]{1,64}$/.test(orderId)) {
+        res.status(400).json({ error: "Noto'g'ri buyurtma raqami." });
+        return;
+      }
+
+      const apiKey = getTolovgoApiKey();
+      if (!apiKey) {
+        res.status(503).json({
+          error: "TOLOVGO_API_KEY sozlanmagan.",
+        });
+        return;
+      }
+
+      const remote = await fetchRemoteTolovgoStatus(orderId, apiKey);
+      const existing = tolovgoOrders.get(orderId);
+      const trustedAmount = existing?.amount ?? remote.amount ?? 0;
+
+      let newlyCredited = false;
+      if (remote.status === 'paid') {
+        if (existing) {
+          existing.status = 'paid';
+          if (!existing.credited && trustedAmount >= 1000) {
+            existing.credited = true;
+            newlyCredited = true;
+          }
+        } else if (trustedAmount >= 1000) {
+          tolovgoOrders.set(orderId, {
+            orderId,
+            amount: trustedAmount,
+            payUrl: '',
+            status: 'paid',
+            credited: true,
+            createdAt: Date.now(),
+          });
+          newlyCredited = true;
+        }
+      } else if (existing) {
+        existing.status = remote.status;
+      }
+
+      res.json({
+        ok: true,
+        orderId,
+        status: remote.status,
+        paid: remote.status === 'paid',
+        newlyCredited,
+        amount: trustedAmount,
+      });
+    } catch (err) {
+      console.error('[TolovGo Status Error]', err);
+      res.status(502).json({
+        error: "To'lov holatini TolovGo serveridan tekshirib bo'lmadi.",
+      });
+    }
+  });
+
+  app.all('/api/payments/tolovgo/callback', async (req, res) => {
+    try {
+      const body = (req.body || {}) as Record<string, unknown>;
+      const rawOrderId =
+        req.query.order_id ??
+        req.query.orderId ??
+        body.order_id ??
+        body.orderId ??
+        '';
+      const orderId = String(rawOrderId).trim();
+      if (!/^[a-zA-Z0-9_-]{1,64}$/.test(orderId)) {
+        res.status(400).json({ ok: false, error: 'Invalid order_id' });
+        return;
+      }
+
+      const apiKey = getTolovgoApiKey();
+      if (!apiKey) {
+        res.status(503).json({ ok: false, error: 'Not configured' });
+        return;
+      }
+
+      // Always verify callback server-to-server via TolovGo status endpoint
+      const remote = await fetchRemoteTolovgoStatus(orderId, apiKey);
+      const existing = tolovgoOrders.get(orderId);
+      if (existing) {
+        existing.status = remote.status;
+      } else if (remote.amount) {
+        tolovgoOrders.set(orderId, {
+          orderId,
+          amount: remote.amount,
+          payUrl: '',
+          status: remote.status,
+          credited: false,
+          createdAt: Date.now(),
+        });
+      }
+
+      res.json({ ok: true, orderId, status: remote.status });
+    } catch (err) {
+      console.error('[TolovGo Callback Error]', err);
+      res.status(500).json({ ok: false });
+    }
+  });
+
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({

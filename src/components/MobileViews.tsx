@@ -1,11 +1,16 @@
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowRight,
   Check,
+  CheckCircle2,
+  ExternalLink,
   FileText,
   FileType2,
+  Loader2,
   Plus,
   Presentation,
+  RefreshCw,
+  ShieldCheck,
   Sparkles,
   Wallet,
 } from 'lucide-react';
@@ -200,104 +205,305 @@ export const HomeView: React.FC<HomeViewProps> = ({
 
 interface TopUpViewProps {
   balance: number;
-  onTopUp: (amount: number, method: string) => void;
+  onTopUp: (amount: number, method: string, externalOrderId?: string) => void;
+  onNotify?: (type: 'ok' | 'err', text: string) => void;
+}
+
+interface PendingTolovgoOrder {
+  orderId: string;
+  amount: number;
+  payUrl: string;
+  method: string;
+  status: 'pending' | 'paid' | 'expired' | 'cancelled' | 'refunded';
 }
 
 const PRESET_AMOUNTS = [25000, 50000, 100000, 250000];
-const PAYMENT_METHODS = ['Click', 'Payme', 'Uzcard / Humo'];
+const PAYMENT_METHODS = ['Click', 'Payme', 'Uzum / Karta'];
 
-export const TopUpView: React.FC<TopUpViewProps> = ({ balance, onTopUp }) => {
+export const TopUpView: React.FC<TopUpViewProps> = ({ balance, onTopUp, onNotify }) => {
   const [amountText, setAmountText] = useState('50000');
   const [method, setMethod] = useState('Click');
+  const [creating, setCreating] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [pendingOrder, setPendingOrder] = useState<PendingTolovgoOrder | null>(null);
+
+  const creditedOrdersRef = useRef<Set<string>>(new Set());
+  const onTopUpRef = useRef(onTopUp);
+  onTopUpRef.current = onTopUp;
+  const onNotifyRef = useRef(onNotify);
+  onNotifyRef.current = onNotify;
 
   const parsedAmount = Math.max(0, Number(amountText.replace(/\D/g, '')) || 0);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const checkOrderStatus = useCallback(async (order: PendingTolovgoOrder, silent = false) => {
+    if (!order?.orderId) return;
+    if (!silent) setChecking(true);
+    try {
+      const res = await fetch(`/api/payments/tolovgo/status/${encodeURIComponent(order.orderId)}`);
+      const data = (await res.json().catch(() => ({}))) as {
+        status?: PendingTolovgoOrder['status'];
+        paid?: boolean;
+        newlyCredited?: boolean;
+        amount?: number;
+        error?: string;
+      };
+
+      if (!res.ok) {
+        if (!silent) {
+          setErrorMsg(data.error || "To'lov holatini tekshirib bo'lmadi.");
+        }
+        return;
+      }
+
+      const nextStatus = data.status || 'pending';
+      if (data.paid || nextStatus === 'paid') {
+        if (!creditedOrdersRef.current.has(order.orderId)) {
+          creditedOrdersRef.current.add(order.orderId);
+          const finalAmount =
+            typeof data.amount === 'number' && data.amount >= 1000 ? data.amount : order.amount;
+          setPendingOrder(null);
+          setErrorMsg(null);
+          onTopUpRef.current(finalAmount, `TolovGo · ${order.method}`, order.orderId);
+          onNotifyRef.current?.('ok', `TolovGo to'lovi tasdiqlandi: +${formatSom(finalAmount)}`);
+        }
+        return;
+      }
+
+      setPendingOrder((curr) => (curr && curr.orderId === order.orderId ? { ...curr, status: nextStatus } : curr));
+
+      if (nextStatus === 'expired' || nextStatus === 'cancelled' || nextStatus === 'refunded') {
+        const msg =
+          nextStatus === 'expired'
+            ? "To'lov havolasi muddati tugadi (1 soat). Qaytadan yarating."
+            : nextStatus === 'cancelled'
+              ? "To'lov bekor qilindi."
+              : "To'lov qaytarildi.";
+        setErrorMsg(msg);
+      } else if (!silent) {
+        onNotifyRef.current?.('ok', "To'lov hali kutilmoqda. TolovGo sahifasida tasdiqlang.");
+      }
+    } catch {
+      if (!silent) {
+        setErrorMsg("Server bilan bog'lanishda xatolik yuz berdi.");
+      }
+    } finally {
+      if (!silent) setChecking(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!pendingOrder || pendingOrder.status !== 'pending') return;
+    const timer = window.setInterval(() => {
+      void checkOrderStatus(pendingOrder, true);
+    }, 4500);
+    return () => window.clearInterval(timer);
+  }, [pendingOrder, checkOrderStatus]);
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (parsedAmount < 1000) return;
-    onTopUp(parsedAmount, method);
+    if (parsedAmount < 1000 || creating) return;
+
+    setCreating(true);
+    setErrorMsg(null);
+
+    try {
+      const res = await fetch('/api/payments/tolovgo/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          amount: parsedAmount,
+          providerHint: method,
+        }),
+      });
+
+      const data = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        orderId?: string;
+        amount?: number;
+        payUrl?: string;
+        error?: string;
+      };
+
+      if (!res.ok || !data.orderId || !data.payUrl) {
+        setErrorMsg(data.error || "TolovGo hisob-fakturasini yaratishda xatolik yuz berdi.");
+        return;
+      }
+
+      setPendingOrder({
+        orderId: data.orderId,
+        amount: typeof data.amount === 'number' ? data.amount : parsedAmount,
+        payUrl: data.payUrl,
+        method,
+        status: 'pending',
+      });
+    } catch {
+      setErrorMsg("TolovGo xizmatiga ulanib bo'lmadi. Internet aloqasini tekshiring.");
+    } finally {
+      setCreating(false);
+    }
   };
 
   return (
     <main className="flex-1 overflow-y-auto bg-[#F4F5F7] px-4 py-5">
-      <form
-        onSubmit={handleSubmit}
-        className="max-w-md mx-auto bg-white border border-slate-200 rounded-2xl p-5 space-y-5"
-      >
-        <div>
-          <div className="text-xs text-slate-500">Joriy balans</div>
-          <div className="text-2xl font-bold font-mono tabular-nums text-slate-900 mt-1">
-            {formatSom(balance)}
+      <div className="max-w-md mx-auto bg-white border border-slate-200 rounded-2xl p-5 space-y-5">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className="text-xs text-slate-500">Joriy balans</div>
+            <div className="text-2xl font-bold font-mono tabular-nums text-slate-900 mt-1">
+              {formatSom(balance)}
+            </div>
+          </div>
+          <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-50 border border-emerald-200 text-[11px] font-semibold text-emerald-700 shrink-0">
+            <ShieldCheck className="w-3.5 h-3.5" />
+            <span>TolovGo · UZS</span>
           </div>
         </div>
 
-        <div className="space-y-2">
-          <label
-            htmlFor="topup-amount"
-            className="block text-xs font-medium text-slate-700"
+        {errorMsg && (
+          <div
+            role="alert"
+            className="p-3 rounded-xl bg-red-50 border border-red-200 text-xs text-red-700 leading-relaxed"
           >
-            To'ldirish summasi (so'm)
-          </label>
-          <input
-            id="topup-amount"
-            type="text"
-            inputMode="numeric"
-            value={amountText}
-            onChange={(e) => setAmountText(e.target.value.replace(/\D/g, ''))}
-            placeholder="50000"
-            className="w-full text-base font-mono tabular-nums font-semibold text-slate-900 bg-slate-50 border border-slate-200 focus:border-blue-600 focus:bg-white rounded-xl px-3.5 py-2.5 outline-none transition-colors"
-          />
-
-          <div className="grid grid-cols-2 gap-2 pt-1">
-            {PRESET_AMOUNTS.map((val) => {
-              const active = parsedAmount === val;
-              return (
-                <button
-                  key={val}
-                  type="button"
-                  onClick={() => setAmountText(String(val))}
-                  className={`py-2 px-3 rounded-full text-xs font-mono tabular-nums font-medium border transition-colors ${
-                    active
-                      ? 'bg-slate-900 border-slate-900 text-white'
-                      : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
-                  }`}
-                >
-                  {formatSom(val)}
-                </button>
-              );
-            })}
+            {errorMsg}
           </div>
-        </div>
+        )}
 
-        <div className="space-y-2">
-          <div className="text-xs font-medium text-zinc-700">To'lov usuli</div>
-          <div className="grid grid-cols-3 gap-2">
-            {PAYMENT_METHODS.map((m) => (
+        {pendingOrder ? (
+          <div className="space-y-4">
+            <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-medium text-slate-500">
+                  Buyurtma #{pendingOrder.orderId}
+                </span>
+                <span className="text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-md">
+                  {pendingOrder.status === 'pending' ? 'Kutilmoqda' : pendingOrder.status}
+                </span>
+              </div>
+              <div className="text-xl font-bold font-mono tabular-nums text-slate-900">
+                {formatSom(pendingOrder.amount)}
+              </div>
+              <p className="text-[11px] text-slate-500 leading-relaxed">
+                TolovGo sahifasida <strong>{pendingOrder.method}</strong> (yoki Click / Payme / Uzum)
+                orqali to'lang. Tasdiqlangach balans avtomatik to'ldiriladi.
+              </p>
+            </div>
+
+            <a
+              href={pendingOrder.payUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="w-full py-3 px-4 rounded-full text-sm font-medium text-white bg-red-600 hover:bg-red-700 transition-colors flex items-center justify-center gap-2"
+            >
+              <span>TolovGo sahifasini ochish</span>
+              <ExternalLink className="w-4 h-4" />
+            </a>
+
+            <div className="grid grid-cols-2 gap-2">
               <button
-                key={m}
                 type="button"
-                onClick={() => setMethod(m)}
-                className={`py-2 px-2 rounded-xl text-xs font-medium border transition-colors truncate ${
-                  method === m
-                    ? 'bg-red-50 border-red-600 text-red-700'
-                    : 'bg-white border-zinc-200 text-zinc-700 hover:bg-zinc-50'
-                }`}
+                disabled={checking}
+                onClick={() => void checkOrderStatus(pendingOrder, false)}
+                className="py-2.5 px-3 rounded-full text-xs font-medium text-slate-900 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 transition-colors flex items-center justify-center gap-1.5"
               >
-                {m}
+                {checking ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <RefreshCw className="w-3.5 h-3.5" />
+                )}
+                <span>To'lovni tekshirish</span>
               </button>
-            ))}
-          </div>
-        </div>
 
-        <button
-          type="submit"
-          disabled={parsedAmount < 1000}
-          className="w-full py-3 px-4 rounded-full text-sm font-medium text-white bg-red-600 hover:bg-red-700 disabled:opacity-45 transition-colors flex items-center justify-center gap-2"
-        >
-          <Plus className="w-4 h-4" />
-          <span>Balansni to'ldirish</span>
-        </button>
-      </form>
+              <button
+                type="button"
+                onClick={() => {
+                  setPendingOrder(null);
+                  setErrorMsg(null);
+                }}
+                className="py-2.5 px-3 rounded-full text-xs font-medium text-slate-600 bg-white border border-slate-200 hover:bg-slate-50 transition-colors flex items-center justify-center gap-1.5"
+              >
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                <span>Boshqa summa</span>
+              </button>
+            </div>
+          </div>
+        ) : (
+          <form onSubmit={handleSubmit} className="space-y-5">
+            <div className="space-y-2">
+              <label
+                htmlFor="topup-amount"
+                className="block text-xs font-medium text-slate-700"
+              >
+                To'ldirish summasi (so'm)
+              </label>
+              <input
+                id="topup-amount"
+                type="text"
+                inputMode="numeric"
+                value={amountText}
+                onChange={(e) => setAmountText(e.target.value.replace(/\D/g, ''))}
+                placeholder="50000"
+                className="w-full text-base font-mono tabular-nums font-semibold text-slate-900 bg-slate-50 border border-slate-200 focus:border-blue-600 focus:bg-white rounded-xl px-3.5 py-2.5 outline-none transition-colors"
+              />
+
+              <div className="grid grid-cols-2 gap-2 pt-1">
+                {PRESET_AMOUNTS.map((val) => {
+                  const active = parsedAmount === val;
+                  return (
+                    <button
+                      key={val}
+                      type="button"
+                      onClick={() => setAmountText(String(val))}
+                      className={`py-2 px-3 rounded-full text-xs font-mono tabular-nums font-medium border transition-colors ${
+                        active
+                          ? 'bg-slate-900 border-slate-900 text-white'
+                          : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
+                      }`}
+                    >
+                      {formatSom(val)}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <div className="text-xs font-medium text-zinc-700">
+                To'lov tizimi (TolovGo orqali)
+              </div>
+              <div className="grid grid-cols-3 gap-2">
+                {PAYMENT_METHODS.map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    onClick={() => setMethod(m)}
+                    className={`py-2 px-2 rounded-xl text-xs font-medium border transition-colors truncate ${
+                      method === m
+                        ? 'bg-red-50 border-red-600 text-red-700'
+                        : 'bg-white border-zinc-200 text-zinc-700 hover:bg-zinc-50'
+                    }`}
+                  >
+                    {m}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <button
+              type="submit"
+              disabled={parsedAmount < 1000 || creating}
+              className="w-full py-3 px-4 rounded-full text-sm font-medium text-white bg-red-600 hover:bg-red-700 disabled:opacity-45 transition-colors flex items-center justify-center gap-2"
+            >
+              {creating ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Plus className="w-4 h-4" />
+              )}
+              <span>{creating ? 'Hisob-faktura yaratilmoqda...' : "TolovGo orqali to'lash"}</span>
+            </button>
+          </form>
+        )}
+      </div>
     </main>
   );
 };
