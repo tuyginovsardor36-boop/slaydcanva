@@ -7,14 +7,17 @@ import {
   ExternalLink,
   FileText,
   FileType2,
+  FolderOpen,
   Loader2,
   LogOut,
   Plus,
   Presentation,
   RefreshCw,
+  Save,
   Send,
   ShieldCheck,
   Sparkles,
+  Trash2,
   Wallet,
 } from 'lucide-react';
 import { AI_SERVICES } from '../data/aiServices';
@@ -23,6 +26,7 @@ import {
   AiServiceId,
   BalanceTransaction,
   MobileTab,
+  ProjectSummary,
   TelegramUser,
   TolovgoPaymentMode,
   UserProfile,
@@ -697,6 +701,13 @@ interface ProfileViewProps {
   onChangeTolovgoMode: (mode: TolovgoPaymentMode) => void;
   onSaveProfile: (profile: UserProfile) => void;
   onOpenTab: (tab: MobileTab) => void;
+  savedProjects?: ProjectSummary[];
+  activeProjectId?: string;
+  syncingProject?: boolean;
+  onSaveProjectNow?: () => void;
+  onLoadCloudProject?: (id: string) => void;
+  onCreateNewCloudProject?: () => void;
+  onDeleteCloudProject?: (id: string) => void;
 }
 
 export const ProfileView: React.FC<ProfileViewProps> = ({
@@ -713,6 +724,13 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
   onChangeTolovgoMode,
   onSaveProfile,
   onOpenTab,
+  savedProjects = [],
+  activeProjectId,
+  syncingProject = false,
+  onSaveProjectNow,
+  onLoadCloudProject,
+  onCreateNewCloudProject,
+  onDeleteCloudProject,
 }) => {
   const [fullName, setFullName] = useState(profile.fullName);
   const [contact, setContact] = useState(profile.contact);
@@ -993,6 +1011,105 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
           </div>
         )}
       </section>
+
+      {/* Mening loyihalarim (Cloud Synced Projects) */}
+      {telegramUser && (
+        <section className="max-w-md mx-auto bg-white border border-zinc-200 rounded-2xl p-5 space-y-3.5">
+          <div className="flex items-center justify-between gap-2">
+            <div>
+              <h2 className="text-sm font-semibold text-zinc-900 flex items-center gap-1.5">
+                <FolderOpen className="w-4 h-4 text-red-600" />
+                <span>Saqlangan loyihalar</span>
+              </h2>
+              <p className="text-[11px] text-zinc-500 mt-0.5">
+                Slayd, PDF va Word sahifalaringiz hisobingizda saqlanadi
+              </p>
+            </div>
+            <div className="flex items-center gap-1.5 shrink-0">
+              {onSaveProjectNow && (
+                <button
+                  type="button"
+                  disabled={syncingProject}
+                  onClick={onSaveProjectNow}
+                  className="px-2.5 py-1.5 rounded-lg bg-zinc-900 text-white text-[11px] font-medium hover:bg-zinc-800 disabled:opacity-50 flex items-center gap-1 transition-colors"
+                >
+                  {syncingProject ? (
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                  ) : (
+                    <Save className="w-3 h-3" />
+                  )}
+                  <span>Saqlash</span>
+                </button>
+              )}
+              {onCreateNewCloudProject && (
+                <button
+                  type="button"
+                  onClick={onCreateNewCloudProject}
+                  className="px-2.5 py-1.5 rounded-lg border border-zinc-200 bg-white text-zinc-700 text-[11px] font-medium hover:bg-zinc-50 flex items-center gap-1 transition-colors"
+                >
+                  <Plus className="w-3 h-3" />
+                  <span>Yangi</span>
+                </button>
+              )}
+            </div>
+          </div>
+
+          {savedProjects.length === 0 ? (
+            <div className="p-3.5 rounded-xl bg-zinc-50 border border-zinc-200/80 text-xs text-zinc-500 text-center">
+              Joriy ishingizni saqlash uchun yuqoridagi «Saqlash» tugmasini bosing.
+            </div>
+          ) : (
+            <div className="divide-y divide-zinc-100 border border-zinc-200 rounded-xl overflow-hidden">
+              {savedProjects.map((proj) => {
+                const isActive = proj.id === activeProjectId;
+                return (
+                  <div
+                    key={proj.id}
+                    className={`px-3.5 py-2.5 flex items-center justify-between gap-2 ${
+                      isActive ? 'bg-red-50/50' : 'bg-white hover:bg-zinc-50'
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => onLoadCloudProject?.(proj.id)}
+                      className="min-w-0 flex-1 text-left"
+                    >
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-xs font-semibold text-zinc-900 truncate">
+                          {proj.title}
+                        </span>
+                        {isActive && (
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-red-100 text-red-700 shrink-0">
+                            Ochiq
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-[11px] text-zinc-500 flex items-center gap-1.5 mt-0.5 font-mono">
+                        <span className="uppercase">{proj.mode}</span>
+                        <span>·</span>
+                        <span>{proj.pptxCount} slayd</span>
+                        <span>·</span>
+                        <span>{proj.pdfCount} PDF</span>
+                      </div>
+                    </button>
+
+                    {onDeleteCloudProject && (
+                      <button
+                        type="button"
+                        aria-label="Loyihani o'chirish"
+                        onClick={() => onDeleteCloudProject(proj.id)}
+                        className="p-1.5 rounded-lg text-zinc-400 hover:text-red-600 hover:bg-red-50 transition-colors shrink-0"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </section>
+      )}
 
       {/* Vaqtinchalik TolovGo rejimi sozlamasi */}
       <section className="max-w-md mx-auto bg-white border border-zinc-200 rounded-2xl p-5 space-y-3">

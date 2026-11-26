@@ -2,6 +2,23 @@ import 'dotenv/config';
 import crypto from 'node:crypto';
 import express from 'express';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
+import {
+  dbCreditTolovgoOrder,
+  dbDeleteProject,
+  dbGetAuthNonce,
+  dbGetDbStatus,
+  dbGetOrCreateUser,
+  dbGetPaymentOrder,
+  dbGetProjectById,
+  dbListProjects,
+  dbLogActivity,
+  dbSaveAuthNonce,
+  dbSaveProject,
+  dbUpdateUserPreferences,
+  dbUpdateUserProfile,
+  dbUpsertPaymentOrder,
+  isNeonConfigured,
+} from '../lib/db.ts';
 
 type AiServiceId =
   | 'academic_wave_pptx'
@@ -2159,6 +2176,8 @@ interface TgUserAccount {
   firstName: string;
   lastName?: string;
   username?: string;
+  fullName?: string;
+  contact?: string;
   balance: number;
   transactions: TgTransaction[];
   notifyOnActivity: boolean;
@@ -2502,7 +2521,55 @@ function escapeTgHtml(str: string): string {
     .replace(/>/g, '&gt;');
 }
 
+function hasPersistentStorage(): boolean {
+  return isNeonConfigured() || Boolean(getKvCredentials());
+}
+
+function getStorageDriver(): 'neon' | 'kv' | 'memory' {
+  if (isNeonConfigured()) return 'neon';
+  if (getKvCredentials()) return 'kv';
+  return 'memory';
+}
+
+async function saveOrderRecord(rec: TolovgoOrderRecord): Promise<void> {
+  tolovgoOrders.set(rec.orderId, rec);
+  await Promise.all([
+    kvSet(`tolovgo_order:${rec.orderId}`, rec, 86400),
+    dbUpsertPaymentOrder(rec),
+  ]);
+}
+
+async function loadOrderRecord(orderId: string): Promise<TolovgoOrderRecord | undefined> {
+  const fromDb = await dbGetPaymentOrder(orderId);
+  if (fromDb) {
+    tolovgoOrders.set(orderId, fromDb);
+    return fromDb;
+  }
+  const fromMem = tolovgoOrders.get(orderId);
+  if (fromMem) return fromMem;
+  return (await kvGet<TolovgoOrderRecord>(`tolovgo_order:${orderId}`)) || undefined;
+}
+
+async function saveLoginNonce(nonce: string, loginToken: string): Promise<void> {
+  await Promise.all([
+    kvSet(`tg_nonce:${nonce}`, { loginToken }, 600),
+    dbSaveAuthNonce(nonce, loginToken, 600),
+  ]);
+}
+
+async function loadLoginNonce(nonce: string): Promise<string | null> {
+  const fromDb = await dbGetAuthNonce(nonce);
+  if (fromDb) return fromDb;
+  const record = await kvGet<{ loginToken: string }>(`tg_nonce:${nonce}`);
+  return record?.loginToken || null;
+}
+
 async function getTgUserAccount(profile: TgUserProfile): Promise<TgUserAccount> {
+  const dbAccount = await dbGetOrCreateUser(profile, formatUzDate());
+  if (dbAccount) {
+    return dbAccount;
+  }
+
   const key = `tg_user:${profile.telegramId}`;
   const existing = await kvGet<TgUserAccount>(key);
   if (existing) {
@@ -2561,8 +2628,22 @@ async function creditTgUserTopUp(
   chatId: string,
   amount: number,
   orderId: string,
-  methodLabel: string
+  methodLabel: string,
+  isTest = false
 ): Promise<boolean> {
+  const dbClaimed = await dbCreditTolovgoOrder(
+    orderId,
+    telegramId,
+    chatId,
+    amount,
+    methodLabel,
+    formatUzDate(),
+    isTest
+  );
+  if (dbClaimed !== null) {
+    return dbClaimed;
+  }
+
   const key = `tg_user:${telegramId}`;
   const existing = await kvGet<TgUserAccount>(key);
   const txId = `tolovgo_${orderId}`;
@@ -2753,8 +2834,7 @@ async function createTolovgoOrderForBot(
     chatId,
     method: providerHint,
   };
-  tolovgoOrders.set(orderId, rec);
-  await kvSet(`tolovgo_order:${orderId}`, rec, 86400);
+  await saveOrderRecord(rec);
 
   return { orderId, payUrl, amount: finalAmount, isTest };
 }
@@ -2935,8 +3015,7 @@ app.post('/api/payments/tolovgo/create', async (req, res) => {
       chatId: tgUser?.chatId,
       method: hint ? `TolovGo · ${hint}` : 'TolovGo',
     };
-    tolovgoOrders.set(orderId, rec);
-    await kvSet(`tolovgo_order:${orderId}`, rec, 86400);
+    await saveOrderRecord(rec);
 
     res.status(201).json({
       ok: true,
@@ -2963,8 +3042,7 @@ app.get('/api/payments/tolovgo/status/:orderId', async (req, res) => {
       return;
     }
 
-    const existing =
-      tolovgoOrders.get(orderId) || (await kvGet<TolovgoOrderRecord>(`tolovgo_order:${orderId}`)) || undefined;
+    const existing = await loadOrderRecord(orderId);
     const queryMode =
       req.query.mode === 'test' || req.query.mode === 'live'
         ? req.query.mode
@@ -2990,14 +3068,39 @@ app.get('/api/payments/tolovgo/status/:orderId', async (req, res) => {
       const targetTgId = existing?.telegramId || tgUser?.telegramId;
       const targetChatId = existing?.chatId || tgUser?.chatId || targetTgId;
 
-      if (existing) {
+      if (targetTgId && targetChatId && trustedAmount >= 1000) {
+        newlyCredited = await creditTgUserTopUp(
+          targetTgId,
+          targetChatId,
+          trustedAmount,
+          orderId,
+          existing?.method || (cred.isTest ? 'TolovGo (Sinov)' : 'TolovGo'),
+          cred.isTest
+        );
+        const rec: TolovgoOrderRecord = existing
+          ? { ...existing, status: 'paid', credited: true, telegramId: targetTgId, chatId: targetChatId }
+          : {
+              orderId,
+              amount: trustedAmount,
+              payUrl: '',
+              status: 'paid',
+              isTest: cred.isTest,
+              credited: true,
+              createdAt: Date.now(),
+              telegramId: targetTgId,
+              chatId: targetChatId,
+            };
+        await saveOrderRecord(rec);
+        if (newlyCredited) {
+          await notifyTelegramPaymentPaid(targetChatId, trustedAmount, orderId, cred.isTest);
+        }
+      } else if (existing) {
         existing.status = 'paid';
         if (!existing.credited && trustedAmount >= 1000) {
           existing.credited = true;
           newlyCredited = true;
         }
-        tolovgoOrders.set(orderId, existing);
-        await kvSet(`tolovgo_order:${orderId}`, existing, 86400);
+        await saveOrderRecord(existing);
       } else if (trustedAmount >= 1000) {
         const rec: TolovgoOrderRecord = {
           orderId,
@@ -3007,28 +3110,13 @@ app.get('/api/payments/tolovgo/status/:orderId', async (req, res) => {
           isTest: cred.isTest,
           credited: true,
           createdAt: Date.now(),
-          telegramId: targetTgId,
-          chatId: targetChatId,
         };
-        tolovgoOrders.set(orderId, rec);
-        await kvSet(`tolovgo_order:${orderId}`, rec, 86400);
+        await saveOrderRecord(rec);
         newlyCredited = true;
-      }
-
-      if (newlyCredited && targetTgId && targetChatId && trustedAmount >= 1000) {
-        await creditTgUserTopUp(
-          targetTgId,
-          targetChatId,
-          trustedAmount,
-          orderId,
-          existing?.method || (cred.isTest ? 'TolovGo (Sinov)' : 'TolovGo')
-        );
-        await notifyTelegramPaymentPaid(targetChatId, trustedAmount, orderId, cred.isTest);
       }
     } else if (existing) {
       existing.status = remote.status;
-      tolovgoOrders.set(orderId, existing);
-      await kvSet(`tolovgo_order:${orderId}`, existing, 86400);
+      await saveOrderRecord(existing);
     }
 
     res.json({
@@ -3062,8 +3150,7 @@ app.all('/api/payments/tolovgo/callback', async (req, res) => {
       return;
     }
 
-    const existing =
-      tolovgoOrders.get(orderId) || (await kvGet<TolovgoOrderRecord>(`tolovgo_order:${orderId}`)) || undefined;
+    const existing = await loadOrderRecord(orderId);
     const cred = resolveTolovgoCredential(
       existing ? (existing.isTest ? 'test' : 'live') : undefined
     );
@@ -3078,16 +3165,18 @@ app.all('/api/payments/tolovgo/callback', async (req, res) => {
 
     if (existing) {
       existing.status = remote.status;
-      if (remote.status === 'paid' && !existing.credited && trustedAmount >= 1000) {
+      if (remote.status === 'paid' && trustedAmount >= 1000 && existing.telegramId && existing.chatId) {
+        const wasNew = await creditTgUserTopUp(
+          existing.telegramId,
+          existing.chatId,
+          trustedAmount,
+          orderId,
+          existing.method || (existing.isTest ? 'TolovGo (Sinov)' : 'TolovGo'),
+          existing.isTest
+        );
         existing.credited = true;
-        if (existing.telegramId && existing.chatId) {
-          await creditTgUserTopUp(
-            existing.telegramId,
-            existing.chatId,
-            trustedAmount,
-            orderId,
-            existing.method || (existing.isTest ? 'TolovGo (Sinov)' : 'TolovGo')
-          );
+        await saveOrderRecord(existing);
+        if (wasNew) {
           await notifyTelegramPaymentPaid(
             existing.chatId,
             trustedAmount,
@@ -3095,9 +3184,10 @@ app.all('/api/payments/tolovgo/callback', async (req, res) => {
             existing.isTest
           );
         }
+      } else {
+        if (remote.status === 'paid') existing.credited = true;
+        await saveOrderRecord(existing);
       }
-      tolovgoOrders.set(orderId, existing);
-      await kvSet(`tolovgo_order:${orderId}`, existing, 86400);
     } else if (remote.amount) {
       const rec: TolovgoOrderRecord = {
         orderId,
@@ -3108,8 +3198,7 @@ app.all('/api/payments/tolovgo/callback', async (req, res) => {
         credited: remote.status === 'paid',
         createdAt: Date.now(),
       };
-      tolovgoOrders.set(orderId, rec);
-      await kvSet(`tolovgo_order:${orderId}`, rec, 86400);
+      await saveOrderRecord(rec);
     }
 
     res.json({ ok: true, orderId, status: remote.status });
@@ -3122,6 +3211,16 @@ app.all('/api/payments/tolovgo/callback', async (req, res) => {
 // =========================================================================
 // Telegram Bot & Auth Routes
 // =========================================================================
+app.get('/api/db/status', async (_req, res) => {
+  const neonStatus = await dbGetDbStatus();
+  res.json({
+    driver: getStorageDriver(),
+    configured: hasPersistentStorage(),
+    neonConfigured: neonStatus.configured,
+    tablesReady: neonStatus.ready,
+  });
+});
+
 app.get('/api/telegram/config', async (req, res) => {
   const token = getTelegramBotToken();
   const botUsername = token ? await resolveTelegramBotUsername() : null;
@@ -3131,7 +3230,8 @@ app.get('/api/telegram/config', async (req, res) => {
     botUsername,
     webhookUrl: `${origin}/api/telegram/webhook`,
     webhookSecretConfigured: Boolean(getTelegramWebhookSecret()),
-    kvConfigured: Boolean(getKvCredentials()),
+    kvConfigured: hasPersistentStorage(),
+    dbDriver: getStorageDriver(),
   });
 });
 
@@ -3149,7 +3249,14 @@ app.post('/api/telegram/auth/webapp', async (req, res) => {
   }
   const account = await getTgUserAccount(profile);
   const sessionToken = issueSessionCookieAndToken(req, res, profile);
-  res.json({ ok: true, user: profile, sessionToken, account, kvConfigured: Boolean(getKvCredentials()) });
+  res.json({
+    ok: true,
+    user: profile,
+    sessionToken,
+    account,
+    kvConfigured: hasPersistentStorage(),
+    dbDriver: getStorageDriver(),
+  });
 });
 
 app.post('/api/telegram/auth/verify', async (req, res) => {
@@ -3174,7 +3281,14 @@ app.post('/api/telegram/auth/verify', async (req, res) => {
   };
   const account = await getTgUserAccount(profile);
   const sessionToken = issueSessionCookieAndToken(req, res, profile);
-  res.json({ ok: true, user: profile, sessionToken, account, kvConfigured: Boolean(getKvCredentials()) });
+  res.json({
+    ok: true,
+    user: profile,
+    sessionToken,
+    account,
+    kvConfigured: hasPersistentStorage(),
+    dbDriver: getStorageDriver(),
+  });
 });
 
 app.get('/api/telegram/auth/poll', async (req, res) => {
@@ -3183,12 +3297,12 @@ app.get('/api/telegram/auth/poll', async (req, res) => {
     res.status(400).json({ error: "Noto'g'ri kirish kodi." });
     return;
   }
-  const record = await kvGet<{ loginToken: string }>(`tg_nonce:${nonce}`);
-  if (!record?.loginToken) {
+  const loginToken = await loadLoginNonce(nonce);
+  if (!loginToken) {
     res.json({ authenticated: false });
     return;
   }
-  const payload = verifySignedToken(record.loginToken);
+  const payload = verifySignedToken(loginToken);
   if (!payload || payload.kind !== 'tg_login') {
     res.json({ authenticated: false });
     return;
@@ -3207,7 +3321,8 @@ app.get('/api/telegram/auth/poll', async (req, res) => {
     user: profile,
     sessionToken,
     account,
-    kvConfigured: Boolean(getKvCredentials()),
+    kvConfigured: hasPersistentStorage(),
+    dbDriver: getStorageDriver(),
   });
 });
 
@@ -3228,7 +3343,8 @@ app.get('/api/telegram/me', async (req, res) => {
       notifyOnActivity: account.notifyOnActivity,
     },
     account,
-    kvConfigured: Boolean(getKvCredentials()),
+    kvConfigured: hasPersistentStorage(),
+    dbDriver: getStorageDriver(),
   });
 });
 
@@ -3238,19 +3354,50 @@ app.post('/api/telegram/preferences', async (req, res) => {
     res.status(401).json({ error: 'Telegram autentifikatsiyasi talab qilinadi.' });
     return;
   }
-  const account = await getTgUserAccount(user);
+  const prefs: { autoSendFiles?: boolean; notifyOnActivity?: boolean } = {};
   if (typeof req.body?.autoSendFiles === 'boolean') {
-    account.autoSendFiles = req.body.autoSendFiles;
+    prefs.autoSendFiles = req.body.autoSendFiles;
   }
   if (typeof req.body?.notifyOnActivity === 'boolean') {
-    account.notifyOnActivity = req.body.notifyOnActivity;
+    prefs.notifyOnActivity = req.body.notifyOnActivity;
   }
+
+  const dbUpdated = await dbUpdateUserPreferences(user.telegramId, prefs);
+  if (dbUpdated) {
+    res.json({ ok: true, ...dbUpdated });
+    return;
+  }
+
+  const account = await getTgUserAccount(user);
+  if (typeof prefs.autoSendFiles === 'boolean') account.autoSendFiles = prefs.autoSendFiles;
+  if (typeof prefs.notifyOnActivity === 'boolean') account.notifyOnActivity = prefs.notifyOnActivity;
   await saveTgUserAccount(account);
   res.json({
     ok: true,
     autoSendFiles: account.autoSendFiles,
     notifyOnActivity: account.notifyOnActivity,
   });
+});
+
+app.post('/api/telegram/profile', async (req, res) => {
+  const user = getAuthenticatedTelegramUser(req);
+  if (!user) {
+    res.status(401).json({ error: 'Telegram autentifikatsiyasi talab qilinadi.' });
+    return;
+  }
+  const fullName =
+    typeof req.body?.fullName === 'string' ? req.body.fullName.trim().slice(0, 100) : undefined;
+  const contact =
+    typeof req.body?.contact === 'string' ? req.body.contact.trim().slice(0, 120) : undefined;
+
+  const okDb = await dbUpdateUserProfile(user.telegramId, { fullName, contact });
+  if (!okDb) {
+    const account = await getTgUserAccount(user);
+    if (fullName !== undefined) account.fullName = fullName;
+    if (contact !== undefined) account.contact = contact;
+    await saveTgUserAccount(account);
+  }
+  res.json({ ok: true });
 });
 
 app.post('/api/telegram/logout', (req, res) => {
@@ -3266,7 +3413,7 @@ app.post('/api/telegram/notify', async (req, res) => {
   }
   const rawMessage = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
   if (!rawMessage) {
-    res.status(400).json({ error: 'Xabar matni bo\'sh.' });
+    res.status(400).json({ error: "Xabar matni bo'sh." });
     return;
   }
   const account = await getTgUserAccount(user);
@@ -3301,17 +3448,26 @@ app.post('/api/telegram/log-activity', async (req, res) => {
   }
 
   const account = await getTgUserAccount(user);
-  if (safeDelta < 0) {
-    account.balance = Math.max(0, account.balance + safeDelta);
+  const txId = `act_${Date.now().toString(36)}_${crypto.randomBytes(3).toString('hex')}`;
+  const dateLabel = formatUzDate();
+
+  const dbRes = await dbLogActivity(user.telegramId, txId, title, method, safeDelta, dateLabel);
+  if (dbRes) {
+    account.balance = dbRes.balance;
+    account.transactions = dbRes.transactions;
+  } else {
+    if (safeDelta < 0) {
+      account.balance = Math.max(0, account.balance + safeDelta);
+    }
+    account.transactions.unshift({
+      id: txId,
+      title,
+      method,
+      amount: safeDelta,
+      date: dateLabel,
+    });
+    await saveTgUserAccount(account);
   }
-  account.transactions.unshift({
-    id: `act_${Date.now().toString(36)}_${crypto.randomBytes(3).toString('hex')}`,
-    title,
-    method,
-    amount: safeDelta,
-    date: formatUzDate(),
-  });
-  await saveTgUserAccount(account);
 
   if (account.notifyOnActivity) {
     const costLine = safeDelta < 0 ? `\n💳 Xarajat: <b>-${escapeTgHtml(formatSomServer(Math.abs(safeDelta)))}</b>` : '';
@@ -3324,6 +3480,162 @@ app.post('/api/telegram/log-activity', async (req, res) => {
   }
 
   res.json({ ok: true, balance: account.balance, transactions: account.transactions });
+});
+
+// =========================================================================
+// Projects & Pages Persistence Routes (Neon PostgreSQL + KV Fallback)
+// =========================================================================
+app.get('/api/projects', async (req, res) => {
+  const user = getAuthenticatedTelegramUser(req);
+  if (!user) {
+    res.status(401).json({ error: 'Telegram autentifikatsiyasi talab qilinadi.' });
+    return;
+  }
+
+  const dbProjects = await dbListProjects(user.telegramId, 20);
+  if (dbProjects) {
+    const latest = dbProjects[0] ? await dbGetProjectById(user.telegramId, dbProjects[0].id) : null;
+    res.json({
+      ok: true,
+      dbDriver: 'neon',
+      projects: dbProjects,
+      activeProject: latest,
+    });
+    return;
+  }
+
+  const fallback = await kvGet<{
+    id: string;
+    title: string;
+    mode: 'pptx' | 'word' | 'pdf';
+    pptxPages: unknown[];
+    pdfPages: unknown[];
+    pdfOrientation: 'portrait' | 'landscape';
+    wordDoc: Record<string, unknown>;
+    tolovgoMode: 'live' | 'test';
+    updatedAt: number;
+  }>(`tg_project:${user.telegramId}:default`);
+
+  res.json({
+    ok: true,
+    dbDriver: getStorageDriver(),
+    projects: fallback
+      ? [
+          {
+            id: fallback.id,
+            title: fallback.title,
+            mode: fallback.mode,
+            pptxCount: fallback.pptxPages.length,
+            pdfCount: fallback.pdfPages.length,
+            updatedAt: fallback.updatedAt,
+          },
+        ]
+      : [],
+    activeProject: fallback || null,
+  });
+});
+
+app.get('/api/projects/:id', async (req, res) => {
+  const user = getAuthenticatedTelegramUser(req);
+  if (!user) {
+    res.status(401).json({ error: 'Telegram autentifikatsiyasi talab qilinadi.' });
+    return;
+  }
+  const projectId = String(req.params.id || '').trim();
+  if (!/^[a-zA-Z0-9_-]{1,64}$/.test(projectId)) {
+    res.status(400).json({ error: "Noto'g'ri loyiha identifikatori." });
+    return;
+  }
+  const project = await dbGetProjectById(user.telegramId, projectId);
+  if (!project) {
+    res.status(404).json({ error: 'Loyiha topilmadi.' });
+    return;
+  }
+  res.json({ ok: true, project });
+});
+
+app.post('/api/projects/sync', async (req, res) => {
+  const user = getAuthenticatedTelegramUser(req);
+  if (!user) {
+    res.status(401).json({ error: 'Telegram autentifikatsiyasi talab qilinadi.' });
+    return;
+  }
+
+  const body = (req.body || {}) as Record<string, unknown>;
+  const rawId = typeof body.id === 'string' ? body.id.trim() : `proj_${user.telegramId}_main`;
+  const id = /^[a-zA-Z0-9_-]{1,64}$/.test(rawId) ? rawId : `proj_${user.telegramId}_main`;
+  const title =
+    typeof body.title === 'string' && body.title.trim()
+      ? body.title.trim().slice(0, 140)
+      : 'Yangi loyiha';
+  const mode =
+    body.mode === 'word' || body.mode === 'pdf' ? body.mode : 'pptx';
+  const pptxPages = Array.isArray(body.pptxPages) ? body.pptxPages.slice(0, 30) : [];
+  const pdfPages = Array.isArray(body.pdfPages) ? body.pdfPages.slice(0, 30) : [];
+  const pdfOrientation = body.pdfOrientation === 'landscape' ? 'landscape' : 'portrait';
+  const wordDoc =
+    body.wordDoc && typeof body.wordDoc === 'object'
+      ? (body.wordDoc as Record<string, unknown>)
+      : {};
+  const tolovgoMode = body.tolovgoMode === 'test' ? 'test' : 'live';
+
+  await getTgUserAccount(user);
+  const summary = await dbSaveProject(user.telegramId, {
+    id,
+    title,
+    mode,
+    pptxPages,
+    pdfPages,
+    pdfOrientation,
+    wordDoc,
+    tolovgoMode,
+  });
+
+  if (summary) {
+    res.json({ ok: true, dbDriver: 'neon', project: summary });
+    return;
+  }
+
+  const updatedAt = Date.now();
+  await kvSet(`tg_project:${user.telegramId}:default`, {
+    id,
+    title,
+    mode,
+    pptxPages,
+    pdfPages,
+    pdfOrientation,
+    wordDoc,
+    tolovgoMode,
+    updatedAt,
+  });
+
+  res.json({
+    ok: true,
+    dbDriver: getStorageDriver(),
+    project: {
+      id,
+      title,
+      mode,
+      pptxCount: pptxPages.length,
+      pdfCount: pdfPages.length,
+      updatedAt,
+    },
+  });
+});
+
+app.delete('/api/projects/:id', async (req, res) => {
+  const user = getAuthenticatedTelegramUser(req);
+  if (!user) {
+    res.status(401).json({ error: 'Telegram autentifikatsiyasi talab qilinadi.' });
+    return;
+  }
+  const projectId = String(req.params.id || '').trim();
+  if (!/^[a-zA-Z0-9_-]{1,64}$/.test(projectId)) {
+    res.status(400).json({ error: "Noto'g'ri loyiha identifikatori." });
+    return;
+  }
+  await dbDeleteProject(user.telegramId, projectId);
+  res.json({ ok: true });
 });
 
 app.post('/api/telegram/send-document', async (req, res) => {
@@ -3678,7 +3990,7 @@ app.post('/api/telegram/webhook', async (req, res) => {
           if (arg.startsWith('auth_')) {
             const nonce = arg.slice(5).trim();
             if (/^[a-zA-Z0-9_-]{8,48}$/.test(nonce)) {
-              await kvSet(`tg_nonce:${nonce}`, { loginToken }, 600);
+              await saveLoginNonce(nonce, loginToken);
             }
           }
           const greetingName = escapeTgHtml(user.firstName);

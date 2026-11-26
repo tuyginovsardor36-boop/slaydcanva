@@ -103,3 +103,25 @@ export interface SlaydCanvaState {
   telegramUser?: TelegramUser | null;
   telegramSessionToken?: string;
 }
+
+export interface ProjectSummary {
+  id: string;
+  title: string;
+  mode: WorkspaceMode;
+  pptxCount: number;
+  pdfCount: number;
+  updatedAt: number;
+}
+
+export interface CloudProjectData {
+  id: string;
+  title: string;
+  mode: WorkspaceMode;
+  pptxPages: CanvasPage[];
+  pdfPages: CanvasPage[];
+  pdfOrientation: PdfOrientation;
+  wordDoc: WordDocumentData;
+  tolovgoMode?: TolovgoPaymentMode;
+  updatedAt: number;
+}
+

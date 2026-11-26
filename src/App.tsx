@@ -17,9 +17,11 @@ import {
 import {
   AiServiceId,
   CanvasPage,
+  CloudProjectData,
   DesktopView,
   MobileTab,
   PdfOrientation,
+  ProjectSummary,
   SlaydCanvaState,
   TelegramUser,
   TolovgoPaymentMode,
@@ -34,9 +36,14 @@ import {
 } from './utils/exportPdf';
 import { exportToPptx } from './utils/exportPptx';
 import {
+  deleteCloudProject,
+  fetchCloudProjects,
   getTelegramAuthHeaders,
+  loadCloudProject,
   logTelegramActivity,
+  saveCloudProfile,
   sendBlobToTelegram,
+  syncCloudProject,
   TelegramAccountResponse,
   TelegramWebAppWindow,
 } from './utils/telegramClient';
@@ -128,8 +135,13 @@ export default function App() {
   const [notice, setNotice] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
   const [telegramUser, setTelegramUser] = useState<TelegramUser | null>(null);
   const [tgSessionToken, setTgSessionToken] = useState<string | null>(null);
+  const [activeProjectId, setActiveProjectId] = useState<string>('');
+  const [savedProjects, setSavedProjects] = useState<ProjectSummary[]>([]);
+  const [syncingProject, setSyncingProject] = useState(false);
 
   const wordPaperRef = useRef<HTMLDivElement | null>(null);
+  const hydratedCloudUserRef = useRef<string | null>(null);
+  const skipNextAutoSyncRef = useRef(false);
 
   // Persist workspace to localStorage (never persist session tokens)
   useEffect(() => {
@@ -171,13 +183,19 @@ export default function App() {
           .trim();
         const nextProfile: UserProfile = {
           fullName:
-            prev.profile.fullName === 'Foydalanuvchi' && displayName
-              ? displayName
-              : prev.profile.fullName,
+            payload.account?.fullName && prev.profile.fullName === 'Foydalanuvchi'
+              ? payload.account.fullName
+              : prev.profile.fullName === 'Foydalanuvchi' && displayName
+                ? displayName
+                : prev.profile.fullName,
           contact:
-            payload.user.username && (!prev.profile.contact || prev.profile.contact === 'tuyginovsardor4@gmail.com')
-              ? `@${payload.user.username}`
-              : prev.profile.contact,
+            payload.account?.contact &&
+            (!prev.profile.contact || prev.profile.contact === 'tuyginovsardor4@gmail.com')
+              ? payload.account.contact
+              : payload.user.username &&
+                  (!prev.profile.contact || prev.profile.contact === 'tuyginovsardor4@gmail.com')
+                ? `@${payload.user.username}`
+                : prev.profile.contact,
         };
 
         let nextBalance = prev.balance;
@@ -617,6 +635,9 @@ export default function App() {
 
   const handleSaveProfile = (profile: UserProfile) => {
     setState((prev) => ({ ...prev, profile }));
+    if (tgSessionToken) {
+      void saveCloudProfile(profile, tgSessionToken);
+    }
     showNotice('ok', "Profil ma'lumotlari saqlandi.");
   };
 
@@ -659,9 +680,204 @@ export default function App() {
     } catch {
       // Ignore
     }
+    hydratedCloudUserRef.current = null;
+    setSavedProjects([]);
+    setActiveProjectId('');
     setTelegramUser(null);
     setTgSessionToken(null);
     showNotice('ok', 'Telegram hisobidan chiqildi.');
+  };
+
+  const applyCloudProjectToWorkspace = useCallback((project: CloudProjectData) => {
+    skipNextAutoSyncRef.current = true;
+    const fallback = createInitialState();
+    const pptxPages = sanitizeLoadedPages(project.pptxPages);
+    const pdfPages = sanitizeLoadedPages(project.pdfPages);
+    const nextPptx = pptxPages?.length ? pptxPages : fallback.pptxPages;
+    const nextPdf = pdfPages?.length ? pdfPages : fallback.pdfPages;
+    const nextWord =
+      project.wordDoc && typeof project.wordDoc.html === 'string'
+        ? project.wordDoc
+        : fallback.wordDoc;
+
+    setPptxHistory({ past: [], future: [] });
+    setPdfHistory({ past: [], future: [] });
+    setActiveProjectId(project.id);
+    setState((prev) => ({
+      ...prev,
+      docTitle: project.title || prev.docTitle,
+      mode: project.mode || prev.mode,
+      pptxPages: nextPptx,
+      activePptxId: nextPptx[0]?.id || prev.activePptxId,
+      pdfPages: nextPdf,
+      activePdfId: nextPdf[0]?.id || prev.activePdfId,
+      pdfOrientation: project.pdfOrientation || prev.pdfOrientation,
+      wordDoc: nextWord,
+      tolovgoMode: project.tolovgoMode || prev.tolovgoMode,
+    }));
+  }, []);
+
+  const syncCurrentProjectNow = useCallback(
+    async (explicitId?: string, silent = true) => {
+      if (!tgSessionToken || !telegramUser) return;
+      const s = stateRef.current;
+      const targetId = explicitId || activeProjectId || `proj_${telegramUser.telegramId}_main`;
+      setSyncingProject(true);
+      try {
+        const res = await syncCloudProject(
+          {
+            id: targetId,
+            title: s.docTitle || 'Yangi loyiha',
+            mode: s.mode,
+            pptxPages: s.pptxPages,
+            pdfPages: s.pdfPages,
+            pdfOrientation: s.pdfOrientation,
+            wordDoc: s.wordDoc,
+            tolovgoMode: s.tolovgoMode || 'live',
+          },
+          tgSessionToken
+        );
+        if (res.ok && res.project) {
+          setActiveProjectId(res.project.id);
+          setSavedProjects((prev) => [
+            res.project!,
+            ...prev.filter((p) => p.id !== res.project!.id),
+          ]);
+          if (!silent) {
+            showNotice('ok', 'Loyiha bazaga saqlandi.');
+          }
+        } else if (!silent) {
+          showNotice(
+            'err',
+            res.tooLarge
+              ? 'Loyiha hajmi 3.8 MB dan katta.'
+              : "Loyihani saqlashda xatolik yuz berdi."
+          );
+        }
+      } finally {
+        setSyncingProject(false);
+      }
+    },
+    [tgSessionToken, telegramUser, activeProjectId, showNotice]
+  );
+
+  // Hydrate projects from Neon PostgreSQL once per authenticated Telegram user
+  useEffect(() => {
+    if (!tgSessionToken || !telegramUser) return;
+    if (hydratedCloudUserRef.current === telegramUser.telegramId) return;
+    hydratedCloudUserRef.current = telegramUser.telegramId;
+
+    let active = true;
+    const hydrate = async () => {
+      const data = await fetchCloudProjects(tgSessionToken);
+      if (!active || !data) return;
+
+      setSavedProjects(data.projects);
+      const curr = stateRef.current;
+      const isDefaultWorkspace =
+        curr.docTitle === 'Yangi loyiha' &&
+        curr.pptxPages.length <= 2 &&
+        curr.pdfPages.length <= 1 &&
+        curr.wordDoc.html === INITIAL_WORD_HTML;
+
+      if (data.activeProject) {
+        if (isDefaultWorkspace) {
+          applyCloudProjectToWorkspace(data.activeProject);
+        } else {
+          setActiveProjectId(data.activeProject.id);
+        }
+      } else {
+        const initialId = `proj_${telegramUser.telegramId}_main`;
+        setActiveProjectId(initialId);
+        void syncCurrentProjectNow(initialId, true);
+      }
+    };
+
+    void hydrate();
+    return () => {
+      active = false;
+    };
+  }, [tgSessionToken, telegramUser, applyCloudProjectToWorkspace, syncCurrentProjectNow]);
+
+  // Debounced background sync of active project to Neon PostgreSQL
+  useEffect(() => {
+    if (!tgSessionToken || !telegramUser) return;
+    if (skipNextAutoSyncRef.current) {
+      skipNextAutoSyncRef.current = false;
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void syncCurrentProjectNow(undefined, true);
+    }, 2500);
+    return () => window.clearTimeout(timer);
+  }, [
+    tgSessionToken,
+    telegramUser,
+    state.docTitle,
+    state.mode,
+    state.pptxPages,
+    state.pdfPages,
+    state.pdfOrientation,
+    state.wordDoc,
+    state.tolovgoMode,
+    syncCurrentProjectNow,
+  ]);
+
+  const handleLoadCloudProject = async (projectId: string) => {
+    if (!tgSessionToken) return;
+    setSyncingProject(true);
+    try {
+      const proj = await loadCloudProject(projectId, tgSessionToken);
+      if (proj) {
+        applyCloudProjectToWorkspace(proj);
+        setDesktopProfileOpen(false);
+        setDesktopView('editor');
+        setMobileTab('editor');
+        showNotice('ok', `"${proj.title}" loyihasi ochildi.`);
+      } else {
+        showNotice('err', 'Loyihani yuklab bo‘lmadi.');
+      }
+    } finally {
+      setSyncingProject(false);
+    }
+  };
+
+  const handleCreateNewCloudProject = () => {
+    if (!telegramUser) return;
+    skipNextAutoSyncRef.current = true;
+    const fresh = createInitialState();
+    const nextId = `proj_${telegramUser.telegramId}_${Date.now().toString(36)}`;
+    setPptxHistory({ past: [], future: [] });
+    setPdfHistory({ past: [], future: [] });
+    setActiveProjectId(nextId);
+    setState((prev) => ({
+      ...fresh,
+      balance: prev.balance,
+      transactions: prev.transactions,
+      profile: prev.profile,
+      tolovgoMode: prev.tolovgoMode,
+    }));
+    setDesktopProfileOpen(false);
+    setDesktopView('editor');
+    setMobileTab('editor');
+    showNotice('ok', 'Yangi loyiha yaratildi.');
+    window.setTimeout(() => {
+      void syncCurrentProjectNow(nextId, true);
+    }, 100);
+  };
+
+  const handleDeleteCloudProject = async (projectId: string) => {
+    if (!tgSessionToken || !telegramUser) return;
+    const ok = await deleteCloudProject(projectId, tgSessionToken);
+    if (!ok) {
+      showNotice('err', "Loyihani o'chirishda xatolik yuz berdi.");
+      return;
+    }
+    setSavedProjects((prev) => prev.filter((p) => p.id !== projectId));
+    if (activeProjectId === projectId) {
+      setActiveProjectId(`proj_${telegramUser.telegramId}_${Date.now().toString(36)}`);
+    }
+    showNotice('ok', "Loyiha o'chirildi.");
   };
 
   const handleAiGenerated = (result: AiGeneratedPayload) => {
@@ -845,6 +1061,13 @@ export default function App() {
               onChangeTolovgoMode={handleChangeTolovgoMode}
               onSaveProfile={handleSaveProfile}
               onOpenTab={handleSelectMobileTab}
+              savedProjects={savedProjects}
+              activeProjectId={activeProjectId}
+              syncingProject={syncingProject}
+              onSaveProjectNow={() => void syncCurrentProjectNow(undefined, false)}
+              onLoadCloudProject={(id) => void handleLoadCloudProject(id)}
+              onCreateNewCloudProject={handleCreateNewCloudProject}
+              onDeleteCloudProject={(id) => void handleDeleteCloudProject(id)}
             />
           )}
         </div>
@@ -1003,6 +1226,13 @@ export default function App() {
                 setDesktopProfileOpen(false);
                 setDesktopTopUpOpen(true);
               }}
+              savedProjects={savedProjects}
+              activeProjectId={activeProjectId}
+              syncingProject={syncingProject}
+              onSaveProjectNow={() => void syncCurrentProjectNow(undefined, false)}
+              onLoadCloudProject={(id) => void handleLoadCloudProject(id)}
+              onCreateNewCloudProject={handleCreateNewCloudProject}
+              onDeleteCloudProject={(id) => void handleDeleteCloudProject(id)}
             />
           </div>
         </div>

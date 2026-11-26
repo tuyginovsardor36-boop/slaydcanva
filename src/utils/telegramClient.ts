@@ -1,4 +1,10 @@
-import { BalanceTransaction, TelegramUser } from '../types/editor';
+import {
+  BalanceTransaction,
+  CloudProjectData,
+  ProjectSummary,
+  TelegramUser,
+  UserProfile,
+} from '../types/editor';
 
 export interface TelegramConfigResponse {
   configured: boolean;
@@ -14,6 +20,8 @@ export interface TelegramAccountResponse {
   firstName: string;
   lastName?: string;
   username?: string;
+  fullName?: string;
+  contact?: string;
   balance: number;
   transactions: BalanceTransaction[];
   notifyOnActivity: boolean;
@@ -163,3 +171,109 @@ export function formatTelegramDisplayName(user: TelegramUser): string {
   }
   return full || `ID ${user.telegramId}`;
 }
+
+const MAX_PROJECT_SYNC_BYTES = 3_800_000;
+
+export async function fetchCloudProjects(sessionToken?: string | null): Promise<{
+  projects: ProjectSummary[];
+  activeProject: CloudProjectData | null;
+} | null> {
+  if (!sessionToken) return null;
+  try {
+    const res = await fetch('/api/projects', {
+      headers: getTelegramAuthHeaders(sessionToken),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as {
+      ok?: boolean;
+      projects?: ProjectSummary[];
+      activeProject?: CloudProjectData | null;
+    };
+    return {
+      projects: Array.isArray(data.projects) ? data.projects : [],
+      activeProject: data.activeProject || null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function loadCloudProject(
+  projectId: string,
+  sessionToken?: string | null
+): Promise<CloudProjectData | null> {
+  if (!sessionToken || !projectId) return null;
+  try {
+    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}`, {
+      headers: getTelegramAuthHeaders(sessionToken),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { ok?: boolean; project?: CloudProjectData };
+    return data.project || null;
+  } catch {
+    return null;
+  }
+}
+
+export async function syncCloudProject(
+  payload: Omit<CloudProjectData, 'updatedAt'>,
+  sessionToken?: string | null
+): Promise<{ ok: boolean; project?: ProjectSummary; tooLarge?: boolean }> {
+  if (!sessionToken) return { ok: false };
+  try {
+    const bodyStr = JSON.stringify(payload);
+    if (bodyStr.length > MAX_PROJECT_SYNC_BYTES) {
+      return { ok: false, tooLarge: true };
+    }
+    const res = await fetch('/api/projects/sync', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...getTelegramAuthHeaders(sessionToken),
+      },
+      body: bodyStr,
+    });
+    if (!res.ok) return { ok: false };
+    const data = (await res.json()) as { ok?: boolean; project?: ProjectSummary };
+    return { ok: Boolean(data.ok), project: data.project };
+  } catch {
+    return { ok: false };
+  }
+}
+
+export async function deleteCloudProject(
+  projectId: string,
+  sessionToken?: string | null
+): Promise<boolean> {
+  if (!sessionToken || !projectId) return false;
+  try {
+    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}`, {
+      method: 'DELETE',
+      headers: getTelegramAuthHeaders(sessionToken),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function saveCloudProfile(
+  profile: UserProfile,
+  sessionToken?: string | null
+): Promise<boolean> {
+  if (!sessionToken) return false;
+  try {
+    const res = await fetch('/api/telegram/profile', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...getTelegramAuthHeaders(sessionToken),
+      },
+      body: JSON.stringify(profile),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
