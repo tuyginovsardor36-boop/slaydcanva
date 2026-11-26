@@ -77,6 +77,19 @@ export interface UserProfile {
 
 export type TolovgoPaymentMode = 'live' | 'test';
 
+export type StaffRole = 'super_admin' | 'manager' | 'user';
+
+export type ManagerPermission =
+  | 'overview'
+  | 'crm_events'
+  | 'users'
+  | 'balance'
+  | 'orders'
+  | 'pricing'
+  | 'promos'
+  | 'broadcast'
+  | 'settings';
+
 export interface TelegramUser {
   telegramId: string;
   chatId: string;
@@ -87,6 +100,9 @@ export interface TelegramUser {
   notifyOnActivity?: boolean;
   referralCount?: number;
   isAdmin?: boolean;
+  isManager?: boolean;
+  staffRole?: StaffRole;
+  managerPermissions?: ManagerPermission[];
   isBanned?: boolean;
 }
 
@@ -110,6 +126,15 @@ export interface AppPricingSettings {
   dailyReferralLimit: number;
 }
 
+export interface SiteConfigSettings {
+  maintenanceMode: boolean;
+  maintenanceMessage: string;
+  announcementBanner: string;
+  notifyNewUsersToStaff: boolean;
+  notifyPaymentsToStaff: boolean;
+  defaultAiModel: string;
+}
+
 export interface AdminOverviewStats {
   totalUsers: number;
   bannedUsers: number;
@@ -118,6 +143,10 @@ export interface AdminOverviewStats {
   totalPaidRevenue: number;
   totalReferrals: number;
   totalProjects: number;
+  activeManagers?: number;
+  unreadCrmEvents?: number;
+  todayRevenue?: number;
+  todayNewUsers?: number;
 }
 
 export interface AdminUserRow {
@@ -127,10 +156,17 @@ export interface AdminUserRow {
   lastName?: string;
   username?: string;
   fullName?: string;
+  contact?: string;
   balance: number;
   referralCount: number;
   referredBy?: string;
   isBanned: boolean;
+  projectCount?: number;
+  crmTag?: string;
+  crmNote?: string;
+  totalDeposited?: number;
+  totalSpent?: number;
+  createdAt?: number;
   updatedAt: number;
 }
 
@@ -150,9 +186,87 @@ export interface AdminAuditRow {
   actorId: string;
   action: string;
   targetId?: string;
+  amount?: number;
   amountDelta?: number;
   details?: string;
   createdAt: number;
+}
+
+export interface ManagerRecord {
+  telegramId: string;
+  firstName: string;
+  username?: string;
+  roleTitle: string;
+  permissions: ManagerPermission[];
+  hasPassword: boolean;
+  isActive: boolean;
+  notifyTelegram: boolean;
+  addedBy?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CrmEventRow {
+  id: string;
+  eventType:
+    | 'new_user'
+    | 'payment_paid'
+    | 'promo_redeemed'
+    | 'balance_adjusted'
+    | 'security_alert'
+    | 'broadcast_sent'
+    | 'manager_changed'
+    | 'user_banned';
+  title: string;
+  message: string;
+  userId?: string;
+  amount?: number;
+  isRead: boolean;
+  createdAt: number;
+}
+
+export interface PromoCodeRow {
+  code: string;
+  bonusAmount: number;
+  maxUses: number;
+  usedCount: number;
+  isActive: boolean;
+  expiresAt?: number | null;
+  createdBy?: string;
+  createdAt: number;
+}
+
+export interface BroadcastLogRow {
+  id: string;
+  actorId: string;
+  targetSegment: string;
+  message: string;
+  totalTargets: number;
+  sentCount: number;
+  failedCount: number;
+  createdAt: number;
+}
+
+export interface DailyAnalyticsPoint {
+  day: string;
+  newUsers: number;
+  paidRevenue: number;
+  paidOrders: number;
+  aiSpent: number;
+}
+
+export interface AdminAnalyticsPayload {
+  daily: DailyAnalyticsPoint[];
+  topSpenders: AdminUserRow[];
+  serviceBreakdown: Array<{ label: string; count: number; totalAmount: number }>;
+}
+
+export interface AdminUserDetailPayload {
+  user: AdminUserRow;
+  transactions: BalanceTransaction[];
+  orders: AdminOrderRow[];
+  projects: ProjectSummary[];
+  referrals: Array<{ inviteeId: string; inviterBonus: number; createdAt: number }>;
 }
 
 export interface SlaydCanvaState {
@@ -192,4 +306,3 @@ export interface CloudProjectData {
   tolovgoMode?: TolovgoPaymentMode;
   updatedAt: number;
 }
-

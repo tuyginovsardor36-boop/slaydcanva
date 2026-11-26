@@ -5,33 +5,55 @@ import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import {
   AppPricingSettings,
   DEFAULT_PRICING_SETTINGS,
+  DbBroadcastLog,
+  DbCrmEvent,
+  DbManagerPermission,
+  DbManagerRecord,
+  DbPromoCode,
   dbAdminAdjustBalance,
   dbAppendAuditLog,
+  dbAppendCrmEvent,
   dbApplyReferralBonus,
   dbChargeAiService,
   dbClaimAdminPasswordIfUnset,
   dbCreditTolovgoOrder,
+  dbDeleteManager,
+  dbDeletePromoCode,
   dbDeleteProject,
+  dbGetAdminAnalytics,
   dbGetAdminOverview,
   dbGetAuthNonce,
   dbGetDbStatus,
+  dbGetManagerById,
   dbGetOrCreateUser,
   dbGetPaymentOrder,
   dbGetProjectById,
   dbGetSetting,
+  dbGetUserDetailAdmin,
   dbListAuditLogs,
+  dbListBroadcastLogs,
+  dbListBroadcastTargets,
+  dbListCrmEvents,
+  dbListManagers,
   dbListOrdersAdmin,
   dbListProjects,
+  dbListPromoCodes,
   dbListUsersAdmin,
   dbLogActivity,
+  dbLogBroadcast,
+  dbMarkCrmEventsRead,
+  dbRedeemPromoCode,
   dbRefundAiCharge,
   dbSaveAuthNonce,
   dbSaveProject,
   dbSetSetting,
   dbSetUserBanned,
+  dbUpdateUserCrm,
   dbUpdateUserPreferences,
   dbUpdateUserProfile,
+  dbUpsertManager,
   dbUpsertPaymentOrder,
+  dbUpsertPromoCode,
   isNeonConfigured,
 } from '../lib/db.ts';
 
@@ -1500,9 +1522,28 @@ async function fetchRemoteTolovgoStatus(
   };
 }
 
+interface RawBodyRequest extends express.Request {
+  rawBody?: string;
+}
+
 const app = express();
-app.use(express.json({ limit: '5mb' }));
-app.use(express.urlencoded({ extended: false, limit: '1mb' }));
+app.use(
+  express.json({
+    limit: '5mb',
+    verify: (req, _res, buf) => {
+      (req as RawBodyRequest).rawBody = buf.toString('utf8');
+    },
+  })
+);
+app.use(
+  express.urlencoded({
+    extended: false,
+    limit: '1mb',
+    verify: (req, _res, buf) => {
+      (req as RawBodyRequest).rawBody = buf.toString('utf8');
+    },
+  })
+);
 
 // Restore original /api/* path when invoked via Vercel rewrite
 app.use((req, _res, next) => {
@@ -1548,6 +1589,11 @@ app.get('/api/images/search', async (req, res) => {
 app.post('/api/ai/canvas-draw', async (req, res) => {
   const trace: string[] = [];
   try {
+    const tgUser = getAuthenticatedTelegramUser(req);
+    if (!tgUser) {
+      res.status(401).json({ error: 'Avval Telegram orqali tizimga kiring.' });
+      return;
+    }
     const body = (req.body || {}) as {
       prompt?: string;
       styleHint?: string;
@@ -1642,9 +1688,30 @@ app.post('/api/ai/generate', async (req, res) => {
       typeof body.institution === 'string' ? body.institution.trim().slice(0, 160) : '';
     const subject = typeof body.subject === 'string' ? body.subject.trim().slice(0, 160) : '';
 
-    const pricing = await getEffectivePricingSettings();
+    const [pricing, siteConfig] = await Promise.all([
+      getEffectivePricingSettings(),
+      getEffectiveSiteConfig(),
+    ]);
     const tgUser = getAuthenticatedTelegramUser(req);
+    const staff = tgUser ? await resolveStaffAccess(tgUser.telegramId) : null;
+
+    if (siteConfig.maintenanceMode && !staff?.isStaff) {
+      res.status(503).json({
+        error:
+          siteConfig.maintenanceMessage ||
+          "Tizimda vaqtincha texnik ishlar olib borilmoqda. Birozdan so'ng urinib ko'ring.",
+      });
+      return;
+    }
+
     const serverPrice = calculateServerServicePrice(body, pricing);
+
+    if (serverPrice > 0 && !tgUser) {
+      res.status(401).json({
+        error: 'Xizmatdan foydalanish uchun avval Telegram orqali tizimga kiring.',
+      });
+      return;
+    }
 
     if (tgUser && serverPrice > 0) {
       const txId = `ai_${Date.now().toString(36)}_${crypto.randomBytes(3).toString('hex')}`;
@@ -2203,6 +2270,9 @@ Qoidalar:
 // =========================================================================
 const DEFAULT_PUBLIC_ORIGIN = 'https://slaydcanva.vercel.app';
 const SESSION_COOKIE_NAME = 'slaydcanva_session';
+const ADMIN_COOKIE_NAME = 'slaydcanva_admin_session';
+const FIFTEEN_DAYS_SEC = 15 * 24 * 60 * 60;
+const FIFTEEN_DAYS_MS = FIFTEEN_DAYS_SEC * 1000;
 const MAX_TG_DOCUMENT_BYTES = 3_200_000; // Fits safely under Vercel 4.5MB request limit after base64
 const MODULE_EPHEMERAL_SECRET = crypto.randomBytes(32);
 
@@ -2466,6 +2536,45 @@ function parseCookies(cookieHeader: string | undefined): Record<string, string> 
   return out;
 }
 
+function hasValidCookieCsrf(req: express.Request): boolean {
+  if (req.method === 'GET' || req.method === 'HEAD') return true;
+  const origin = req.get('origin');
+  const host = (req.get('x-forwarded-host') || req.get('host') || '').split(',')[0].trim();
+  if (origin) {
+    try {
+      const originHost = new URL(origin).host;
+      if (host && originHost !== host) return false;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  return req.get('x-requested-with') === 'SlaydCanva';
+}
+
+function appendHttpCookie(
+  req: express.Request,
+  res: express.Response,
+  name: string,
+  value: string,
+  maxAgeSec: number
+): void {
+  const isHttps =
+    req.secure ||
+    req.get('x-forwarded-proto') === 'https' ||
+    Boolean(process.env.VERCEL);
+
+  const cookieParts = [
+    `${name}=${value ? encodeURIComponent(value) : ''}`,
+    'Path=/',
+    'HttpOnly',
+    `Max-Age=${Math.max(0, Math.floor(maxAgeSec))}`,
+    isHttps ? 'SameSite=None' : 'SameSite=Lax',
+    ...(isHttps ? ['Secure', 'Partitioned'] : []),
+  ];
+  res.append('Set-Cookie', cookieParts.join('; '));
+}
+
 function getAuthenticatedTelegramUser(req: express.Request): TgUserProfile | null {
   const authHeader = req.get('authorization');
   let rawToken: string | undefined;
@@ -2481,20 +2590,8 @@ function getAuthenticatedTelegramUser(req: express.Request): TgUserProfile | nul
 
   if (!rawToken) return null;
 
-  // CSRF check if relying purely on cookie on mutating methods
-  if (usedCookie && req.method !== 'GET' && req.method !== 'HEAD') {
-    const origin = req.get('origin');
-    const host = (req.get('x-forwarded-host') || req.get('host') || '').split(',')[0].trim();
-    if (origin) {
-      try {
-        const originHost = new URL(origin).host;
-        if (host && originHost !== host) return null;
-      } catch {
-        return null;
-      }
-    } else if (req.get('x-requested-with') !== 'SlaydCanva') {
-      return null;
-    }
+  if (usedCookie && !hasValidCookieCsrf(req)) {
+    return null;
   }
 
   const payload = verifySignedToken(rawToken);
@@ -2526,40 +2623,33 @@ function issueSessionCookieAndToken(
       ln: user.lastName || '',
       un: user.username || '',
     },
-    30 * 24 * 60 * 60 * 1000
+    FIFTEEN_DAYS_MS
   );
+  appendHttpCookie(req, res, SESSION_COOKIE_NAME, token, FIFTEEN_DAYS_SEC);
+  return token;
+}
 
-  const isHttps =
-    req.secure ||
-    req.get('x-forwarded-proto') === 'https' ||
-    Boolean(process.env.VERCEL);
-
-  const cookieParts = [
-    `${SESSION_COOKIE_NAME}=${encodeURIComponent(token)}`,
-    'Path=/',
-    'HttpOnly',
-    `Max-Age=${30 * 24 * 60 * 60}`,
-    isHttps ? 'SameSite=None' : 'SameSite=Lax',
-    ...(isHttps ? ['Secure', 'Partitioned'] : []),
-  ];
-  res.setHeader('Set-Cookie', cookieParts.join('; '));
+function issueAdminCookieAndToken(
+  req: express.Request,
+  res: express.Response,
+  telegramId: string,
+  role: 'super_admin' | 'manager'
+): string {
+  const token = signToken(
+    { kind: 'admin_session', tid: telegramId, role },
+    FIFTEEN_DAYS_MS
+  );
+  appendHttpCookie(req, res, ADMIN_COOKIE_NAME, token, FIFTEEN_DAYS_SEC);
   return token;
 }
 
 function clearSessionCookie(req: express.Request, res: express.Response): void {
-  const isHttps =
-    req.secure ||
-    req.get('x-forwarded-proto') === 'https' ||
-    Boolean(process.env.VERCEL);
-  const cookieParts = [
-    `${SESSION_COOKIE_NAME}=`,
-    'Path=/',
-    'HttpOnly',
-    'Max-Age=0',
-    isHttps ? 'SameSite=None' : 'SameSite=Lax',
-    ...(isHttps ? ['Secure', 'Partitioned'] : []),
-  ];
-  res.setHeader('Set-Cookie', cookieParts.join('; '));
+  appendHttpCookie(req, res, SESSION_COOKIE_NAME, '', 0);
+  appendHttpCookie(req, res, ADMIN_COOKIE_NAME, '', 0);
+}
+
+function clearAdminCookie(req: express.Request, res: express.Response): void {
+  appendHttpCookie(req, res, ADMIN_COOKIE_NAME, '', 0);
 }
 
 function formatUzDate(d = new Date()): string {
@@ -2737,6 +2827,157 @@ async function savePaymentConfigSettings(tolovgoMode: 'live' | 'test'): Promise<
   ]);
 }
 
+const ALL_MANAGER_PERMISSIONS: DbManagerPermission[] = [
+  'overview',
+  'crm_events',
+  'users',
+  'balance',
+  'orders',
+  'pricing',
+  'promos',
+  'broadcast',
+  'settings',
+];
+
+interface SiteConfigSettings {
+  maintenanceMode: boolean;
+  maintenanceMessage: string;
+  announcementBanner: string;
+  notifyNewUsersToStaff: boolean;
+  notifyPaymentsToStaff: boolean;
+  defaultAiModel: string;
+}
+
+const DEFAULT_SITE_CONFIG: SiteConfigSettings = {
+  maintenanceMode: false,
+  maintenanceMessage: "Texnik yangilanishlar olib borilmoqda. Birozdan so'ng urinib ko'ring.",
+  announcementBanner: '',
+  notifyNewUsersToStaff: true,
+  notifyPaymentsToStaff: true,
+  defaultAiModel: 'google/gemini-2.5-flash',
+};
+
+async function getEffectiveSiteConfig(): Promise<SiteConfigSettings> {
+  const fromDb = await dbGetSetting<Partial<SiteConfigSettings>>('site_config');
+  const fromKv = !fromDb ? await kvGet<Partial<SiteConfigSettings>>('app_settings:site_config') : null;
+  const raw = fromDb || fromKv || {};
+  return {
+    maintenanceMode: Boolean(raw.maintenanceMode),
+    maintenanceMessage:
+      typeof raw.maintenanceMessage === 'string' && raw.maintenanceMessage.trim()
+        ? raw.maintenanceMessage.trim().slice(0, 300)
+        : DEFAULT_SITE_CONFIG.maintenanceMessage,
+    announcementBanner:
+      typeof raw.announcementBanner === 'string'
+        ? raw.announcementBanner.trim().slice(0, 240)
+        : '',
+    notifyNewUsersToStaff: raw.notifyNewUsersToStaff !== false,
+    notifyPaymentsToStaff: raw.notifyPaymentsToStaff !== false,
+    defaultAiModel:
+      typeof raw.defaultAiModel === 'string' && raw.defaultAiModel.trim()
+        ? raw.defaultAiModel.trim().slice(0, 100)
+        : DEFAULT_SITE_CONFIG.defaultAiModel,
+  };
+}
+
+async function saveSiteConfig(next: Partial<SiteConfigSettings>): Promise<SiteConfigSettings> {
+  const curr = await getEffectiveSiteConfig();
+  const clean: SiteConfigSettings = {
+    maintenanceMode: typeof next.maintenanceMode === 'boolean' ? next.maintenanceMode : curr.maintenanceMode,
+    maintenanceMessage:
+      typeof next.maintenanceMessage === 'string'
+        ? next.maintenanceMessage.trim().slice(0, 300)
+        : curr.maintenanceMessage,
+    announcementBanner:
+      typeof next.announcementBanner === 'string'
+        ? next.announcementBanner.trim().slice(0, 240)
+        : curr.announcementBanner,
+    notifyNewUsersToStaff:
+      typeof next.notifyNewUsersToStaff === 'boolean'
+        ? next.notifyNewUsersToStaff
+        : curr.notifyNewUsersToStaff,
+    notifyPaymentsToStaff:
+      typeof next.notifyPaymentsToStaff === 'boolean'
+        ? next.notifyPaymentsToStaff
+        : curr.notifyPaymentsToStaff,
+    defaultAiModel:
+      typeof next.defaultAiModel === 'string' && next.defaultAiModel.trim()
+        ? next.defaultAiModel.trim().slice(0, 100)
+        : curr.defaultAiModel,
+  };
+  await Promise.all([
+    dbSetSetting('site_config', clean),
+    kvSet('app_settings:site_config', clean),
+  ]);
+  return clean;
+}
+
+function getTolovgoWebhookSecret(): string | null {
+  return (
+    getCleanEnvKey(process.env.TOLOVGO_WEBHOOK_SECRET, 'MY_TOLOVGO_WEBHOOK_SECRET') ||
+    getCleanEnvKey(process.env.TOLOVGO_SIGNATURE_SECRET, 'MY_TOLOVGO_WEBHOOK_SECRET')
+  );
+}
+
+function verifyTolovgoWebhookSignature(
+  req: express.Request,
+  orderId: string,
+  rawBodyObj: Record<string, unknown>
+): { valid: boolean; configured: boolean; provided: boolean } {
+  const secret = getTolovgoWebhookSecret();
+  if (!secret) return { valid: true, configured: false, provided: false };
+
+  const headerSig =
+    req.get('x-tolovgo-signature') ||
+    req.get('x-signature') ||
+    req.get('x-webhook-signature') ||
+    req.get('x-hub-signature-256') ||
+    req.get('x-tolovgo-secret') ||
+    '';
+  const bodySig =
+    typeof rawBodyObj.signature === 'string'
+      ? rawBodyObj.signature
+      : typeof rawBodyObj.sign === 'string'
+        ? rawBodyObj.sign
+        : typeof req.query.signature === 'string'
+          ? req.query.signature
+          : typeof req.query.sign === 'string'
+            ? req.query.sign
+            : '';
+
+  const providedRaw = (headerSig || bodySig).trim().replace(/^sha256=/i, '');
+  if (!providedRaw) {
+    return { valid: false, configured: true, provided: false };
+  }
+
+  const rawBody = (req as RawBodyRequest).rawBody || JSON.stringify(rawBodyObj);
+  const amountStr = rawBodyObj.amount !== undefined ? String(rawBodyObj.amount) : '';
+  const statusStr = rawBodyObj.status !== undefined ? String(rawBodyObj.status) : '';
+
+  const candidates = new Set<string>();
+  candidates.add(secret);
+  const digestPayloads = [
+    rawBody,
+    orderId,
+    `${orderId}:${amountStr}`,
+    `${orderId}:${statusStr}:${amountStr}`,
+    `${orderId}${secret}`,
+  ];
+  for (const payload of digestPayloads) {
+    candidates.add(crypto.createHmac('sha256', secret).update(payload).digest('hex'));
+    candidates.add(crypto.createHmac('sha256', secret).update(payload).digest('base64'));
+    candidates.add(crypto.createHmac('sha256', secret).update(payload).digest('base64url'));
+    candidates.add(crypto.createHash('sha256').update(payload).digest('hex'));
+  }
+
+  for (const cand of candidates) {
+    if (safeTimingEqual(providedRaw.toLowerCase(), cand.toLowerCase())) {
+      return { valid: true, configured: true, provided: true };
+    }
+  }
+  return { valid: false, configured: true, provided: true };
+}
+
 function getAdminTelegramIds(): string[] {
   const raw = process.env.ADMIN_TELEGRAM_ID?.trim() || '';
   if (!raw) return [];
@@ -2750,6 +2991,49 @@ function isTelegramAdmin(telegramId: string): boolean {
   const ids = getAdminTelegramIds();
   if (!ids.length) return false;
   return ids.some((id) => safeTimingEqual(id, telegramId));
+}
+
+async function listManagersAll(): Promise<DbManagerRecord[]> {
+  const dbRows = await dbListManagers();
+  if (dbRows) return dbRows;
+  const kvRows = await kvGet<DbManagerRecord[]>('app_managers_list');
+  return Array.isArray(kvRows) ? kvRows : [];
+}
+
+async function getManagerRecord(telegramId: string): Promise<DbManagerRecord | null> {
+  const fromDb = await dbGetManagerById(telegramId);
+  if (fromDb) return fromDb;
+  const kvRows = await kvGet<DbManagerRecord[]>('app_managers_list');
+  if (!Array.isArray(kvRows)) return null;
+  return kvRows.find((m) => m.telegramId === telegramId) || null;
+}
+
+interface StaffAccessInfo {
+  isStaff: boolean;
+  role: 'super_admin' | 'manager' | 'user';
+  permissions: DbManagerPermission[];
+  managerRecord?: DbManagerRecord | null;
+}
+
+async function resolveStaffAccess(telegramId: string): Promise<StaffAccessInfo> {
+  if (isTelegramAdmin(telegramId)) {
+    return {
+      isStaff: true,
+      role: 'super_admin',
+      permissions: ALL_MANAGER_PERMISSIONS,
+      managerRecord: null,
+    };
+  }
+  const mgr = await getManagerRecord(telegramId);
+  if (mgr && mgr.isActive) {
+    return {
+      isStaff: true,
+      role: 'manager',
+      permissions: mgr.permissions.length > 0 ? mgr.permissions : ALL_MANAGER_PERMISSIONS,
+      managerRecord: mgr,
+    };
+  }
+  return { isStaff: false, role: 'user', permissions: [] };
 }
 
 function hashAdminPassword(password: string): string {
@@ -2805,37 +3089,186 @@ function clearAdminLoginFailures(telegramId: string): void {
   adminLoginAttempts.delete(telegramId);
 }
 
-function requireAdminTelegram(req: express.Request, res: express.Response): TgUserProfile | null {
+interface AuthenticatedStaffContext {
+  user: TgUserProfile;
+  staff: StaffAccessInfo;
+}
+
+async function requireStaffTelegram(
+  req: express.Request,
+  res: express.Response
+): Promise<AuthenticatedStaffContext | null> {
   const user = getAuthenticatedTelegramUser(req);
   if (!user) {
     res.status(401).json({ error: 'Avval Telegram orqali tizimga kiring.' });
     return null;
   }
-  if (!isTelegramAdmin(user.telegramId)) {
-    res.status(403).json({ error: 'Sizda admin huquqi mavjud emas.' });
+  const staff = await resolveStaffAccess(user.telegramId);
+  if (!staff.isStaff) {
+    res.status(403).json({ error: 'Sizda admin yoki menejer huquqi mavjud emas.' });
     return null;
   }
-  return user;
+  return { user, staff };
 }
 
-function requireAdminSession(req: express.Request, res: express.Response): TgUserProfile | null {
-  const user = requireAdminTelegram(req, res);
-  if (!user) return null;
-  const rawAdminToken = req.get('x-admin-token') || '';
-  const payload = verifySignedToken(rawAdminToken);
+function extractAdminTokenFromRequest(req: express.Request): {
+  token: string;
+  usedCookie: boolean;
+} {
+  const headerToken = (req.get('x-admin-token') || '').trim();
+  if (headerToken) return { token: headerToken, usedCookie: false };
+  const cookies = parseCookies(req.get('cookie'));
+  const cookieToken = (cookies[ADMIN_COOKIE_NAME] || '').trim();
+  return { token: cookieToken, usedCookie: Boolean(cookieToken) };
+}
+
+async function requireStaffSession(
+  req: express.Request,
+  res: express.Response,
+  requiredPerm?: DbManagerPermission | 'super_admin'
+): Promise<AuthenticatedStaffContext | null> {
+  const ctx = await requireStaffTelegram(req, res);
+  if (!ctx) return null;
+
+  const { token, usedCookie } = extractAdminTokenFromRequest(req);
+  if (usedCookie && !hasValidCookieCsrf(req)) {
+    res.status(403).json({ error: 'Xavfsizlik tekshiruvidan o‘tmadi.' });
+    return null;
+  }
+
+  const payload = verifySignedToken(token);
   if (
     !payload ||
     payload.kind !== 'admin_session' ||
     typeof payload.tid !== 'string' ||
-    !safeTimingEqual(payload.tid, user.telegramId)
+    !safeTimingEqual(payload.tid, ctx.user.telegramId)
   ) {
     res.status(401).json({
-      error: 'Admin maxfiy paroli bilan tasdiqlash talab qilinadi.',
+      error: 'Admin/Menejer maxfiy paroli bilan tasdiqlash talab qilinadi.',
       code: 'admin_password_required',
     });
     return null;
   }
-  return user;
+
+  if (requiredPerm === 'super_admin' && ctx.staff.role !== 'super_admin') {
+    res.status(403).json({ error: 'Bu amal faqat Super Admin uchun ruxsat etilgan.' });
+    return null;
+  }
+  if (
+    requiredPerm &&
+    requiredPerm !== 'super_admin' &&
+    ctx.staff.role !== 'super_admin' &&
+    !ctx.staff.permissions.includes(requiredPerm)
+  ) {
+    res.status(403).json({ error: `Sizda "${requiredPerm}" bo'limiga ruxsat yo'q.` });
+    return null;
+  }
+
+  return ctx;
+}
+
+async function recordCrmEventSafe(entry: Omit<DbCrmEvent, 'id' | 'isRead' | 'createdAt'> & { id?: string }): Promise<void> {
+  const id = entry.id || `crm_${Date.now().toString(36)}_${crypto.randomBytes(3).toString('hex')}`;
+  const full: DbCrmEvent = {
+    id,
+    eventType: entry.eventType,
+    title: entry.title,
+    message: entry.message,
+    userId: entry.userId,
+    amount: entry.amount,
+    isRead: false,
+    createdAt: Date.now(),
+  };
+  await dbAppendCrmEvent(full);
+  const existingKv = (await kvGet<DbCrmEvent[]>('app_crm_events')) || [];
+  const nextKv = [full, ...existingKv.filter((e) => e.id !== id)].slice(0, 80);
+  await kvSet('app_crm_events', nextKv);
+}
+
+async function notifyStaffTelegram(htmlMessage: string): Promise<void> {
+  if (!getTelegramBotToken()) return;
+  const adminIds = getAdminTelegramIds();
+  const managers = await listManagersAll();
+  const mgrIds = managers
+    .filter((m) => m.isActive && m.notifyTelegram)
+    .map((m) => m.telegramId);
+  const recipients = Array.from(new Set([...adminIds, ...mgrIds])).filter((id) => /^\d{3,20}$/.test(id));
+  if (!recipients.length) return;
+
+  await Promise.allSettled(
+    recipients.map((chatId) =>
+      telegramApi('sendMessage', {
+        chat_id: chatId,
+        text: htmlMessage,
+        parse_mode: 'HTML',
+      })
+    )
+  );
+}
+
+async function notifyNewUserToCrmAndStaff(
+  account: TgUserAccount,
+  inviterId?: string
+): Promise<void> {
+  if (!account.isNewUser) return;
+  const dedupeKey = `crm_newuser_notified:${account.telegramId}`;
+  const already = await kvGet<boolean>(dedupeKey);
+  if (already) return;
+  await kvSet(dedupeKey, true, 7 * 86400);
+
+  const display = [account.firstName, account.lastName].filter(Boolean).join(' ').trim();
+  const uname = account.username ? `@${account.username}` : 'usernamesiz';
+  const refText = inviterId ? ` · Referal: ID ${inviterId}` : '';
+
+  await recordCrmEventSafe({
+    id: `crm_newu_${account.telegramId}`,
+    eventType: 'new_user',
+    title: `Yangi foydalanuvchi: ${display}`,
+    message: `${display} (${uname}, ID: ${account.telegramId})${refText}`,
+    userId: account.telegramId,
+    amount: account.balance,
+  });
+
+  const siteCfg = await getEffectiveSiteConfig();
+  if (siteCfg.notifyNewUsersToStaff) {
+    await notifyStaffTelegram(
+      `🆕 <b>Yangi foydalanuvchi qo'shildi!</b>\n\n` +
+        `👤 Ism: <b>${escapeTgHtml(display)}</b> (${escapeTgHtml(uname)})\n` +
+        `🆔 ID: <code>${escapeTgHtml(account.telegramId)}</code>\n` +
+        `💰 Boshlang'ich balans: <b>${escapeTgHtml(formatSomServer(account.balance))}</b>` +
+        (inviterId ? `\n🤝 Taklif qildi: <code>${escapeTgHtml(inviterId)}</code>` : '')
+    );
+  }
+}
+
+async function notifyPaymentToCrmAndStaff(params: {
+  orderId: string;
+  telegramId: string;
+  amount: number;
+  method: string;
+  isTest: boolean;
+  source: string;
+}): Promise<void> {
+  const modeTag = params.isTest ? 'Sinov' : 'Haqiqiy';
+  await recordCrmEventSafe({
+    id: `crm_pay_${params.orderId}`,
+    eventType: 'payment_paid',
+    title: `To'lov tasdiqlandi: +${formatSomServer(params.amount)}`,
+    message: `Buyurtma #${params.orderId} · ID ${params.telegramId} · ${params.method} (${modeTag}) · ${params.source}`,
+    userId: params.telegramId,
+    amount: params.amount,
+  });
+
+  const siteCfg = await getEffectiveSiteConfig();
+  if (siteCfg.notifyPaymentsToStaff) {
+    await notifyStaffTelegram(
+      `💳 <b>Yangi TolovGo to'lovi qabul qilindi!</b>\n\n` +
+        `💵 Summa: <b>+${escapeTgHtml(formatSomServer(params.amount))}</b>\n` +
+        `🧾 Buyurtma: <code>#${escapeTgHtml(params.orderId)}</code>\n` +
+        `🆔 Foydalanuvchi: <code>${escapeTgHtml(params.telegramId)}</code>\n` +
+        `🏦 Usul: <b>${escapeTgHtml(params.method)}</b> (${modeTag})`
+    );
+  }
 }
 
 async function getTgUserAccount(
@@ -3286,6 +3719,7 @@ app.get('/api/payments/tolovgo/config', async (_req, res) => {
     defaultMode: activeMode,
     hasLiveKey,
     hasTestKey,
+    hasWebhookSecret: Boolean(getTolovgoWebhookSecret()),
     provider: 'TolovGo',
     currency: 'UZS',
   });
@@ -3481,6 +3915,7 @@ app.get('/api/payments/tolovgo/status/:orderId', async (req, res) => {
     // Never allow a test order to credit real balance when site is in live mode
     const allowCredit = !cred.isTest || activeMode === 'test';
 
+    let updatedBalance: number | undefined;
     let newlyCredited = false;
     if (remote.status === 'paid' && allowCredit) {
       const targetTgId = existing?.telegramId || tgUser?.telegramId;
@@ -3509,8 +3944,25 @@ app.get('/api/payments/tolovgo/status/:orderId', async (req, res) => {
               chatId: targetChatId,
             };
         await saveOrderRecord(rec);
+        const refreshed = await getTgUserAccount({
+          telegramId: targetTgId,
+          chatId: targetChatId,
+          firstName: tgUser?.firstName || 'Foydalanuvchi',
+        });
+        updatedBalance = refreshed.balance;
+
         if (newlyCredited) {
-          await notifyTelegramPaymentPaid(targetChatId, trustedAmount, orderId, cred.isTest);
+          await Promise.all([
+            notifyTelegramPaymentPaid(targetChatId, trustedAmount, orderId, cred.isTest),
+            notifyPaymentToCrmAndStaff({
+              orderId,
+              telegramId: targetTgId,
+              amount: trustedAmount,
+              method: existing?.method || 'TolovGo',
+              isTest: cred.isTest,
+              source: 'Status Poll',
+            }),
+          ]);
         }
       } else if (existing) {
         existing.status = 'paid';
@@ -3532,6 +3984,7 @@ app.get('/api/payments/tolovgo/status/:orderId', async (req, res) => {
       paid: remote.status === 'paid' && allowCredit,
       newlyCredited,
       amount: trustedAmount,
+      balance: updatedBalance,
     });
   } catch (err) {
     console.error('[TolovGo Status Error]', err);
@@ -3553,6 +4006,20 @@ app.all('/api/payments/tolovgo/callback', async (req, res) => {
     const orderId = String(rawOrderId).trim();
     if (!/^[a-zA-Z0-9_-]{1,64}$/.test(orderId)) {
       res.status(400).json({ ok: false, error: 'Invalid order_id' });
+      return;
+    }
+
+    // Verify TOLOVGO_WEBHOOK_SECRET signature if configured in environment
+    const sigCheck = verifyTolovgoWebhookSignature(req, orderId, body);
+    if (sigCheck.configured && !sigCheck.valid) {
+      await recordCrmEventSafe({
+        eventType: 'security_alert',
+        title: `TolovGo webhook signatura xatosi (#${orderId})`,
+        message: sigCheck.provided
+          ? `Buyurtma #${orderId} uchun noto'g'ri webhook signaturasi yuborildi.`
+          : `Buyurtma #${orderId} uchun webhook signaturasi yuborilmadi.`,
+      });
+      res.status(401).json({ ok: false, error: 'Invalid webhook signature' });
       return;
     }
 
@@ -3590,12 +4057,22 @@ app.all('/api/payments/tolovgo/callback', async (req, res) => {
         existing.credited = true;
         await saveOrderRecord(existing);
         if (wasNew) {
-          await notifyTelegramPaymentPaid(
-            existing.chatId,
-            trustedAmount,
-            orderId,
-            existing.isTest
-          );
+          await Promise.all([
+            notifyTelegramPaymentPaid(
+              existing.chatId,
+              trustedAmount,
+              orderId,
+              existing.isTest
+            ),
+            notifyPaymentToCrmAndStaff({
+              orderId,
+              telegramId: existing.telegramId,
+              amount: trustedAmount,
+              method: existing.method || 'TolovGo',
+              isTest: existing.isTest,
+              source: sigCheck.configured ? 'Webhook (Signatura tasdiqlangan)' : 'Webhook',
+            }),
+          ]);
         }
       } else {
         if (remote.status === 'paid' && allowCredit) existing.credited = true;
@@ -3614,7 +4091,7 @@ app.all('/api/payments/tolovgo/callback', async (req, res) => {
       await saveOrderRecord(rec);
     }
 
-    res.json({ ok: true, orderId, status: remote.status });
+    res.json({ ok: true, orderId, status: remote.status, signatureVerified: sigCheck.valid });
   } catch (err) {
     console.error('[TolovGo Callback Error]', err);
     res.status(500).json({ ok: false });
@@ -3635,8 +4112,11 @@ app.get('/api/db/status', async (_req, res) => {
 });
 
 app.get('/api/pricing', async (req, res) => {
-  const pricing = await getEffectivePricingSettings();
-  const tolovgoMode = await getEffectiveTolovgoMode();
+  const [pricing, tolovgoMode, siteConfig] = await Promise.all([
+    getEffectivePricingSettings(),
+    getEffectiveTolovgoMode(),
+    getEffectiveSiteConfig(),
+  ]);
   const origin = getPreferredPublicOrigin(req);
   const token = getTelegramBotToken();
   const botUsername = token ? await resolveTelegramBotUsername() : null;
@@ -3646,17 +4126,100 @@ app.get('/api/pricing', async (req, res) => {
     tolovgoMode,
     botUsername,
     tolovgoCallbackUrl: `${origin}/api/payments/tolovgo/callback`,
+    siteConfig,
   });
 });
 
+// Promo code redemption (authenticated users)
+app.post('/api/promo/redeem', async (req, res) => {
+  const user = getAuthenticatedTelegramUser(req);
+  if (!user) {
+    res.status(401).json({ error: 'Promokod ishlatish uchun avval Telegram orqali kiring.' });
+    return;
+  }
+  const code =
+    typeof req.body?.code === 'string'
+      ? req.body.code.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '').slice(0, 32)
+      : '';
+  if (!code || code.length < 3) {
+    res.status(400).json({ error: "Promokod kamida 3 ta belgidan iborat bo'lishi kerak." });
+    return;
+  }
+
+  const account = await getTgUserAccount(user);
+  if (account.isBanned) {
+    res.status(403).json({ error: 'Hisobingiz administrator tomonidan bloklangan.' });
+    return;
+  }
+
+  const dbRes = await dbRedeemPromoCode({
+    code,
+    telegramId: user.telegramId,
+    dateLabel: formatUzDate(),
+  });
+
+  if (dbRes === null) {
+    // KV fallback
+    const promos = (await kvGet<DbPromoCode[]>('app_promo_codes')) || [];
+    const found = promos.find((p) => p.code === code);
+    if (!found || !found.isActive || found.usedCount >= found.maxUses) {
+      res.status(400).json({ error: "Promokod topilmadi, faol emas yoki limiti to'lgan." });
+      return;
+    }
+    const usedKey = `promo_used:${code}:${user.telegramId}`;
+    if (await kvGet<boolean>(usedKey)) {
+      res.status(400).json({ error: 'Siz bu promokoddan allaqachon foydalangansiz.' });
+      return;
+    }
+    await kvSet(usedKey, true);
+    found.usedCount += 1;
+    await kvSet('app_promo_codes', promos);
+    account.balance += found.bonusAmount;
+    account.transactions.unshift({
+      id: `promo_${code}_${user.telegramId}`,
+      title: `Promokod: ${code}`,
+      method: 'Promokod',
+      amount: found.bonusAmount,
+      date: formatUzDate(),
+    });
+    await saveTgUserAccount(account);
+    await recordCrmEventSafe({
+      eventType: 'promo_redeemed',
+      title: `Promokod ishlatildi: ${code}`,
+      message: `${user.firstName} (${user.telegramId}) +${formatSomServer(found.bonusAmount)} oldi`,
+      userId: user.telegramId,
+      amount: found.bonusAmount,
+    });
+    res.json({ ok: true, bonusAmount: found.bonusAmount, balance: account.balance });
+    return;
+  }
+
+  if (!dbRes.ok) {
+    res.status(400).json({ error: dbRes.error });
+    return;
+  }
+
+  await recordCrmEventSafe({
+    eventType: 'promo_redeemed',
+    title: `Promokod ishlatildi: ${code}`,
+    message: `${user.firstName} (${user.telegramId}) +${formatSomServer(dbRes.bonusAmount)} oldi`,
+    userId: user.telegramId,
+    amount: dbRes.bonusAmount,
+  });
+
+  res.json({ ok: true, bonusAmount: dbRes.bonusAmount, balance: dbRes.balance });
+});
+
 // =========================================================================
-// Admin Panel & Security Routes (ADMIN_TELEGRAM_ID + scrypt Password Auth)
+// Admin & Manager Panel CRM Routes (15-Day Cookie + RBAC + 20 Systems)
 // =========================================================================
 app.get('/api/admin/status', async (req, res) => {
-  const user = requireAdminTelegram(req, res);
-  if (!user) return;
+  const ctx = await requireStaffTelegram(req, res);
+  if (!ctx) return;
+
+  const { user, staff } = ctx;
   const storedHash = await getAdminPasswordHash();
-  const rawAdminToken = req.get('x-admin-token') || '';
+  const { token: rawAdminToken } = extractAdminTokenFromRequest(req);
   const adminPayload = verifySignedToken(rawAdminToken);
   const adminUnlocked = Boolean(
     adminPayload &&
@@ -3665,19 +4228,34 @@ app.get('/api/admin/status', async (req, res) => {
       safeTimingEqual(adminPayload.tid, user.telegramId)
   );
   const origin = getPreferredPublicOrigin(req);
+
+  const passwordRequiredForManager =
+    staff.role === 'manager'
+      ? Boolean(staff.managerRecord?.hasPassword || storedHash)
+      : Boolean(storedHash);
+
   res.json({
     ok: true,
-    isAdmin: true,
-    passwordConfigured: Boolean(storedHash),
+    isAdmin: staff.role === 'super_admin',
+    isManager: staff.role === 'manager',
+    staffRole: staff.role,
+    permissions: staff.permissions,
+    passwordConfigured: passwordRequiredForManager,
     adminUnlocked,
+    adminToken: adminUnlocked ? rawAdminToken : undefined,
     tolovgoCallbackUrl: `${origin}/api/payments/tolovgo/callback`,
     telegramWebhookUrl: `${origin}/api/telegram/webhook`,
   });
 });
 
 app.post('/api/admin/setup-password', async (req, res) => {
-  const user = requireAdminTelegram(req, res);
-  if (!user) return;
+  const ctx = await requireStaffTelegram(req, res);
+  if (!ctx) return;
+  if (ctx.staff.role !== 'super_admin') {
+    res.status(403).json({ error: "Birinchi parolni faqat Super Admin o'rnata oladi." });
+    return;
+  }
+
   const password = typeof req.body?.password === 'string' ? req.body.password : '';
   if (password.length < 8 || password.length > 128) {
     res.status(400).json({ error: "Parol kamida 8 ta belgidan iborat bo'lishi kerak." });
@@ -3703,37 +4281,44 @@ app.post('/api/admin/setup-password', async (req, res) => {
 
   await dbAppendAuditLog({
     id: `aud_adm_setup_${Date.now().toString(36)}`,
-    actorId: user.telegramId,
+    actorId: ctx.user.telegramId,
     action: 'admin_password_setup',
     details: "1-marta kirishda admin maxfiy paroli o'rnatildi",
   });
 
-  const adminToken = signToken(
-    { kind: 'admin_session', tid: user.telegramId },
-    4 * 60 * 60 * 1000
-  );
-  res.json({ ok: true, adminToken });
+  const adminToken = issueAdminCookieAndToken(req, res, ctx.user.telegramId, 'super_admin');
+  res.json({ ok: true, adminToken, staffRole: 'super_admin', permissions: ctx.staff.permissions });
 });
 
 app.post('/api/admin/login', async (req, res) => {
-  const user = requireAdminTelegram(req, res);
-  if (!user) return;
+  const ctx = await requireStaffTelegram(req, res);
+  if (!ctx) return;
+  const { user, staff } = ctx;
 
   if (!checkAdminLoginAllowed(user.telegramId)) {
     res.status(429).json({ error: "Juda ko'p noto'g'ri urinish. 15 daqiqadan so'ng urinib ko'ring." });
     return;
   }
 
-  const storedHash = await getAdminPasswordHash();
-  if (!storedHash) {
+  const password = typeof req.body?.password === 'string' ? req.body.password : '';
+  const globalHash = await getAdminPasswordHash();
+  const mgrHash = staff.managerRecord?.passwordHash || null;
+
+  if (staff.role === 'super_admin' && !globalHash) {
     res.status(409).json({ error: "Hali admin paroli o'rnatilmagan.", code: 'password_not_set' });
     return;
   }
 
-  const password = typeof req.body?.password === 'string' ? req.body.password : '';
-  if (!verifyAdminPassword(password, storedHash)) {
+  let valid = false;
+  if (staff.role === 'manager' && mgrHash) {
+    valid = verifyAdminPassword(password, mgrHash);
+  } else if (globalHash) {
+    valid = verifyAdminPassword(password, globalHash);
+  }
+
+  if (!valid) {
     recordAdminLoginFailure(user.telegramId);
-    res.status(401).json({ error: "Maxfiy admin paroli noto'g'ri." });
+    res.status(401).json({ error: "Maxfiy panel paroli noto'g'ri." });
     return;
   }
 
@@ -3741,20 +4326,32 @@ app.post('/api/admin/login', async (req, res) => {
   await dbAppendAuditLog({
     id: `aud_adm_login_${Date.now().toString(36)}`,
     actorId: user.telegramId,
-    action: 'admin_login',
-    details: 'Admin panelga muvaffaqiyatli kirildi',
+    action: staff.role === 'manager' ? 'manager_login' : 'admin_login',
+    details: `${staff.role === 'manager' ? 'Menejer' : 'Admin'} panelga 15 kunlik sessiya bilan kirdi`,
   });
 
-  const adminToken = signToken(
-    { kind: 'admin_session', tid: user.telegramId },
-    4 * 60 * 60 * 1000
+  const adminToken = issueAdminCookieAndToken(
+    req,
+    res,
+    user.telegramId,
+    staff.role === 'manager' ? 'manager' : 'super_admin'
   );
-  res.json({ ok: true, adminToken });
+  res.json({
+    ok: true,
+    adminToken,
+    staffRole: staff.role,
+    permissions: staff.permissions,
+  });
+});
+
+app.post('/api/admin/logout', (req, res) => {
+  clearAdminCookie(req, res);
+  res.json({ ok: true });
 });
 
 app.post('/api/admin/change-password', async (req, res) => {
-  const user = requireAdminSession(req, res);
-  if (!user) return;
+  const ctx = await requireStaffSession(req, res, 'super_admin');
+  if (!ctx) return;
 
   const currentPassword = typeof req.body?.currentPassword === 'string' ? req.body.currentPassword : '';
   const newPassword = typeof req.body?.newPassword === 'string' ? req.body.newPassword : '';
@@ -3777,7 +4374,7 @@ app.post('/api/admin/change-password', async (req, res) => {
 
   await dbAppendAuditLog({
     id: `aud_adm_pwd_${Date.now().toString(36)}`,
-    actorId: user.telegramId,
+    actorId: ctx.user.telegramId,
     action: 'admin_password_changed',
     details: 'Admin paroli yangilandi',
   });
@@ -3786,27 +4383,35 @@ app.post('/api/admin/change-password', async (req, res) => {
 });
 
 app.get('/api/admin/overview', async (req, res) => {
-  const user = requireAdminSession(req, res);
-  if (!user) return;
+  const ctx = await requireStaffSession(req, res);
+  if (!ctx) return;
 
-  const [overview, orders, auditLogs, pricing, tolovgoMode, dbStatus] = await Promise.all([
-    dbGetAdminOverview(),
-    dbListOrdersAdmin(40),
-    dbListAuditLogs(40),
-    getEffectivePricingSettings(),
-    getEffectiveTolovgoMode(),
-    dbGetDbStatus(),
-  ]);
+  const [overview, orders, auditLogs, pricing, tolovgoMode, dbStatus, siteConfig, managers, crmEvents] =
+    await Promise.all([
+      dbGetAdminOverview(),
+      dbListOrdersAdmin(60),
+      dbListAuditLogs(60),
+      getEffectivePricingSettings(),
+      getEffectiveTolovgoMode(),
+      dbGetDbStatus(),
+      getEffectiveSiteConfig(),
+      listManagersAll(),
+      dbListCrmEvents(50),
+    ]);
 
+  const kvCrm = !crmEvents ? (await kvGet<DbCrmEvent[]>('app_crm_events')) || [] : crmEvents;
   const hasLiveKey = Boolean(
     getCleanEnvKey(process.env.TOLOVGO_API_KEY, 'MY_TOLOVGO_API_KEY') ||
       getCleanEnvKey(process.env.TOLOVGO_KEY, 'MY_TOLOVGO_API_KEY')
   );
   const hasTestKey = Boolean(getCleanEnvKey(process.env.TOLOVGO_TEST_API, 'MY_TOLOVGO_TEST_API'));
+  const hasWebhookSecret = Boolean(getTolovgoWebhookSecret());
   const origin = getPreferredPublicOrigin(req);
 
   res.json({
     ok: true,
+    staffRole: ctx.staff.role,
+    permissions: ctx.staff.permissions,
     overview: overview || {
       totalUsers: 0,
       bannedUsers: 0,
@@ -3815,13 +4420,21 @@ app.get('/api/admin/overview', async (req, res) => {
       totalPaidRevenue: 0,
       totalReferrals: 0,
       totalProjects: 0,
+      activeManagers: managers.filter((m) => m.isActive).length,
+      unreadCrmEvents: kvCrm.filter((e) => !e.isRead).length,
+      todayRevenue: 0,
+      todayNewUsers: 0,
     },
-    orders: orders || Array.from(tolovgoOrders.values()).slice(0, 40),
+    orders: orders || Array.from(tolovgoOrders.values()).slice(0, 60),
     auditLogs: auditLogs || [],
     pricing,
     tolovgoMode,
+    siteConfig,
+    managers: managers.map((m) => ({ ...m, passwordHash: undefined })),
+    crmEvents: kvCrm,
     hasLiveKey,
     hasTestKey,
+    hasWebhookSecret,
     neonConfigured: dbStatus.configured,
     tablesReady: dbStatus.ready,
     tolovgoCallbackUrl: `${origin}/api/payments/tolovgo/callback`,
@@ -3829,17 +4442,269 @@ app.get('/api/admin/overview', async (req, res) => {
   });
 });
 
+app.get('/api/admin/analytics', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'overview');
+  if (!ctx) return;
+  const days = Math.min(30, Math.max(7, Number(req.query.days) || 14));
+  const data = await dbGetAdminAnalytics(days);
+  res.json({
+    ok: true,
+    analytics: data || { daily: [], topSpenders: [], serviceBreakdown: [] },
+  });
+});
+
+app.get('/api/admin/crm-events', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'crm_events');
+  if (!ctx) return;
+  const events = (await dbListCrmEvents(80)) || (await kvGet<DbCrmEvent[]>('app_crm_events')) || [];
+  res.json({ ok: true, events });
+});
+
+app.post('/api/admin/crm-events/read', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'crm_events');
+  if (!ctx) return;
+  const ids = Array.isArray(req.body?.ids) ? (req.body.ids as string[]).map(String) : undefined;
+  await dbMarkCrmEventsRead(ids);
+  const kvEvents = (await kvGet<DbCrmEvent[]>('app_crm_events')) || [];
+  if (kvEvents.length > 0) {
+    const idSet = ids ? new Set(ids) : null;
+    await kvSet(
+      'app_crm_events',
+      kvEvents.map((e) => (!idSet || idSet.has(e.id) ? { ...e, isRead: true } : e))
+    );
+  }
+  res.json({ ok: true });
+});
+
+app.get('/api/admin/managers', async (req, res) => {
+  const ctx = await requireStaffSession(req, res);
+  if (!ctx) return;
+  const managers = await listManagersAll();
+  res.json({
+    ok: true,
+    managers: managers.map((m) => ({ ...m, passwordHash: undefined })),
+  });
+});
+
+app.post('/api/admin/managers', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'super_admin');
+  if (!ctx) return;
+
+  const tid = String(req.body?.telegramId || '').trim();
+  if (!/^\d{3,20}$/.test(tid)) {
+    res.status(400).json({ error: "Menejer Telegram ID raqami noto'g'ri (masalan: 123456789)." });
+    return;
+  }
+  if (isTelegramAdmin(tid)) {
+    res.status(400).json({ error: 'Bu ID allaqachon Super Admin hisoblanadi.' });
+    return;
+  }
+
+  const firstName =
+    typeof req.body?.firstName === 'string' && req.body.firstName.trim()
+      ? req.body.firstName.trim().slice(0, 60)
+      : `Menejer ${tid.slice(-4)}`;
+  const username =
+    typeof req.body?.username === 'string' && req.body.username.trim()
+      ? req.body.username.trim().replace(/^@+/, '').slice(0, 50)
+      : undefined;
+  const roleTitle =
+    typeof req.body?.roleTitle === 'string' && req.body.roleTitle.trim()
+      ? req.body.roleTitle.trim().slice(0, 40)
+      : 'CRM Menejer';
+  const rawPerms = Array.isArray(req.body?.permissions) ? req.body.permissions : ALL_MANAGER_PERMISSIONS;
+  const permissions = rawPerms.filter((p: unknown): p is DbManagerPermission =>
+    ALL_MANAGER_PERMISSIONS.includes(p as DbManagerPermission)
+  );
+  const rawPwd = typeof req.body?.password === 'string' ? req.body.password.trim() : '';
+  if (rawPwd && (rawPwd.length < 6 || rawPwd.length > 128)) {
+    res.status(400).json({ error: "Menejer paroli kamida 6 ta belgidan iborat bo'lishi kerak." });
+    return;
+  }
+  const passwordHash = rawPwd ? hashAdminPassword(rawPwd) : undefined;
+  const isActive = req.body?.isActive !== false;
+  const notifyTelegram = req.body?.notifyTelegram !== false;
+
+  const saved = await dbUpsertManager({
+    telegramId: tid,
+    firstName,
+    username,
+    roleTitle,
+    permissions: permissions.length ? permissions : ['overview', 'crm_events', 'users', 'orders'],
+    passwordHash,
+    isActive,
+    notifyTelegram,
+    addedBy: ctx.user.telegramId,
+  });
+
+  const existingKv = (await kvGet<DbManagerRecord[]>('app_managers_list')) || [];
+  const prevKv = existingKv.find((m) => m.telegramId === tid);
+  const nextRecord: DbManagerRecord = saved
+    ? { ...saved, passwordHash: passwordHash ?? prevKv?.passwordHash }
+    : {
+        telegramId: tid,
+        firstName,
+        username,
+        roleTitle,
+        permissions: permissions.length ? permissions : ['overview', 'crm_events', 'users', 'orders'],
+        passwordHash: passwordHash ?? prevKv?.passwordHash,
+        hasPassword: Boolean(passwordHash ?? prevKv?.passwordHash),
+        isActive,
+        notifyTelegram,
+        addedBy: ctx.user.telegramId,
+        createdAt: prevKv?.createdAt || Date.now(),
+        updatedAt: Date.now(),
+      };
+  await kvSet('app_managers_list', [
+    nextRecord,
+    ...existingKv.filter((m) => m.telegramId !== tid),
+  ]);
+
+  await Promise.all([
+    dbAppendAuditLog({
+      id: `aud_mgr_${Date.now().toString(36)}`,
+      actorId: ctx.user.telegramId,
+      action: 'admin_manager_upsert',
+      targetId: tid,
+      details: `Menejer ${firstName} (${isActive ? 'Faol' : 'O‘chirilgan'})`,
+    }),
+    recordCrmEventSafe({
+      eventType: 'manager_changed',
+      title: `Menejer yangilandi: ${firstName}`,
+      message: `ID ${tid} · Lavozim: ${roleTitle} · Holat: ${isActive ? 'Faol' : 'Nofaol'}`,
+      userId: tid,
+    }),
+  ]);
+
+  if (notifyTelegram && isActive && getTelegramBotToken()) {
+    await telegramApi('sendMessage', {
+      chat_id: tid,
+      text:
+        `🛡 <b>Siz SlaydCanva CRM Menejer etib tayinlandingiz!</b>\n\n` +
+        `👤 Lavozim: <b>${escapeTgHtml(roleTitle)}</b>\n` +
+        `Endi saytda Admin/Menejer paneliga kirishingiz va Telegram orqali yangi foydalanuvchi hamda to'lov bildirishnomalarini qabul qilishingiz mumkin.`,
+      parse_mode: 'HTML',
+    }).catch(() => {});
+  }
+
+  res.json({ ok: true, manager: { ...nextRecord, passwordHash: undefined } });
+});
+
+app.delete('/api/admin/managers/:id', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'super_admin');
+  if (!ctx) return;
+  const tid = String(req.params.id || '').trim();
+  if (!/^\d{3,20}$/.test(tid)) {
+    res.status(400).json({ error: "Noto'g'ri menejer ID." });
+    return;
+  }
+  await dbDeleteManager(tid);
+  const existingKv = (await kvGet<DbManagerRecord[]>('app_managers_list')) || [];
+  await kvSet(
+    'app_managers_list',
+    existingKv.filter((m) => m.telegramId !== tid)
+  );
+  await dbAppendAuditLog({
+    id: `aud_mgr_del_${Date.now().toString(36)}`,
+    actorId: ctx.user.telegramId,
+    action: 'admin_manager_deleted',
+    targetId: tid,
+    details: `Menejer ID ${tid} o'chirildi`,
+  });
+  res.json({ ok: true });
+});
+
 app.get('/api/admin/users', async (req, res) => {
-  const user = requireAdminSession(req, res);
-  if (!user) return;
+  const ctx = await requireStaffSession(req, res, 'users');
+  if (!ctx) return;
   const search = typeof req.query.q === 'string' ? req.query.q : '';
-  const users = await dbListUsersAdmin(search, 120);
+  const users = await dbListUsersAdmin(search, 180);
   res.json({ ok: true, users: users || [] });
 });
 
+app.get('/api/admin/users/:id/detail', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'users');
+  if (!ctx) return;
+  const tid = String(req.params.id || '').trim();
+  if (!/^\d{3,20}$/.test(tid)) {
+    res.status(400).json({ error: "Noto'g'ri foydalanuvchi ID." });
+    return;
+  }
+  const detail = await dbGetUserDetailAdmin(tid);
+  if (!detail) {
+    res.status(404).json({ error: "Foydalanuvchi ma'lumotlari topilmadi." });
+    return;
+  }
+  res.json({ ok: true, detail });
+});
+
+app.post('/api/admin/users/:id/crm', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'users');
+  if (!ctx) return;
+  const tid = String(req.params.id || '').trim();
+  if (!/^\d{3,20}$/.test(tid)) {
+    res.status(400).json({ error: "Noto'g'ri foydalanuvchi ID." });
+    return;
+  }
+  const crmTag = typeof req.body?.crmTag === 'string' ? req.body.crmTag.trim().slice(0, 32) : '';
+  const crmNote = typeof req.body?.crmNote === 'string' ? req.body.crmNote.trim().slice(0, 500) : '';
+  const ok = await dbUpdateUserCrm(tid, crmTag, crmNote);
+  if (!ok) {
+    res.status(404).json({ error: 'Foydalanuvchi topilmadi.' });
+    return;
+  }
+  await dbAppendAuditLog({
+    id: `aud_crm_${Date.now().toString(36)}`,
+    actorId: ctx.user.telegramId,
+    action: 'staff_crm_note_updated',
+    targetId: tid,
+    details: `Teg: ${crmTag || '—'} · Izoh yangilandi`,
+  });
+  res.json({ ok: true, crmTag, crmNote });
+});
+
+app.post('/api/admin/users/:id/message', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'users');
+  if (!ctx) return;
+  const tid = String(req.params.id || '').trim();
+  if (!/^\d{3,20}$/.test(tid)) {
+    res.status(400).json({ error: "Noto'g'ri foydalanuvchi ID." });
+    return;
+  }
+  const rawText = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+  if (!rawText) {
+    res.status(400).json({ error: "Xabar matnini kiriting." });
+    return;
+  }
+  if (!getTelegramBotToken()) {
+    res.status(503).json({ error: 'TELEGRAM_BOT_TOKEN sozlanmagan.' });
+    return;
+  }
+
+  const sent = await telegramApi('sendMessage', {
+    chat_id: tid,
+    text: `💬 <b>SlaydCanva Qo'llab-quvvatlash xizmati</b>\n\n${escapeTgHtml(rawText.slice(0, 1500))}`,
+    parse_mode: 'HTML',
+  });
+  if (!sent.ok) {
+    res.status(502).json({ error: sent.description || 'Telegram xabar yuborilmadi.' });
+    return;
+  }
+
+  await dbAppendAuditLog({
+    id: `aud_dm_${Date.now().toString(36)}`,
+    actorId: ctx.user.telegramId,
+    action: 'staff_direct_message',
+    targetId: tid,
+    details: rawText.slice(0, 140),
+  });
+  res.json({ ok: true });
+});
+
 app.post('/api/admin/users/:id/balance', async (req, res) => {
-  const admin = requireAdminSession(req, res);
-  if (!admin) return;
+  const ctx = await requireStaffSession(req, res, 'balance');
+  if (!ctx) return;
+  const admin = ctx.user;
   const targetId = String(req.params.id || '').trim();
   if (!/^\d{3,20}$/.test(targetId)) {
     res.status(400).json({ error: "Noto'g'ri Telegram foydalanuvchi ID." });
@@ -3852,12 +4717,13 @@ app.post('/api/admin/users/:id/balance', async (req, res) => {
     return;
   }
 
+  const actorLabel = ctx.staff.role === 'manager' ? 'Menejer' : 'Admin';
   const reason =
     typeof req.body?.reason === 'string' && req.body.reason.trim()
       ? req.body.reason.trim().slice(0, 140)
       : rawDelta > 0
-        ? "Admin tomonidan balans to'ldirildi"
-        : 'Admin tomonidan balans tuzatildi';
+        ? `${actorLabel} tomonidan balans to'ldirildi`
+        : `${actorLabel} tomonidan balans tuzatildi`;
 
   const result = await dbAdminAdjustBalance({
     adminId: admin.telegramId,
@@ -3878,21 +4744,36 @@ app.post('/api/admin/users/:id/balance', async (req, res) => {
     existing.transactions.unshift({
       id: `adm_${Date.now().toString(36)}`,
       title: reason,
-      method: 'Admin',
+      method: actorLabel,
       amount: rawDelta,
       date: formatUzDate(),
     });
     await saveTgUserAccount(existing);
+    await recordCrmEventSafe({
+      eventType: 'balance_adjusted',
+      title: `Balans o'zgartirildi: ${rawDelta > 0 ? '+' : '-'}${formatSomServer(Math.abs(rawDelta))}`,
+      message: `${actorLabel} (${admin.telegramId}) -> ID ${targetId} · ${reason}`,
+      userId: targetId,
+      amount: rawDelta,
+    });
     res.json({ ok: true, balance: existing.balance });
     return;
   }
+
+  await recordCrmEventSafe({
+    eventType: 'balance_adjusted',
+    title: `Balans o'zgartirildi: ${rawDelta > 0 ? '+' : '-'}${formatSomServer(Math.abs(rawDelta))}`,
+    message: `${actorLabel} (${admin.telegramId}) -> ID ${targetId} · ${reason}`,
+    userId: targetId,
+    amount: rawDelta,
+  });
 
   if (req.body?.notify !== false && result.chatId && getTelegramBotToken()) {
     const sign = rawDelta > 0 ? '+' : '-';
     await telegramApi('sendMessage', {
       chat_id: result.chatId,
       text:
-        `💳 <b>Balans yangilandi (Admin)</b>\n\n` +
+        `💳 <b>Balans yangilandi (${actorLabel})</b>\n\n` +
         `💵 O'zgarish: <b>${sign}${escapeTgHtml(formatSomServer(Math.abs(rawDelta)))}</b>\n` +
         `📝 Izoh: ${escapeTgHtml(reason)}\n` +
         `💰 Yangi balans: <b>${escapeTgHtml(formatSomServer(result.balance))}</b>`,
@@ -3904,11 +4785,12 @@ app.post('/api/admin/users/:id/balance', async (req, res) => {
 });
 
 app.post('/api/admin/users/:id/ban', async (req, res) => {
-  const admin = requireAdminSession(req, res);
-  if (!admin) return;
+  const ctx = await requireStaffSession(req, res, 'users');
+  if (!ctx) return;
+  const admin = ctx.user;
   const targetId = String(req.params.id || '').trim();
-  if (!/^\d{3,20}$/.test(targetId) || targetId === admin.telegramId) {
-    res.status(400).json({ error: "Noto'g'ri foydalanuvchi ID." });
+  if (!/^\d{3,20}$/.test(targetId) || targetId === admin.telegramId || isTelegramAdmin(targetId)) {
+    res.status(400).json({ error: "Noto'g'ri foydalanuvchi ID yoki Adminni bloklab bo'lmaydi." });
     return;
   }
   const isBanned = Boolean(req.body?.isBanned);
@@ -3923,23 +4805,101 @@ app.post('/api/admin/users/:id/ban', async (req, res) => {
     existing.isBanned = isBanned;
     await saveTgUserAccount(existing);
   }
+  await recordCrmEventSafe({
+    eventType: 'user_banned',
+    title: isBanned ? `Foydalanuvchi bloklandi` : `Foydalanuvchi blokdan chiqarildi`,
+    message: `ID ${targetId} · Bajaruvchi: ${admin.telegramId}`,
+    userId: targetId,
+  });
   res.json({ ok: true, isBanned });
 });
 
 app.get('/api/admin/orders', async (req, res) => {
-  const admin = requireAdminSession(req, res);
-  if (!admin) return;
-  const orders = await dbListOrdersAdmin(120);
+  const ctx = await requireStaffSession(req, res, 'orders');
+  if (!ctx) return;
+  const orders = await dbListOrdersAdmin(150);
   res.json({ ok: true, orders: orders || Array.from(tolovgoOrders.values()) });
 });
 
+app.post('/api/admin/orders/verify', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'orders');
+  if (!ctx) return;
+  const orderId = String(req.body?.orderId || '').trim();
+  if (!/^[a-zA-Z0-9_-]{1,64}$/.test(orderId)) {
+    res.status(400).json({ error: "Noto'g'ri buyurtma raqami." });
+    return;
+  }
+  const existing = await loadOrderRecord(orderId);
+  const activeMode = await getEffectiveTolovgoMode();
+  const orderIsTest = existing ? existing.isTest : activeMode === 'test';
+  const cred = resolveTolovgoCredential(orderIsTest ? 'test' : 'live');
+  if (!cred) {
+    res.status(503).json({ error: 'TOLOVGO_API_KEY yoki TOLOVGO_TEST_API sozlanmagan.' });
+    return;
+  }
+
+  try {
+    const remote = await fetchRemoteTolovgoStatus(orderId, cred.apiKey);
+    const trustedAmount = existing?.amount ?? remote.amount ?? 0;
+    const allowCredit = !cred.isTest || activeMode === 'test';
+    let newlyCredited = false;
+
+    if (remote.status === 'paid' && allowCredit && existing?.telegramId && trustedAmount >= 1000) {
+      newlyCredited = await creditTgUserTopUp(
+        existing.telegramId,
+        existing.chatId || existing.telegramId,
+        trustedAmount,
+        orderId,
+        existing.method || 'TolovGo',
+        cred.isTest
+      );
+      existing.status = 'paid';
+      existing.credited = true;
+      await saveOrderRecord(existing);
+      if (newlyCredited) {
+        await Promise.all([
+          notifyTelegramPaymentPaid(
+            existing.chatId || existing.telegramId,
+            trustedAmount,
+            orderId,
+            cred.isTest
+          ),
+          notifyPaymentToCrmAndStaff({
+            orderId,
+            telegramId: existing.telegramId,
+            amount: trustedAmount,
+            method: existing.method || 'TolovGo',
+            isTest: cred.isTest,
+            source: `Admin Sinxronizatsiya (${ctx.user.telegramId})`,
+          }),
+        ]);
+      }
+    } else if (existing) {
+      existing.status = remote.status;
+      await saveOrderRecord(existing);
+    }
+
+    res.json({
+      ok: true,
+      orderId,
+      status: remote.status,
+      amount: trustedAmount,
+      newlyCredited,
+    });
+  } catch (err) {
+    res.status(502).json({
+      error: err instanceof Error ? err.message : "TolovGo bilan tekshirib bo'lmadi.",
+    });
+  }
+});
+
 app.post('/api/admin/pricing', async (req, res) => {
-  const admin = requireAdminSession(req, res);
-  if (!admin) return;
+  const ctx = await requireStaffSession(req, res, 'pricing');
+  if (!ctx) return;
   const saved = await savePricingSettings(req.body as AppPricingSettings);
   await dbAppendAuditLog({
     id: `aud_price_${Date.now().toString(36)}`,
-    actorId: admin.telegramId,
+    actorId: ctx.user.telegramId,
     action: 'admin_pricing_updated',
     details: `Narxlar va bonuslar yangilandi (Welcome: ${saved.welcomeBonus}, Ref: ${saved.referralInviterBonus})`,
   });
@@ -3947,23 +4907,230 @@ app.post('/api/admin/pricing', async (req, res) => {
 });
 
 app.post('/api/admin/settings', async (req, res) => {
-  const admin = requireAdminSession(req, res);
-  if (!admin) return;
+  const ctx = await requireStaffSession(req, res, 'settings');
+  if (!ctx) return;
   const nextMode = req.body?.tolovgoMode === 'test' ? 'test' : 'live';
   await savePaymentConfigSettings(nextMode);
   await dbAppendAuditLog({
     id: `aud_cfg_${Date.now().toString(36)}`,
-    actorId: admin.telegramId,
+    actorId: ctx.user.telegramId,
     action: 'admin_tolovgo_mode',
     details: `TolovGo rejimi: ${nextMode}`,
   });
   res.json({ ok: true, tolovgoMode: nextMode });
 });
 
+app.get('/api/admin/site-config', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'settings');
+  if (!ctx) return;
+  const siteConfig = await getEffectiveSiteConfig();
+  res.json({ ok: true, siteConfig });
+});
+
+app.post('/api/admin/site-config', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'settings');
+  if (!ctx) return;
+  const saved = await saveSiteConfig((req.body || {}) as Partial<SiteConfigSettings>);
+  await dbAppendAuditLog({
+    id: `aud_site_${Date.now().toString(36)}`,
+    actorId: ctx.user.telegramId,
+    action: 'admin_site_config',
+    details: `Texnik rejim: ${saved.maintenanceMode ? 'Yoqilgan' : 'O‘chirilgan'}`,
+  });
+  res.json({ ok: true, siteConfig: saved });
+});
+
+app.get('/api/admin/promos', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'promos');
+  if (!ctx) return;
+  const promos = (await dbListPromoCodes()) || (await kvGet<DbPromoCode[]>('app_promo_codes')) || [];
+  res.json({ ok: true, promos });
+});
+
+app.post('/api/admin/promos', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'promos');
+  if (!ctx) return;
+  const rawCode =
+    typeof req.body?.code === 'string'
+      ? req.body.code.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '').slice(0, 32)
+      : '';
+  if (rawCode.length < 3) {
+    res.status(400).json({ error: "Promokod kamida 3 ta harf/raqamdan iborat bo'lishi kerak." });
+    return;
+  }
+  const bonusAmount = Math.round(Number(req.body?.bonusAmount) || 0);
+  const maxUses = Math.round(Number(req.body?.maxUses) || 50);
+  if (bonusAmount < 500 || bonusAmount > 1_000_000) {
+    res.status(400).json({ error: "Bonus summasi 500 dan 1 000 000 so'mgacha bo'lishi kerak." });
+    return;
+  }
+  const isActive = req.body?.isActive !== false;
+  const expiresDays = Number(req.body?.expiresDays);
+  const expiresAt =
+    Number.isFinite(expiresDays) && expiresDays > 0
+      ? Date.now() + Math.min(365, expiresDays) * 86_400_000
+      : null;
+
+  const saved = await dbUpsertPromoCode({
+    code: rawCode,
+    bonusAmount,
+    maxUses,
+    isActive,
+    expiresAt,
+    createdBy: ctx.user.telegramId,
+  });
+
+  const existingKv = (await kvGet<DbPromoCode[]>('app_promo_codes')) || [];
+  const promoObj: DbPromoCode = saved || {
+    code: rawCode,
+    bonusAmount,
+    maxUses,
+    usedCount: existingKv.find((p) => p.code === rawCode)?.usedCount || 0,
+    isActive,
+    expiresAt,
+    createdBy: ctx.user.telegramId,
+    createdAt: Date.now(),
+  };
+  await kvSet('app_promo_codes', [promoObj, ...existingKv.filter((p) => p.code !== rawCode)]);
+
+  await dbAppendAuditLog({
+    id: `aud_promo_${Date.now().toString(36)}`,
+    actorId: ctx.user.telegramId,
+    action: 'staff_promo_upsert',
+    targetId: rawCode,
+    amount: bonusAmount,
+    details: `Promokod ${rawCode}: +${formatSomServer(bonusAmount)} (limit ${maxUses})`,
+  });
+
+  res.json({ ok: true, promo: promoObj });
+});
+
+app.delete('/api/admin/promos/:code', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'promos');
+  if (!ctx) return;
+  const code = String(req.params.code || '').trim().toUpperCase();
+  if (!code) {
+    res.status(400).json({ error: 'Kod kiriting.' });
+    return;
+  }
+  await dbDeletePromoCode(code);
+  const existingKv = (await kvGet<DbPromoCode[]>('app_promo_codes')) || [];
+  await kvSet(
+    'app_promo_codes',
+    existingKv.filter((p) => p.code !== code)
+  );
+  res.json({ ok: true });
+});
+
+app.get('/api/admin/broadcasts', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'broadcast');
+  if (!ctx) return;
+  const logs =
+    (await dbListBroadcastLogs(30)) ||
+    (await kvGet<DbBroadcastLog[]>('app_broadcast_logs')) ||
+    [];
+  res.json({ ok: true, logs });
+});
+
+app.post('/api/admin/broadcast', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'broadcast');
+  if (!ctx) return;
+  if (!getTelegramBotToken()) {
+    res.status(503).json({ error: 'TELEGRAM_BOT_TOKEN sozlanmagan.' });
+    return;
+  }
+  const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+  if (message.length < 3 || message.length > 2000) {
+    res.status(400).json({ error: "Xabar matni 3 dan 2000 tagacha belgi bo'lishi kerak." });
+    return;
+  }
+  const segmentRaw = String(req.body?.segment || 'all');
+  const segment: 'all' | 'active' | 'vip' | 'zero_balance' =
+    segmentRaw === 'vip' || segmentRaw === 'zero_balance' || segmentRaw === 'active'
+      ? segmentRaw
+      : 'all';
+
+  const targets = (await dbListBroadcastTargets(segment)) || [];
+  if (targets.length === 0) {
+    res.status(404).json({ error: 'Ushbu segmentda foydalanuvchilar topilmadi.' });
+    return;
+  }
+
+  let sentCount = 0;
+  let failedCount = 0;
+  const cleanHtml = escapeTgHtml(message);
+
+  // Send in small sequential batches to respect Telegram rate limits
+  for (let i = 0; i < targets.length; i += 20) {
+    const batch = targets.slice(i, i + 20);
+    const results = await Promise.allSettled(
+      batch.map((t) =>
+        telegramApi('sendMessage', {
+          chat_id: t.chatId,
+          text: `📢 <b>SlaydCanva Yangilik</b>\n\n${cleanHtml}`,
+          parse_mode: 'HTML',
+        })
+      )
+    );
+    for (const r of results) {
+      if (r.status === 'fulfilled' && r.value.ok) sentCount++;
+      else failedCount++;
+    }
+  }
+
+  const logEntry: DbBroadcastLog = {
+    id: `bc_${Date.now().toString(36)}`,
+    actorId: ctx.user.telegramId,
+    targetSegment: segment,
+    message: message.slice(0, 600),
+    totalTargets: targets.length,
+    sentCount,
+    failedCount,
+    createdAt: Date.now(),
+  };
+  await dbLogBroadcast(logEntry);
+  const existingBc = (await kvGet<DbBroadcastLog[]>('app_broadcast_logs')) || [];
+  await kvSet('app_broadcast_logs', [logEntry, ...existingBc].slice(0, 30));
+
+  await Promise.all([
+    dbAppendAuditLog({
+      id: `aud_bc_${Date.now().toString(36)}`,
+      actorId: ctx.user.telegramId,
+      action: 'staff_broadcast_sent',
+      amount: sentCount,
+      details: `Segment: ${segment} · Yuborildi: ${sentCount}/${targets.length}`,
+    }),
+    recordCrmEventSafe({
+      eventType: 'broadcast_sent',
+      title: `Ommaviy xabarnoma yuborildi (${sentCount} ta)`,
+      message: `Segment: ${segment} · Xato: ${failedCount}`,
+      userId: ctx.user.telegramId,
+      amount: sentCount,
+    }),
+  ]);
+
+  res.json({ ok: true, log: logEntry });
+});
+
+app.post('/api/admin/telegram-test', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'settings');
+  if (!ctx) return;
+  if (!getTelegramBotToken()) {
+    res.status(503).json({ error: 'TELEGRAM_BOT_TOKEN sozlanmagan.' });
+    return;
+  }
+  await notifyStaffTelegram(
+    `🔔 <b>Sinov CRM bildirishnomasi</b>\n\n` +
+      `Yuboruvchi: <b>${escapeTgHtml(ctx.user.firstName)}</b> (<code>${escapeTgHtml(ctx.user.telegramId)}</code>)\n` +
+      `Holat: Telegram bot va CRM xabarnomalari faol ishlamoqda ✅`
+  );
+  res.json({ ok: true });
+});
+
 app.get('/api/admin/audit-logs', async (req, res) => {
-  const admin = requireAdminSession(req, res);
-  if (!admin) return;
-  const logs = await dbListAuditLogs(100);
+  const ctx = await requireStaffSession(req, res);
+  if (!ctx) return;
+  const logs = await dbListAuditLogs(120);
   res.json({ ok: true, logs: logs || [] });
 });
 
@@ -3994,11 +5161,18 @@ app.post('/api/telegram/auth/webapp', async (req, res) => {
     return;
   }
   const account = await getTgUserAccount(profile);
+  if (account.isNewUser) {
+    void notifyNewUserToCrmAndStaff(account);
+  }
+  const staff = await resolveStaffAccess(profile.telegramId);
   const sessionToken = issueSessionCookieAndToken(req, res, profile);
   res.json({
     ok: true,
     user: profile,
-    isAdmin: isTelegramAdmin(profile.telegramId),
+    isAdmin: staff.role === 'super_admin',
+    isManager: staff.role === 'manager',
+    staffRole: staff.role,
+    managerPermissions: staff.permissions,
     sessionToken,
     account,
     kvConfigured: hasPersistentStorage(),
@@ -4027,11 +5201,18 @@ app.post('/api/telegram/auth/verify', async (req, res) => {
     username: typeof payload.un === 'string' && payload.un ? payload.un : undefined,
   };
   const account = await getTgUserAccount(profile);
+  if (account.isNewUser) {
+    void notifyNewUserToCrmAndStaff(account);
+  }
+  const staff = await resolveStaffAccess(profile.telegramId);
   const sessionToken = issueSessionCookieAndToken(req, res, profile);
   res.json({
     ok: true,
     user: profile,
-    isAdmin: isTelegramAdmin(profile.telegramId),
+    isAdmin: staff.role === 'super_admin',
+    isManager: staff.role === 'manager',
+    staffRole: staff.role,
+    managerPermissions: staff.permissions,
     sessionToken,
     account,
     kvConfigured: hasPersistentStorage(),
@@ -4063,11 +5244,18 @@ app.get('/api/telegram/auth/poll', async (req, res) => {
     username: typeof payload.un === 'string' && payload.un ? payload.un : undefined,
   };
   const account = await getTgUserAccount(profile);
+  if (account.isNewUser) {
+    void notifyNewUserToCrmAndStaff(account);
+  }
+  const staff = await resolveStaffAccess(profile.telegramId);
   const sessionToken = issueSessionCookieAndToken(req, res, profile);
   res.json({
     authenticated: true,
     user: profile,
-    isAdmin: isTelegramAdmin(profile.telegramId),
+    isAdmin: staff.role === 'super_admin',
+    isManager: staff.role === 'manager',
+    staffRole: staff.role,
+    managerPermissions: staff.permissions,
     sessionToken,
     account,
     kvConfigured: hasPersistentStorage(),
@@ -4082,11 +5270,15 @@ app.get('/api/telegram/me', async (req, res) => {
     return;
   }
   const account = await getTgUserAccount(user);
+  const staff = await resolveStaffAccess(user.telegramId);
   const sessionToken = issueSessionCookieAndToken(req, res, user);
   res.json({
     ok: true,
     sessionToken,
-    isAdmin: isTelegramAdmin(user.telegramId),
+    isAdmin: staff.role === 'super_admin',
+    isManager: staff.role === 'manager',
+    staffRole: staff.role,
+    managerPermissions: staff.permissions,
     user: {
       ...user,
       autoSendFiles: account.autoSendFiles,
@@ -4706,7 +5898,17 @@ app.post('/api/telegram/webhook', async (req, res) => {
                 text: wasNew ? "To'lov tasdiqlandi! Balansga qo'shildi." : "Bu to'lov allaqachon tasdiqlangan.",
               });
               if (wasNew) {
-                await notifyTelegramPaymentPaid(cid, finalAmount, orderId, cred.isTest);
+                await Promise.all([
+                  notifyTelegramPaymentPaid(cid, finalAmount, orderId, cred.isTest),
+                  notifyPaymentToCrmAndStaff({
+                    orderId,
+                    telegramId: tid,
+                    amount: finalAmount,
+                    method: rec?.method || 'Telegram Bot',
+                    isTest: cred.isTest,
+                    source: 'Telegram Bot Check',
+                  }),
+                ]);
               }
             } else {
               await telegramApi('answerCallbackQuery', {
@@ -4772,9 +5974,11 @@ app.post('/api/telegram/webhook', async (req, res) => {
             }
           }
 
+          let appliedInviterId: string | undefined;
           let refApplied = false;
           if (arg.startsWith('ref_') && account.isNewUser) {
             const inviterId = arg.slice(4).trim();
+            appliedInviterId = inviterId;
             const refResult = await applyReferralReward(user.telegramId, inviterId, pricing);
             if (refResult.applied) {
               refApplied = true;
@@ -4792,6 +5996,9 @@ app.post('/api/telegram/webhook', async (req, res) => {
           }
 
           const refreshedAccount = refApplied ? await getTgUserAccount(user, pricing.welcomeBonus) : account;
+          if (account.isNewUser) {
+            void notifyNewUserToCrmAndStaff(refreshedAccount, appliedInviterId);
+          }
           const bonusLine = account.isNewUser && pricing.welcomeBonus > 0
             ? `🎁 Yangi foydalanuvchi bonusi: <b>+${escapeTgHtml(formatSomServer(pricing.welcomeBonus))}</b> qo'shildi!\n`
             : '';

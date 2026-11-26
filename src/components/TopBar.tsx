@@ -13,7 +13,7 @@ import {
   Wallet,
 } from 'lucide-react';
 import { formatSom } from '../data/defaults';
-import { DesktopView, MobileTab, TelegramUser, WorkspaceMode } from '../types/editor';
+import { DesktopView, MobileTab, StaffRole, TelegramUser, WorkspaceMode } from '../types/editor';
 import { BrandLogo } from './BrandLogo';
 
 interface TopBarProps {
@@ -33,6 +33,7 @@ interface TopBarProps {
   onOpenTopUp?: () => void;
   onOpenProfile?: () => void;
   isAdmin?: boolean;
+  staffRole?: StaffRole;
   onOpenAdminPanel?: () => void;
   telegramUser?: TelegramUser | null;
   isExporting: boolean;
@@ -63,6 +64,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   onOpenTopUp,
   onOpenProfile,
   isAdmin = false,
+  staffRole = 'user',
   onOpenAdminPanel,
   telegramUser,
   isExporting,
@@ -214,15 +216,15 @@ export const TopBar: React.FC<TopBarProps> = ({
                 )}
               </button>
             )}
-            {isAdmin && onOpenAdminPanel && (
+            {(isAdmin || staffRole === 'super_admin' || staffRole === 'manager') && onOpenAdminPanel && (
               <button
                 type="button"
                 onClick={onOpenAdminPanel}
-                title="Admin Boshqaruv Paneli"
-                className="flex items-center gap-1.5 text-xs bg-red-600 hover:bg-red-500 border border-red-500 rounded-md px-2.5 py-1.5 text-white font-medium transition-colors"
+                title={staffRole === 'manager' ? 'Menejer CRM Boshqaruv Paneli' : 'Admin CRM Boshqaruv Paneli'}
+                className="flex items-center gap-1.5 text-xs bg-red-600 hover:bg-red-500 border border-red-500 rounded-md px-2.5 py-1.5 text-white font-medium transition-colors whitespace-nowrap shrink-0"
               >
                 <Shield className="w-3.5 h-3.5" />
-                <span>Admin</span>
+                <span>{staffRole === 'manager' ? 'Menejer · CRM' : 'Admin · CRM'}</span>
               </button>
             )}
           </div>

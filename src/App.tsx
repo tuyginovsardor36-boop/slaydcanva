@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowLeft, X } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, Megaphone, X } from 'lucide-react';
 import { AdminDashboard } from './components/AdminDashboard';
 import { AiGeneratedPayload, AiServicesView } from './components/AiServicesView';
 import { CanvasWorkspace } from './components/CanvasWorkspace';
@@ -22,10 +22,13 @@ import {
   CanvasPage,
   CloudProjectData,
   DesktopView,
+  ManagerPermission,
   MobileTab,
   PdfOrientation,
   ProjectSummary,
+  SiteConfigSettings,
   SlaydCanvaState,
+  StaffRole,
   TelegramUser,
   UserProfile,
   WorkspaceMode,
@@ -38,9 +41,12 @@ import {
 } from './utils/exportPdf';
 import { exportToPptx } from './utils/exportPptx';
 import {
+  adminGetStatus,
+  adminLogout,
   deleteCloudProject,
   fetchAppPricing,
   fetchCloudProjects,
+  fetchTelegramAccountMe,
   getTelegramAuthHeaders,
   loadCloudProject,
   logTelegramActivity,
@@ -102,6 +108,8 @@ function loadSavedState(): SlaydCanvaState {
     const fallback = createInitialState();
     const pptxPages = sanitizeLoadedPages(parsed.pptxPages);
     const pdfPages = sanitizeLoadedPages(parsed.pdfPages);
+    // Security: Never trust browser localStorage for balance or transactions.
+    // Balance only loads from server DB/KV via TolovGo, Promo codes, or Admin/Manager.
     return {
       mode: parsed.mode || fallback.mode,
       docTitle: parsed.docTitle ?? fallback.docTitle,
@@ -111,10 +119,8 @@ function loadSavedState(): SlaydCanvaState {
       pdfOrientation: parsed.pdfOrientation || fallback.pdfOrientation,
       activePdfId: parsed.activePdfId || pdfPages?.[0]?.id || fallback.activePdfId,
       wordDoc: parsed.wordDoc?.html !== undefined ? parsed.wordDoc : fallback.wordDoc,
-      balance: typeof parsed.balance === 'number' ? parsed.balance : fallback.balance,
-      transactions: Array.isArray(parsed.transactions)
-        ? parsed.transactions
-        : fallback.transactions,
+      balance: 0,
+      transactions: [],
       profile: parsed.profile?.fullName ? parsed.profile : fallback.profile,
       tolovgoMode: parsed.tolovgoMode === 'test' ? 'test' : 'live',
     };
@@ -139,9 +145,20 @@ export default function App() {
   const [telegramUser, setTelegramUser] = useState<TelegramUser | null>(null);
   const [tgSessionToken, setTgSessionToken] = useState<string | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
+  const [isManager, setIsManager] = useState(false);
+  const [staffRole, setStaffRole] = useState<StaffRole>('user');
+  const [managerPermissions, setManagerPermissions] = useState<ManagerPermission[]>([]);
   const [adminOpen, setAdminOpen] = useState(false);
   const [adminToken, setAdminToken] = useState<string | null>(null);
   const [pricingSettings, setPricingSettings] = useState<AppPricingSettings>(DEFAULT_PRICING_SETTINGS);
+  const [siteConfig, setSiteConfig] = useState<SiteConfigSettings>({
+    maintenanceMode: false,
+    maintenanceMessage: '',
+    announcementBanner: '',
+    notifyNewUsersToStaff: true,
+    notifyPaymentsToStaff: true,
+    defaultAiModel: 'google/gemini-2.5-flash',
+  });
   const [botUsername, setBotUsername] = useState<string | null>(null);
   const [activeProjectId, setActiveProjectId] = useState<string>('');
   const [savedProjects, setSavedProjects] = useState<ProjectSummary[]>([]);
@@ -157,6 +174,7 @@ export default function App() {
       if (!active || !res) return;
       if (res.pricing) setPricingSettings(res.pricing);
       if (res.botUsername) setBotUsername(res.botUsername);
+      if (res.siteConfig) setSiteConfig(res.siteConfig);
       if (res.tolovgoMode === 'test' || res.tolovgoMode === 'live') {
         setState((prev) => ({ ...prev, tolovgoMode: res.tolovgoMode }));
       }
@@ -166,10 +184,11 @@ export default function App() {
     };
   }, []);
 
-  // Persist workspace to localStorage (never persist session tokens)
+  // Persist workspace ONLY to localStorage (never persist session tokens, balance, or transactions)
   useEffect(() => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      const { balance: _b, transactions: _t, ...workspaceOnly } = state;
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(workspaceOnly));
     } catch {
       // Ignore storage quota errors
     }
@@ -190,11 +209,27 @@ export default function App() {
         account?: TelegramAccountResponse;
         kvConfigured?: boolean;
         isAdmin?: boolean;
+        isManager?: boolean;
+        staffRole?: StaffRole;
+        managerPermissions?: ManagerPermission[];
       },
       announce = true
     ) => {
-      const adminFlag = Boolean(payload.isAdmin || payload.user.isAdmin);
+      const adminFlag = Boolean(payload.isAdmin || payload.user.isAdmin || payload.staffRole === 'super_admin');
+      const managerFlag = Boolean(!adminFlag && (payload.isManager || payload.staffRole === 'manager'));
+      const resolvedRole: StaffRole = adminFlag
+        ? 'super_admin'
+        : managerFlag
+          ? 'manager'
+          : 'user';
+
       setIsAdmin(adminFlag);
+      setIsManager(managerFlag);
+      setStaffRole(resolvedRole);
+      setManagerPermissions(
+        Array.isArray(payload.managerPermissions) ? payload.managerPermissions : []
+      );
+
       setTelegramUser({
         ...payload.user,
         autoSendFiles: payload.account?.autoSendFiles ?? payload.user.autoSendFiles ?? true,
@@ -202,8 +237,20 @@ export default function App() {
         referralCount: payload.account?.referralCount ?? payload.user.referralCount ?? 0,
         isBanned: payload.account?.isBanned ?? payload.user.isBanned ?? false,
         isAdmin: adminFlag,
+        isManager: managerFlag,
+        staffRole: resolvedRole,
+        managerPermissions: payload.managerPermissions,
       });
       setTgSessionToken(payload.sessionToken);
+
+      // Restore 15-day Admin/Manager session cookie if already unlocked
+      if (adminFlag || managerFlag) {
+        void adminGetStatus(payload.sessionToken).then((st) => {
+          if (!('error' in st) && st.adminUnlocked && st.adminToken) {
+            setAdminToken(st.adminToken);
+          }
+        });
+      }
 
       setState((prev) => {
         const displayName = [payload.user.firstName, payload.user.lastName]
@@ -227,15 +274,8 @@ export default function App() {
                 : prev.profile.contact,
         };
 
-        let nextBalance = prev.balance;
-        let nextTransactions = prev.transactions.filter((t) => t.id !== 'tx_init_1');
-
-        if (payload.account) {
-          nextBalance = payload.account.balance;
-          const serverIds = new Set(payload.account.transactions.map((t) => t.id));
-          const localOnly = nextTransactions.filter((t) => !serverIds.has(t.id));
-          nextTransactions = [...payload.account.transactions, ...localOnly].slice(0, 60);
-        }
+        const nextBalance = payload.account ? payload.account.balance : 0;
+        const nextTransactions = payload.account ? payload.account.transactions.slice(0, 60) : [];
 
         return {
           ...prev,
@@ -253,7 +293,7 @@ export default function App() {
     [showNotice]
   );
 
-  // Telegram WebApp / Magic Link (?tg_auth=) / Existing HttpOnly Session Auto-Auth
+  // Telegram WebApp / Magic Link (?tg_auth=) / Existing 15-Day HttpOnly Session Cookie Auto-Auth
   useEffect(() => {
     let active = true;
     const bootTelegramAuth = async () => {
@@ -265,6 +305,7 @@ export default function App() {
         try {
           const res = await fetch('/api/telegram/auth/verify', {
             method: 'POST',
+            credentials: 'same-origin',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ token: tgAuthToken }),
           });
@@ -275,6 +316,9 @@ export default function App() {
             account?: TelegramAccountResponse;
             kvConfigured?: boolean;
             isAdmin?: boolean;
+            isManager?: boolean;
+            staffRole?: StaffRole;
+            managerPermissions?: ManagerPermission[];
           };
           if (active && res.ok && data.user && data.sessionToken) {
             applyTelegramAuth(
@@ -284,6 +328,9 @@ export default function App() {
                 account: data.account,
                 kvConfigured: data.kvConfigured,
                 isAdmin: data.isAdmin,
+                isManager: data.isManager,
+                staffRole: data.staffRole,
+                managerPermissions: data.managerPermissions,
               },
               true
             );
@@ -302,6 +349,7 @@ export default function App() {
           try {
             const res = await fetch('/api/telegram/auth/webapp', {
               method: 'POST',
+              credentials: 'same-origin',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ initData: webApp.initData }),
             });
@@ -312,6 +360,9 @@ export default function App() {
               account?: TelegramAccountResponse;
               kvConfigured?: boolean;
               isAdmin?: boolean;
+              isManager?: boolean;
+              staffRole?: StaffRole;
+              managerPermissions?: ManagerPermission[];
             };
             if (active && res.ok && data.user && data.sessionToken) {
               applyTelegramAuth(
@@ -321,6 +372,9 @@ export default function App() {
                   account: data.account,
                   kvConfigured: data.kvConfigured,
                   isAdmin: data.isAdmin,
+                  isManager: data.isManager,
+                  staffRole: data.staffRole,
+                  managerPermissions: data.managerPermissions,
                 },
                 false
               );
@@ -333,7 +387,7 @@ export default function App() {
       }
 
       try {
-        const res = await fetch('/api/telegram/me');
+        const res = await fetch('/api/telegram/me', { credentials: 'same-origin' });
         if (!res.ok || !active) return;
         const data = (await res.json().catch(() => ({}))) as {
           ok?: boolean;
@@ -342,6 +396,9 @@ export default function App() {
           account?: TelegramAccountResponse;
           kvConfigured?: boolean;
           isAdmin?: boolean;
+          isManager?: boolean;
+          staffRole?: StaffRole;
+          managerPermissions?: ManagerPermission[];
         };
         if (active && data.user && data.sessionToken) {
           applyTelegramAuth(
@@ -351,6 +408,9 @@ export default function App() {
               account: data.account,
               kvConfigured: data.kvConfigured,
               isAdmin: data.isAdmin,
+              isManager: data.isManager,
+              staffRole: data.staffRole,
+              managerPermissions: data.managerPermissions,
             },
             false
           );
@@ -621,40 +681,81 @@ export default function App() {
     }
   };
 
-  const handleTopUp = (amount: number, method: string, externalOrderId?: string) => {
+  const syncAuthoritativeBalanceFromServer = useCallback(async () => {
+    if (!tgSessionToken) return;
+    const me = await fetchTelegramAccountMe(tgSessionToken);
+    if (me?.account) {
+      setState((prev) => ({
+        ...prev,
+        balance: me.account!.balance,
+        transactions: me.account!.transactions.slice(0, 60),
+      }));
+    }
+  }, [tgSessionToken]);
+
+  const handleTopUp = (
+    amount: number,
+    method: string,
+    externalOrderId?: string,
+    serverBalance?: number
+  ) => {
+    // Only TolovGo server-verified payments can credit balance
+    if (!externalOrderId) {
+      showNotice('err', "Balans faqat TolovGo to'lovi orqali serverda to'ldiriladi.");
+      return;
+    }
     const now = new Date();
     const dateStr = `${String(now.getDate()).padStart(2, '0')}.${String(now.getMonth() + 1).padStart(2, '0')}.${now.getFullYear()}`;
-    const txId = externalOrderId ? `tolovgo_${externalOrderId}` : uid('tx');
-    let credited = false;
+    const txId = `tolovgo_${externalOrderId}`;
 
     setState((prev) => {
-      if (externalOrderId && prev.transactions.some((t) => t.id === txId)) {
-        return prev;
-      }
-      credited = true;
+      const nextTransactions = prev.transactions.some((t) => t.id === txId)
+        ? prev.transactions
+        : [
+            {
+              id: txId,
+              title: `Balans to'ldirish (#${externalOrderId})`,
+              method,
+              amount,
+              date: dateStr,
+            },
+            ...prev.transactions,
+          ];
       return {
         ...prev,
-        balance: prev.balance + amount,
-        transactions: [
-          {
-            id: txId,
-            title: externalOrderId ? `Balans to'ldirish (#${externalOrderId})` : "Balans to'ldirish",
-            method,
-            amount,
-            date: dateStr,
-          },
-          ...prev.transactions,
-        ],
+        balance: typeof serverBalance === 'number' ? serverBalance : prev.balance,
+        transactions: nextTransactions,
       };
     });
 
-    if (credited) {
-      showNotice('ok', `${formatSom(amount)} qo'shildi.`);
+    if (typeof serverBalance !== 'number') {
+      void syncAuthoritativeBalanceFromServer();
     }
+    showNotice('ok', `${formatSom(amount)} TolovGo orqali balansga qo'shildi.`);
     setDesktopTopUpOpen(false);
     if (mobileTab === 'topup') {
       setMobileTab('balance');
     }
+  };
+
+  const handlePromoRedeemed = (bonusAmount: number, serverBalance: number, code: string) => {
+    const now = new Date();
+    const dateStr = `${String(now.getDate()).padStart(2, '0')}.${String(now.getMonth() + 1).padStart(2, '0')}.${now.getFullYear()}`;
+    setState((prev) => ({
+      ...prev,
+      balance: serverBalance,
+      transactions: [
+        {
+          id: `promo_${code}_${Date.now()}`,
+          title: `Promokod: ${code}`,
+          method: 'Promokod',
+          amount: bonusAmount,
+          date: dateStr,
+        },
+        ...prev.transactions,
+      ],
+    }));
+    void syncAuthoritativeBalanceFromServer();
   };
 
   const handleSaveProfile = (profile: UserProfile) => {
@@ -674,6 +775,7 @@ export default function App() {
     try {
       await fetch('/api/telegram/preferences', {
         method: 'POST',
+        credentials: 'same-origin',
         headers: {
           'Content-Type': 'application/json',
           ...getTelegramAuthHeaders(tgSessionToken),
@@ -687,10 +789,14 @@ export default function App() {
 
   const handleTelegramLogout = async () => {
     try {
-      await fetch('/api/telegram/logout', {
-        method: 'POST',
-        headers: getTelegramAuthHeaders(tgSessionToken),
-      });
+      await Promise.all([
+        fetch('/api/telegram/logout', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: getTelegramAuthHeaders(tgSessionToken),
+        }),
+        adminLogout(tgSessionToken),
+      ]);
     } catch {
       // Ignore
     }
@@ -698,6 +804,9 @@ export default function App() {
     setSavedProjects([]);
     setActiveProjectId('');
     setIsAdmin(false);
+    setIsManager(false);
+    setStaffRole('user');
+    setManagerPermissions([]);
     setAdminOpen(false);
     setAdminToken(null);
     setTelegramUser(null);
@@ -1012,11 +1121,29 @@ export default function App() {
         onResetCurrent={handleResetCurrent}
         onOpenTopUp={() => setDesktopTopUpOpen(true)}
         onOpenProfile={() => setDesktopProfileOpen(true)}
-        isAdmin={isAdmin}
+        isAdmin={isAdmin || isManager}
+        staffRole={staffRole}
         onOpenAdminPanel={() => setAdminOpen(true)}
         telegramUser={telegramUser}
         isExporting={isExporting}
       />
+
+      {siteConfig.maintenanceMode && !isAdmin && !isManager && (
+        <div className="shrink-0 bg-amber-50 border-b border-amber-200 px-4 py-2 text-xs text-amber-900 flex items-center justify-center gap-2">
+          <AlertTriangle className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+          <span>
+            {siteConfig.maintenanceMessage ||
+              'Saytda texnik yangilanish ishlari olib borilmoqda. Tez orada davom etamiz.'}
+          </span>
+        </div>
+      )}
+
+      {!siteConfig.maintenanceMode && siteConfig.announcementBanner && (
+        <div className="shrink-0 bg-[#111113] border-b border-zinc-800 px-4 py-1.5 text-xs text-zinc-200 flex items-center justify-center gap-2">
+          <Megaphone className="w-3.5 h-3.5 text-red-500 shrink-0" />
+          <span className="truncate">{siteConfig.announcementBanner}</span>
+        </div>
+      )}
 
       {/* Mobile Secondary Views (Bosh sahifa, AI Xizmatlar, Balans to'ldirish, Balans, Profil) */}
       {mobileTab !== 'editor' && (
@@ -1066,6 +1193,7 @@ export default function App() {
               tolovgoMode={state.tolovgoMode || 'live'}
               telegramSessionToken={tgSessionToken}
               onTopUp={handleTopUp}
+              onPromoRedeemed={handlePromoRedeemed}
               onNotify={showNotice}
             />
           )}
@@ -1082,7 +1210,8 @@ export default function App() {
               balance={state.balance}
               pptxCount={state.pptxPages.length}
               pdfCount={state.pdfPages.length}
-              isAdmin={isAdmin}
+              isAdmin={isAdmin || isManager}
+              staffRole={staffRole}
               pricingSettings={pricingSettings}
               botUsername={botUsername}
               telegramUser={telegramUser}
@@ -1217,6 +1346,7 @@ export default function App() {
               tolovgoMode={state.tolovgoMode || 'live'}
               telegramSessionToken={tgSessionToken}
               onTopUp={handleTopUp}
+              onPromoRedeemed={handlePromoRedeemed}
               onNotify={showNotice}
             />
           </div>
@@ -1248,7 +1378,8 @@ export default function App() {
               balance={state.balance}
               pptxCount={state.pptxPages.length}
               pdfCount={state.pdfPages.length}
-              isAdmin={isAdmin}
+              isAdmin={isAdmin || isManager}
+              staffRole={staffRole}
               pricingSettings={pricingSettings}
               botUsername={botUsername}
               telegramUser={telegramUser}
@@ -1277,16 +1408,19 @@ export default function App() {
         </div>
       )}
 
-      {adminOpen && isAdmin && telegramUser && tgSessionToken && (
+      {adminOpen && (isAdmin || isManager) && telegramUser && tgSessionToken && (
         <AdminDashboard
           telegramUser={telegramUser}
           telegramSessionToken={tgSessionToken}
           adminToken={adminToken}
+          staffRole={staffRole}
+          initialPermissions={managerPermissions}
           onAdminTokenChange={setAdminToken}
           onPricingUpdated={(nextPricing) => setPricingSettings(nextPricing)}
           onTolovgoModeUpdated={(nextMode) =>
             setState((prev) => ({ ...prev, tolovgoMode: nextMode }))
           }
+          onSiteConfigUpdated={(nextCfg) => setSiteConfig(nextCfg)}
           onNotify={showNotice}
           onClose={() => setAdminOpen(false)}
         />

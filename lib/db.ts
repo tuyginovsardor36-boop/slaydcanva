@@ -92,6 +92,10 @@ export interface AdminUserRow {
   referredBy?: string;
   isBanned: boolean;
   projectCount: number;
+  crmTag?: string;
+  crmNote?: string;
+  totalDeposited?: number;
+  totalSpent?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -114,6 +118,77 @@ export interface AdminOverviewStats {
   totalPaidRevenue: number;
   totalReferrals: number;
   totalProjects: number;
+  activeManagers: number;
+  unreadCrmEvents: number;
+  todayRevenue: number;
+  todayNewUsers: number;
+}
+
+export type DbManagerPermission =
+  | 'overview'
+  | 'crm_events'
+  | 'users'
+  | 'balance'
+  | 'orders'
+  | 'pricing'
+  | 'promos'
+  | 'broadcast'
+  | 'settings';
+
+export interface DbManagerRecord {
+  telegramId: string;
+  firstName: string;
+  username?: string;
+  roleTitle: string;
+  permissions: DbManagerPermission[];
+  passwordHash?: string;
+  hasPassword: boolean;
+  isActive: boolean;
+  notifyTelegram: boolean;
+  addedBy?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface DbCrmEvent {
+  id: string;
+  eventType:
+    | 'new_user'
+    | 'payment_paid'
+    | 'promo_redeemed'
+    | 'balance_adjusted'
+    | 'security_alert'
+    | 'broadcast_sent'
+    | 'manager_changed'
+    | 'user_banned';
+  title: string;
+  message: string;
+  userId?: string;
+  amount?: number;
+  isRead: boolean;
+  createdAt: number;
+}
+
+export interface DbPromoCode {
+  code: string;
+  bonusAmount: number;
+  maxUses: number;
+  usedCount: number;
+  isActive: boolean;
+  expiresAt?: number | null;
+  createdBy?: string;
+  createdAt: number;
+}
+
+export interface DbBroadcastLog {
+  id: string;
+  actorId: string;
+  targetSegment: string;
+  message: string;
+  totalTargets: number;
+  sentCount: number;
+  failedCount: number;
+  createdAt: number;
 }
 
 export const DEFAULT_PRICING_SETTINGS: AppPricingSettings = {
@@ -213,6 +288,9 @@ export async function ensureDbSchema(): Promise<boolean> {
       await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by TEXT`;
       await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_count INTEGER NOT NULL DEFAULT 0`;
       await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN NOT NULL DEFAULT FALSE`;
+      await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS crm_tag TEXT`;
+      await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS crm_note TEXT`;
+      await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ DEFAULT NOW()`;
       await sql`ALTER TABLE users ALTER COLUMN balance SET DEFAULT 1000`;
 
       await sql`
@@ -322,6 +400,77 @@ export async function ensureDbSchema(): Promise<boolean> {
       await sql`
         CREATE INDEX IF NOT EXISTS idx_audit_logs_created
         ON audit_logs (created_at DESC)
+      `;
+
+      await sql`
+        CREATE TABLE IF NOT EXISTS managers (
+          telegram_id TEXT PRIMARY KEY,
+          first_name TEXT NOT NULL,
+          username TEXT,
+          role_title TEXT NOT NULL DEFAULT 'Menejer',
+          permissions JSONB NOT NULL DEFAULT '[]'::jsonb,
+          password_hash TEXT,
+          is_active BOOLEAN NOT NULL DEFAULT TRUE,
+          notify_telegram BOOLEAN NOT NULL DEFAULT TRUE,
+          added_by TEXT,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `;
+
+      await sql`
+        CREATE TABLE IF NOT EXISTS crm_events (
+          id TEXT PRIMARY KEY,
+          event_type TEXT NOT NULL,
+          title TEXT NOT NULL,
+          message TEXT NOT NULL,
+          user_id TEXT,
+          amount INTEGER,
+          is_read BOOLEAN NOT NULL DEFAULT FALSE,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `;
+
+      await sql`
+        CREATE INDEX IF NOT EXISTS idx_crm_events_created
+        ON crm_events (created_at DESC)
+      `;
+
+      await sql`
+        CREATE TABLE IF NOT EXISTS promo_codes (
+          code TEXT PRIMARY KEY,
+          bonus_amount INTEGER NOT NULL,
+          max_uses INTEGER NOT NULL DEFAULT 100,
+          used_count INTEGER NOT NULL DEFAULT 0,
+          is_active BOOLEAN NOT NULL DEFAULT TRUE,
+          expires_at TIMESTAMPTZ,
+          created_by TEXT,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `;
+
+      await sql`
+        CREATE TABLE IF NOT EXISTS promo_redemptions (
+          id TEXT PRIMARY KEY,
+          code TEXT NOT NULL REFERENCES promo_codes(code) ON DELETE CASCADE,
+          telegram_id TEXT NOT NULL REFERENCES users(telegram_id) ON DELETE CASCADE,
+          bonus_amount INTEGER NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          UNIQUE (code, telegram_id)
+        )
+      `;
+
+      await sql`
+        CREATE TABLE IF NOT EXISTS broadcast_logs (
+          id TEXT PRIMARY KEY,
+          actor_id TEXT NOT NULL,
+          target_segment TEXT NOT NULL,
+          message TEXT NOT NULL,
+          total_targets INTEGER NOT NULL DEFAULT 0,
+          sent_count INTEGER NOT NULL DEFAULT 0,
+          failed_count INTEGER NOT NULL DEFAULT 0,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
       `;
 
       schemaReady = true;
@@ -1153,6 +1302,7 @@ export async function dbGetAdminOverview(): Promise<AdminOverviewStats | null> {
       SELECT
         COUNT(*)::int AS total_users,
         COUNT(*) FILTER (WHERE is_banned = TRUE)::int AS banned_users,
+        COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '24 hours')::int AS today_new_users,
         COALESCE(SUM(balance), 0)::bigint AS total_balance
       FROM users
     `) as Array<Record<string, unknown>>;
@@ -1160,7 +1310,8 @@ export async function dbGetAdminOverview(): Promise<AdminOverviewStats | null> {
     const [pRow] = (await sql`
       SELECT
         COUNT(*) FILTER (WHERE status = 'paid' AND is_test = FALSE)::int AS total_paid_orders,
-        COALESCE(SUM(amount) FILTER (WHERE status = 'paid' AND is_test = FALSE), 0)::bigint AS total_paid_revenue
+        COALESCE(SUM(amount) FILTER (WHERE status = 'paid' AND is_test = FALSE), 0)::bigint AS total_paid_revenue,
+        COALESCE(SUM(amount) FILTER (WHERE status = 'paid' AND is_test = FALSE AND updated_at >= NOW() - INTERVAL '24 hours'), 0)::bigint AS today_revenue
       FROM payment_orders
     `) as Array<Record<string, unknown>>;
 
@@ -1172,6 +1323,14 @@ export async function dbGetAdminOverview(): Promise<AdminOverviewStats | null> {
       SELECT COUNT(*)::int AS total_projects FROM projects
     `) as Array<Record<string, unknown>>;
 
+    const [mgrRow] = (await sql`
+      SELECT COUNT(*) FILTER (WHERE is_active = TRUE)::int AS active_managers FROM managers
+    `) as Array<Record<string, unknown>>;
+
+    const [crmRow] = (await sql`
+      SELECT COUNT(*) FILTER (WHERE is_read = FALSE)::int AS unread_crm FROM crm_events
+    `) as Array<Record<string, unknown>>;
+
     return {
       totalUsers: Number(uRow?.total_users) || 0,
       bannedUsers: Number(uRow?.banned_users) || 0,
@@ -1180,6 +1339,10 @@ export async function dbGetAdminOverview(): Promise<AdminOverviewStats | null> {
       totalPaidRevenue: Number(pRow?.total_paid_revenue) || 0,
       totalReferrals: Number(rRow?.total_referrals) || 0,
       totalProjects: Number(prRow?.total_projects) || 0,
+      activeManagers: Number(mgrRow?.active_managers) || 0,
+      unreadCrmEvents: Number(crmRow?.unread_crm) || 0,
+      todayRevenue: Number(pRow?.today_revenue) || 0,
+      todayNewUsers: Number(uRow?.today_new_users) || 0,
     };
   } catch (err) {
     console.error('[Neon dbGetAdminOverview Error]', err);
@@ -1187,7 +1350,7 @@ export async function dbGetAdminOverview(): Promise<AdminOverviewStats | null> {
   }
 }
 
-export async function dbListUsersAdmin(search = '', limit = 100): Promise<AdminUserRow[] | null> {
+export async function dbListUsersAdmin(search = '', limit = 150): Promise<AdminUserRow[] | null> {
   const sql = getSql();
   if (!sql || !(await ensureDbSchema())) return null;
 
@@ -1207,16 +1370,21 @@ export async function dbListUsersAdmin(search = '', limit = 100): Promise<AdminU
         u.referral_count,
         u.referred_by,
         u.is_banned,
+        u.crm_tag,
+        u.crm_note,
         EXTRACT(EPOCH FROM u.created_at) * 1000 AS created_ms,
         EXTRACT(EPOCH FROM u.updated_at) * 1000 AS updated_ms,
-        (SELECT COUNT(*)::int FROM projects p WHERE p.telegram_id = u.telegram_id) AS project_count
+        (SELECT COUNT(*)::int FROM projects p WHERE p.telegram_id = u.telegram_id) AS project_count,
+        COALESCE((SELECT SUM(t.amount)::bigint FROM transactions t WHERE t.telegram_id = u.telegram_id AND t.amount > 0 AND t.external_order_id IS NOT NULL), 0) AS total_deposited,
+        COALESCE((SELECT SUM(ABS(t.amount))::bigint FROM transactions t WHERE t.telegram_id = u.telegram_id AND t.amount < 0), 0) AS total_spent
       FROM users u
       WHERE
         ${q === ''} OR
         u.telegram_id ILIKE ${pattern} OR
         COALESCE(u.username, '') ILIKE ${pattern} OR
         u.first_name ILIKE ${pattern} OR
-        COALESCE(u.full_name, '') ILIKE ${pattern}
+        COALESCE(u.full_name, '') ILIKE ${pattern} OR
+        COALESCE(u.crm_tag, '') ILIKE ${pattern}
       ORDER BY u.updated_at DESC
       LIMIT ${limit}
     `) as Array<Record<string, unknown>>;
@@ -1234,6 +1402,10 @@ export async function dbListUsersAdmin(search = '', limit = 100): Promise<AdminU
       referredBy: r.referred_by ? String(r.referred_by) : undefined,
       isBanned: Boolean(r.is_banned),
       projectCount: Number(r.project_count) || 0,
+      crmTag: r.crm_tag ? String(r.crm_tag) : undefined,
+      crmNote: r.crm_note ? String(r.crm_note) : undefined,
+      totalDeposited: Number(r.total_deposited) || 0,
+      totalSpent: Number(r.total_spent) || 0,
       createdAt: Number(r.created_ms) || Date.now(),
       updatedAt: Number(r.updated_ms) || Date.now(),
     }));
@@ -1531,5 +1703,718 @@ export async function dbDeleteProject(telegramId: string, projectId: string): Pr
   } catch (err) {
     console.error('[Neon dbDeleteProject Error]', err);
     return false;
+  }
+}
+
+// =========================================================================
+// Managers, CRM Events, User CRM, Promo Codes, Broadcast & Analytics
+// =========================================================================
+
+function mapManagerRow(r: Record<string, unknown>): DbManagerRecord {
+  const permsRaw = Array.isArray(r.permissions) ? r.permissions : [];
+  return {
+    telegramId: String(r.telegram_id),
+    firstName: String(r.first_name || 'Menejer'),
+    username: r.username ? String(r.username) : undefined,
+    roleTitle: String(r.role_title || 'Menejer'),
+    permissions: permsRaw.map((p) => String(p)) as DbManagerPermission[],
+    passwordHash: r.password_hash ? String(r.password_hash) : undefined,
+    hasPassword: Boolean(r.password_hash),
+    isActive: r.is_active !== false,
+    notifyTelegram: r.notify_telegram !== false,
+    addedBy: r.added_by ? String(r.added_by) : undefined,
+    createdAt: Number(r.created_ms) || Date.now(),
+    updatedAt: Number(r.updated_ms) || Date.now(),
+  };
+}
+
+export async function dbListManagers(): Promise<DbManagerRecord[] | null> {
+  const sql = getSql();
+  if (!sql || !(await ensureDbSchema())) return null;
+  try {
+    const rows = (await sql`
+      SELECT
+        telegram_id, first_name, username, role_title, permissions,
+        (password_hash IS NOT NULL AND password_hash <> '') AS has_pwd,
+        is_active, notify_telegram, added_by,
+        EXTRACT(EPOCH FROM created_at) * 1000 AS created_ms,
+        EXTRACT(EPOCH FROM updated_at) * 1000 AS updated_ms
+      FROM managers
+      ORDER BY created_at DESC
+    `) as Array<Record<string, unknown>>;
+    return rows.map((r) => ({
+      ...mapManagerRow(r),
+      passwordHash: undefined,
+      hasPassword: Boolean(r.has_pwd),
+    }));
+  } catch (err) {
+    console.error('[Neon dbListManagers Error]', err);
+    return null;
+  }
+}
+
+export async function dbGetManagerById(telegramId: string): Promise<DbManagerRecord | null> {
+  const sql = getSql();
+  if (!sql || !(await ensureDbSchema())) return null;
+  try {
+    const rows = (await sql`
+      SELECT
+        telegram_id, first_name, username, role_title, permissions,
+        password_hash, is_active, notify_telegram, added_by,
+        EXTRACT(EPOCH FROM created_at) * 1000 AS created_ms,
+        EXTRACT(EPOCH FROM updated_at) * 1000 AS updated_ms
+      FROM managers
+      WHERE telegram_id = ${telegramId}
+      LIMIT 1
+    `) as Array<Record<string, unknown>>;
+    if (!rows[0]) return null;
+    return mapManagerRow(rows[0]);
+  } catch (err) {
+    console.error('[Neon dbGetManagerById Error]', err);
+    return null;
+  }
+}
+
+export async function dbUpsertManager(params: {
+  telegramId: string;
+  firstName: string;
+  username?: string;
+  roleTitle: string;
+  permissions: DbManagerPermission[];
+  passwordHash?: string;
+  isActive: boolean;
+  notifyTelegram: boolean;
+  addedBy: string;
+}): Promise<DbManagerRecord | null> {
+  const sql = getSql();
+  if (!sql || !(await ensureDbSchema())) return null;
+  try {
+    const permsJson = JSON.stringify(params.permissions);
+    const rows = (await sql`
+      INSERT INTO managers (
+        telegram_id, first_name, username, role_title, permissions, password_hash, is_active, notify_telegram, added_by
+      )
+      VALUES (
+        ${params.telegramId},
+        ${params.firstName},
+        ${params.username ?? null},
+        ${params.roleTitle},
+        ${permsJson}::jsonb,
+        ${params.passwordHash ?? null},
+        ${params.isActive},
+        ${params.notifyTelegram},
+        ${params.addedBy}
+      )
+      ON CONFLICT (telegram_id) DO UPDATE SET
+        first_name = EXCLUDED.first_name,
+        username = COALESCE(EXCLUDED.username, managers.username),
+        role_title = EXCLUDED.role_title,
+        permissions = EXCLUDED.permissions,
+        password_hash = COALESCE(${params.passwordHash ?? null}, managers.password_hash),
+        is_active = EXCLUDED.is_active,
+        notify_telegram = EXCLUDED.notify_telegram,
+        updated_at = NOW()
+      RETURNING
+        telegram_id, first_name, username, role_title, permissions,
+        (password_hash IS NOT NULL AND password_hash <> '') AS has_pwd,
+        is_active, notify_telegram, added_by,
+        EXTRACT(EPOCH FROM created_at) * 1000 AS created_ms,
+        EXTRACT(EPOCH FROM updated_at) * 1000 AS updated_ms
+    `) as Array<Record<string, unknown>>;
+    if (!rows[0]) return null;
+    return {
+      ...mapManagerRow(rows[0]),
+      passwordHash: undefined,
+      hasPassword: Boolean(rows[0].has_pwd),
+    };
+  } catch (err) {
+    console.error('[Neon dbUpsertManager Error]', err);
+    return null;
+  }
+}
+
+export async function dbDeleteManager(telegramId: string): Promise<boolean> {
+  const sql = getSql();
+  if (!sql || !(await ensureDbSchema())) return false;
+  try {
+    await sql`DELETE FROM managers WHERE telegram_id = ${telegramId}`;
+    return true;
+  } catch (err) {
+    console.error('[Neon dbDeleteManager Error]', err);
+    return false;
+  }
+}
+
+export async function dbAppendCrmEvent(entry: {
+  id: string;
+  eventType: DbCrmEvent['eventType'];
+  title: string;
+  message: string;
+  userId?: string;
+  amount?: number;
+}): Promise<boolean> {
+  const sql = getSql();
+  if (!sql || !(await ensureDbSchema())) return false;
+  try {
+    await sql`
+      INSERT INTO crm_events (id, event_type, title, message, user_id, amount)
+      VALUES (
+        ${entry.id},
+        ${entry.eventType},
+        ${entry.title.slice(0, 140)},
+        ${entry.message.slice(0, 500)},
+        ${entry.userId ?? null},
+        ${typeof entry.amount === 'number' ? Math.round(entry.amount) : null}
+      )
+      ON CONFLICT (id) DO NOTHING
+    `;
+    return true;
+  } catch (err) {
+    console.error('[Neon dbAppendCrmEvent Error]', err);
+    return false;
+  }
+}
+
+export async function dbListCrmEvents(limit = 80): Promise<DbCrmEvent[] | null> {
+  const sql = getSql();
+  if (!sql || !(await ensureDbSchema())) return null;
+  try {
+    const rows = (await sql`
+      SELECT
+        id, event_type, title, message, user_id, amount, is_read,
+        EXTRACT(EPOCH FROM created_at) * 1000 AS created_ms
+      FROM crm_events
+      ORDER BY created_at DESC
+      LIMIT ${limit}
+    `) as Array<Record<string, unknown>>;
+    return rows.map((r) => ({
+      id: String(r.id),
+      eventType: String(r.event_type) as DbCrmEvent['eventType'],
+      title: String(r.title),
+      message: String(r.message),
+      userId: r.user_id ? String(r.user_id) : undefined,
+      amount: r.amount !== null && r.amount !== undefined ? Number(r.amount) : undefined,
+      isRead: Boolean(r.is_read),
+      createdAt: Number(r.created_ms) || Date.now(),
+    }));
+  } catch (err) {
+    console.error('[Neon dbListCrmEvents Error]', err);
+    return null;
+  }
+}
+
+export async function dbMarkCrmEventsRead(eventIds?: string[]): Promise<boolean> {
+  const sql = getSql();
+  if (!sql || !(await ensureDbSchema())) return false;
+  try {
+    if (Array.isArray(eventIds) && eventIds.length > 0) {
+      await sql`UPDATE crm_events SET is_read = TRUE WHERE id = ANY(${eventIds})`;
+    } else {
+      await sql`UPDATE crm_events SET is_read = TRUE WHERE is_read = FALSE`;
+    }
+    return true;
+  } catch (err) {
+    console.error('[Neon dbMarkCrmEventsRead Error]', err);
+    return false;
+  }
+}
+
+export async function dbUpdateUserCrm(
+  telegramId: string,
+  crmTag: string,
+  crmNote: string
+): Promise<boolean> {
+  const sql = getSql();
+  if (!sql || !(await ensureDbSchema())) return false;
+  try {
+    const rows = (await sql`
+      UPDATE users
+      SET crm_tag = ${crmTag || null}, crm_note = ${crmNote || null}, updated_at = NOW()
+      WHERE telegram_id = ${telegramId}
+      RETURNING telegram_id
+    `) as Array<Record<string, unknown>>;
+    return rows.length > 0;
+  } catch (err) {
+    console.error('[Neon dbUpdateUserCrm Error]', err);
+    return false;
+  }
+}
+
+export async function dbGetUserDetailAdmin(telegramId: string): Promise<{
+  user: AdminUserRow;
+  transactions: DbTransaction[];
+  orders: DbPaymentOrder[];
+  projects: DbProjectSummary[];
+  referrals: Array<{ inviteeId: string; inviterBonus: number; createdAt: number }>;
+} | null> {
+  const sql = getSql();
+  if (!sql || !(await ensureDbSchema())) return null;
+  try {
+    const uRows = (await sql`
+      SELECT
+        u.telegram_id, u.chat_id, u.first_name, u.last_name, u.username,
+        u.full_name, u.contact, u.balance, u.referral_count, u.referred_by,
+        u.is_banned, u.crm_tag, u.crm_note,
+        EXTRACT(EPOCH FROM u.created_at) * 1000 AS created_ms,
+        EXTRACT(EPOCH FROM u.updated_at) * 1000 AS updated_ms,
+        (SELECT COUNT(*)::int FROM projects p WHERE p.telegram_id = u.telegram_id) AS project_count,
+        COALESCE((SELECT SUM(t.amount)::bigint FROM transactions t WHERE t.telegram_id = u.telegram_id AND t.amount > 0 AND t.external_order_id IS NOT NULL), 0) AS total_deposited,
+        COALESCE((SELECT SUM(ABS(t.amount))::bigint FROM transactions t WHERE t.telegram_id = u.telegram_id AND t.amount < 0), 0) AS total_spent
+      FROM users u
+      WHERE u.telegram_id = ${telegramId}
+      LIMIT 1
+    `) as Array<Record<string, unknown>>;
+
+    const r = uRows[0];
+    if (!r) return null;
+
+    const [transactions, oRows, projects, refRows] = await Promise.all([
+      dbListUserTransactions(telegramId, 50),
+      sql`
+        SELECT order_id, telegram_id, chat_id, amount, pay_url, method, status, is_test, credited,
+               EXTRACT(EPOCH FROM created_at) * 1000 AS created_ms
+        FROM payment_orders
+        WHERE telegram_id = ${telegramId}
+        ORDER BY created_at DESC
+        LIMIT 30
+      ` as Promise<Array<Record<string, unknown>>>,
+      dbListProjects(telegramId, 30),
+      sql`
+        SELECT invitee_id, inviter_bonus, EXTRACT(EPOCH FROM created_at) * 1000 AS created_ms
+        FROM referrals
+        WHERE inviter_id = ${telegramId}
+        ORDER BY created_at DESC
+        LIMIT 30
+      ` as Promise<Array<Record<string, unknown>>>,
+    ]);
+
+    return {
+      user: {
+        telegramId: String(r.telegram_id),
+        chatId: String(r.chat_id),
+        firstName: String(r.first_name),
+        lastName: r.last_name ? String(r.last_name) : undefined,
+        username: r.username ? String(r.username) : undefined,
+        fullName: r.full_name ? String(r.full_name) : undefined,
+        contact: r.contact ? String(r.contact) : undefined,
+        balance: Number(r.balance) || 0,
+        referralCount: Number(r.referral_count) || 0,
+        referredBy: r.referred_by ? String(r.referred_by) : undefined,
+        isBanned: Boolean(r.is_banned),
+        projectCount: Number(r.project_count) || 0,
+        crmTag: r.crm_tag ? String(r.crm_tag) : undefined,
+        crmNote: r.crm_note ? String(r.crm_note) : undefined,
+        totalDeposited: Number(r.total_deposited) || 0,
+        totalSpent: Number(r.total_spent) || 0,
+        createdAt: Number(r.created_ms) || Date.now(),
+        updatedAt: Number(r.updated_ms) || Date.now(),
+      },
+      transactions,
+      orders: oRows.map((o) => ({
+        orderId: String(o.order_id),
+        telegramId: o.telegram_id ? String(o.telegram_id) : undefined,
+        chatId: o.chat_id ? String(o.chat_id) : undefined,
+        amount: Number(o.amount) || 0,
+        payUrl: o.pay_url ? String(o.pay_url) : '',
+        method: o.method ? String(o.method) : undefined,
+        status: String(o.status || 'pending') as DbPaymentOrder['status'],
+        isTest: Boolean(o.is_test),
+        credited: Boolean(o.credited),
+        createdAt: Number(o.created_ms) || Date.now(),
+      })),
+      projects: projects || [],
+      referrals: refRows.map((rf) => ({
+        inviteeId: String(rf.invitee_id),
+        inviterBonus: Number(rf.inviter_bonus) || 0,
+        createdAt: Number(rf.created_ms) || Date.now(),
+      })),
+    };
+  } catch (err) {
+    console.error('[Neon dbGetUserDetailAdmin Error]', err);
+    return null;
+  }
+}
+
+export async function dbGetAdminAnalytics(days = 14): Promise<{
+  daily: Array<{ day: string; newUsers: number; paidRevenue: number; paidOrders: number; aiSpent: number }>;
+  topSpenders: AdminUserRow[];
+  serviceBreakdown: Array<{ label: string; count: number; totalAmount: number }>;
+} | null> {
+  const sql = getSql();
+  if (!sql || !(await ensureDbSchema())) return null;
+
+  const safeDays = Math.min(30, Math.max(7, Math.round(days)));
+  try {
+    const [uDaily, pDaily, sDaily, topRows, srvRows] = await Promise.all([
+      sql`
+        SELECT TO_CHAR(DATE_TRUNC('day', created_at), 'MM-DD') AS day_key, COUNT(*)::int AS cnt
+        FROM users
+        WHERE created_at >= NOW() - (${safeDays} || ' days')::interval
+        GROUP BY 1
+        ORDER BY 1 ASC
+      ` as Promise<Array<Record<string, unknown>>>,
+      sql`
+        SELECT TO_CHAR(DATE_TRUNC('day', updated_at), 'MM-DD') AS day_key,
+               COUNT(*)::int AS orders,
+               COALESCE(SUM(amount), 0)::bigint AS revenue
+        FROM payment_orders
+        WHERE status = 'paid' AND is_test = FALSE AND updated_at >= NOW() - (${safeDays} || ' days')::interval
+        GROUP BY 1
+        ORDER BY 1 ASC
+      ` as Promise<Array<Record<string, unknown>>>,
+      sql`
+        SELECT TO_CHAR(DATE_TRUNC('day', created_at), 'MM-DD') AS day_key,
+               COALESCE(SUM(ABS(amount)), 0)::bigint AS spent
+        FROM transactions
+        WHERE amount < 0 AND created_at >= NOW() - (${safeDays} || ' days')::interval
+        GROUP BY 1
+        ORDER BY 1 ASC
+      ` as Promise<Array<Record<string, unknown>>>,
+      sql`
+        SELECT
+          u.telegram_id, u.chat_id, u.first_name, u.last_name, u.username,
+          u.full_name, u.contact, u.balance, u.referral_count, u.referred_by,
+          u.is_banned, u.crm_tag, u.crm_note,
+          EXTRACT(EPOCH FROM u.created_at) * 1000 AS created_ms,
+          EXTRACT(EPOCH FROM u.updated_at) * 1000 AS updated_ms,
+          COALESCE((SELECT SUM(t.amount)::bigint FROM transactions t WHERE t.telegram_id = u.telegram_id AND t.amount > 0 AND t.external_order_id IS NOT NULL), 0) AS total_deposited,
+          COALESCE((SELECT SUM(ABS(t.amount))::bigint FROM transactions t WHERE t.telegram_id = u.telegram_id AND t.amount < 0), 0) AS total_spent
+        FROM users u
+        ORDER BY total_deposited DESC, total_spent DESC, u.balance DESC
+        LIMIT 10
+      ` as Promise<Array<Record<string, unknown>>>,
+      sql`
+        SELECT
+          SPLIT_PART(title, ':', 1) AS svc_label,
+          COUNT(*)::int AS cnt,
+          COALESCE(SUM(ABS(amount)), 0)::bigint AS total_amt
+        FROM transactions
+        WHERE amount < 0
+        GROUP BY 1
+        ORDER BY total_amt DESC
+        LIMIT 8
+      ` as Promise<Array<Record<string, unknown>>>,
+    ]);
+
+    const dayMap = new Map<
+      string,
+      { day: string; newUsers: number; paidRevenue: number; paidOrders: number; aiSpent: number }
+    >();
+    const now = new Date();
+    for (let i = safeDays - 1; i >= 0; i--) {
+      const d = new Date(now.getTime() - i * 86_400_000);
+      const key = `${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+      dayMap.set(key, { day: key, newUsers: 0, paidRevenue: 0, paidOrders: 0, aiSpent: 0 });
+    }
+    for (const r of uDaily) {
+      const item = dayMap.get(String(r.day_key));
+      if (item) item.newUsers = Number(r.cnt) || 0;
+    }
+    for (const r of pDaily) {
+      const item = dayMap.get(String(r.day_key));
+      if (item) {
+        item.paidOrders = Number(r.orders) || 0;
+        item.paidRevenue = Number(r.revenue) || 0;
+      }
+    }
+    for (const r of sDaily) {
+      const item = dayMap.get(String(r.day_key));
+      if (item) item.aiSpent = Number(r.spent) || 0;
+    }
+
+    return {
+      daily: Array.from(dayMap.values()),
+      topSpenders: topRows.map((r) => ({
+        telegramId: String(r.telegram_id),
+        chatId: String(r.chat_id),
+        firstName: String(r.first_name),
+        lastName: r.last_name ? String(r.last_name) : undefined,
+        username: r.username ? String(r.username) : undefined,
+        fullName: r.full_name ? String(r.full_name) : undefined,
+        contact: r.contact ? String(r.contact) : undefined,
+        balance: Number(r.balance) || 0,
+        referralCount: Number(r.referral_count) || 0,
+        referredBy: r.referred_by ? String(r.referred_by) : undefined,
+        isBanned: Boolean(r.is_banned),
+        projectCount: 0,
+        crmTag: r.crm_tag ? String(r.crm_tag) : undefined,
+        crmNote: r.crm_note ? String(r.crm_note) : undefined,
+        totalDeposited: Number(r.total_deposited) || 0,
+        totalSpent: Number(r.total_spent) || 0,
+        createdAt: Number(r.created_ms) || Date.now(),
+        updatedAt: Number(r.updated_ms) || Date.now(),
+      })),
+      serviceBreakdown: srvRows.map((s) => ({
+        label: String(s.svc_label || 'AI Xizmat'),
+        count: Number(s.cnt) || 0,
+        totalAmount: Number(s.total_amt) || 0,
+      })),
+    };
+  } catch (err) {
+    console.error('[Neon dbGetAdminAnalytics Error]', err);
+    return null;
+  }
+}
+
+export async function dbListPromoCodes(): Promise<DbPromoCode[] | null> {
+  const sql = getSql();
+  if (!sql || !(await ensureDbSchema())) return null;
+  try {
+    const rows = (await sql`
+      SELECT
+        code, bonus_amount, max_uses, used_count, is_active, created_by,
+        CASE WHEN expires_at IS NULL THEN NULL ELSE EXTRACT(EPOCH FROM expires_at) * 1000 END AS exp_ms,
+        EXTRACT(EPOCH FROM created_at) * 1000 AS created_ms
+      FROM promo_codes
+      ORDER BY created_at DESC
+      LIMIT 100
+    `) as Array<Record<string, unknown>>;
+    return rows.map((r) => ({
+      code: String(r.code),
+      bonusAmount: Number(r.bonus_amount) || 0,
+      maxUses: Number(r.max_uses) || 0,
+      usedCount: Number(r.used_count) || 0,
+      isActive: r.is_active !== false,
+      expiresAt: r.exp_ms ? Number(r.exp_ms) : null,
+      createdBy: r.created_by ? String(r.created_by) : undefined,
+      createdAt: Number(r.created_ms) || Date.now(),
+    }));
+  } catch (err) {
+    console.error('[Neon dbListPromoCodes Error]', err);
+    return null;
+  }
+}
+
+export async function dbUpsertPromoCode(params: {
+  code: string;
+  bonusAmount: number;
+  maxUses: number;
+  isActive: boolean;
+  expiresAt?: number | null;
+  createdBy: string;
+}): Promise<DbPromoCode | null> {
+  const sql = getSql();
+  if (!sql || !(await ensureDbSchema())) return null;
+  try {
+    const expIso = params.expiresAt ? new Date(params.expiresAt).toISOString() : null;
+    const rows = (await sql`
+      INSERT INTO promo_codes (code, bonus_amount, max_uses, is_active, expires_at, created_by)
+      VALUES (
+        ${params.code},
+        ${Math.max(500, Math.min(1_000_000, Math.round(params.bonusAmount)))},
+        ${Math.max(1, Math.min(100_000, Math.round(params.maxUses)))},
+        ${params.isActive},
+        ${expIso}::timestamptz,
+        ${params.createdBy}
+      )
+      ON CONFLICT (code) DO UPDATE SET
+        bonus_amount = EXCLUDED.bonus_amount,
+        max_uses = EXCLUDED.max_uses,
+        is_active = EXCLUDED.is_active,
+        expires_at = EXCLUDED.expires_at
+      RETURNING
+        code, bonus_amount, max_uses, used_count, is_active, created_by,
+        CASE WHEN expires_at IS NULL THEN NULL ELSE EXTRACT(EPOCH FROM expires_at) * 1000 END AS exp_ms,
+        EXTRACT(EPOCH FROM created_at) * 1000 AS created_ms
+    `) as Array<Record<string, unknown>>;
+    const r = rows[0];
+    if (!r) return null;
+    return {
+      code: String(r.code),
+      bonusAmount: Number(r.bonus_amount) || 0,
+      maxUses: Number(r.max_uses) || 0,
+      usedCount: Number(r.used_count) || 0,
+      isActive: r.is_active !== false,
+      expiresAt: r.exp_ms ? Number(r.exp_ms) : null,
+      createdBy: r.created_by ? String(r.created_by) : undefined,
+      createdAt: Number(r.created_ms) || Date.now(),
+    };
+  } catch (err) {
+    console.error('[Neon dbUpsertPromoCode Error]', err);
+    return null;
+  }
+}
+
+export async function dbDeletePromoCode(code: string): Promise<boolean> {
+  const sql = getSql();
+  if (!sql || !(await ensureDbSchema())) return false;
+  try {
+    await sql`DELETE FROM promo_codes WHERE code = ${code}`;
+    return true;
+  } catch (err) {
+    console.error('[Neon dbDeletePromoCode Error]', err);
+    return false;
+  }
+}
+
+export async function dbRedeemPromoCode(params: {
+  code: string;
+  telegramId: string;
+  dateLabel: string;
+}): Promise<
+  | { ok: true; bonusAmount: number; balance: number }
+  | { ok: false; error: string }
+  | null
+> {
+  const sql = getSql();
+  if (!sql || !(await ensureDbSchema())) return null;
+  try {
+    const promoRows = (await sql`
+      SELECT code, bonus_amount, max_uses, used_count, is_active, expires_at
+      FROM promo_codes
+      WHERE code = ${params.code}
+      LIMIT 1
+    `) as Array<Record<string, unknown>>;
+    const p = promoRows[0];
+    if (!p) return { ok: false, error: 'Promokod topilmadi.' };
+    if (p.is_active === false) return { ok: false, error: 'Promokod faol emas.' };
+    if (p.expires_at && new Date(String(p.expires_at)).getTime() < Date.now()) {
+      return { ok: false, error: 'Promokod muddati tugagan.' };
+    }
+    if (Number(p.used_count) >= Number(p.max_uses)) {
+      return { ok: false, error: "Promokod limiti to'lgan." };
+    }
+
+    const already = (await sql`
+      SELECT id FROM promo_redemptions
+      WHERE code = ${params.code} AND telegram_id = ${params.telegramId}
+      LIMIT 1
+    `) as Array<Record<string, unknown>>;
+    if (already.length > 0) {
+      return { ok: false, error: 'Siz bu promokoddan allaqachon foydalangansiz.' };
+    }
+
+    const updatedPromo = (await sql`
+      UPDATE promo_codes
+      SET used_count = used_count + 1
+      WHERE code = ${params.code} AND is_active = TRUE AND used_count < max_uses
+      RETURNING bonus_amount
+    `) as Array<Record<string, unknown>>;
+    if (!updatedPromo.length) {
+      return { ok: false, error: "Promokod limiti to'lgan." };
+    }
+
+    const bonusAmount = Number(updatedPromo[0].bonus_amount) || 0;
+    const redId = `pr_${params.code}_${params.telegramId}`;
+    await sql`
+      INSERT INTO promo_redemptions (id, code, telegram_id, bonus_amount)
+      VALUES (${redId}, ${params.code}, ${params.telegramId}, ${bonusAmount})
+    `;
+
+    const txId = `promo_${params.code}_${params.telegramId}`;
+    await sql`
+      INSERT INTO transactions (id, telegram_id, title, method, amount, date_label)
+      VALUES (
+        ${txId},
+        ${params.telegramId},
+        ${`Promokod: ${params.code}`},
+        ${'Promokod'},
+        ${bonusAmount},
+        ${params.dateLabel}
+      )
+      ON CONFLICT (id) DO NOTHING
+    `;
+
+    const uRows = (await sql`
+      UPDATE users
+      SET balance = balance + ${bonusAmount}, updated_at = NOW()
+      WHERE telegram_id = ${params.telegramId}
+      RETURNING balance
+    `) as Array<Record<string, unknown>>;
+
+    return {
+      ok: true,
+      bonusAmount,
+      balance: Number(uRows[0]?.balance) || 0,
+    };
+  } catch (err) {
+    console.error('[Neon dbRedeemPromoCode Error]', err);
+    return null;
+  }
+}
+
+export async function dbListBroadcastTargets(
+  segment: 'all' | 'active' | 'vip' | 'zero_balance'
+): Promise<Array<{ telegramId: string; chatId: string; firstName: string }> | null> {
+  const sql = getSql();
+  if (!sql || !(await ensureDbSchema())) return null;
+  try {
+    const rows =
+      segment === 'vip'
+        ? ((await sql`
+            SELECT telegram_id, chat_id, first_name FROM users
+            WHERE is_banned = FALSE AND (crm_tag = 'vip' OR balance >= 10000)
+            ORDER BY updated_at DESC LIMIT 500
+          `) as Array<Record<string, unknown>>)
+        : segment === 'zero_balance'
+          ? ((await sql`
+              SELECT telegram_id, chat_id, first_name FROM users
+              WHERE is_banned = FALSE AND balance < 1000
+              ORDER BY updated_at DESC LIMIT 500
+            `) as Array<Record<string, unknown>>)
+          : ((await sql`
+              SELECT telegram_id, chat_id, first_name FROM users
+              WHERE is_banned = FALSE
+              ORDER BY updated_at DESC LIMIT 500
+            `) as Array<Record<string, unknown>>);
+
+    return rows.map((r) => ({
+      telegramId: String(r.telegram_id),
+      chatId: String(r.chat_id),
+      firstName: String(r.first_name || 'Foydalanuvchi'),
+    }));
+  } catch (err) {
+    console.error('[Neon dbListBroadcastTargets Error]', err);
+    return null;
+  }
+}
+
+export async function dbLogBroadcast(entry: DbBroadcastLog): Promise<boolean> {
+  const sql = getSql();
+  if (!sql || !(await ensureDbSchema())) return false;
+  try {
+    await sql`
+      INSERT INTO broadcast_logs (id, actor_id, target_segment, message, total_targets, sent_count, failed_count)
+      VALUES (
+        ${entry.id},
+        ${entry.actorId},
+        ${entry.targetSegment},
+        ${entry.message.slice(0, 2000)},
+        ${entry.totalTargets},
+        ${entry.sentCount},
+        ${entry.failedCount}
+      )
+    `;
+    return true;
+  } catch (err) {
+    console.error('[Neon dbLogBroadcast Error]', err);
+    return false;
+  }
+}
+
+export async function dbListBroadcastLogs(limit = 30): Promise<DbBroadcastLog[] | null> {
+  const sql = getSql();
+  if (!sql || !(await ensureDbSchema())) return null;
+  try {
+    const rows = (await sql`
+      SELECT id, actor_id, target_segment, message, total_targets, sent_count, failed_count,
+             EXTRACT(EPOCH FROM created_at) * 1000 AS created_ms
+      FROM broadcast_logs
+      ORDER BY created_at DESC
+      LIMIT ${limit}
+    `) as Array<Record<string, unknown>>;
+    return rows.map((r) => ({
+      id: String(r.id),
+      actorId: String(r.actor_id),
+      targetSegment: String(r.target_segment),
+      message: String(r.message),
+      totalTargets: Number(r.total_targets) || 0,
+      sentCount: Number(r.sent_count) || 0,
+      failedCount: Number(r.failed_count) || 0,
+      createdAt: Number(r.created_ms) || Date.now(),
+    }));
+  } catch (err) {
+    console.error('[Neon dbListBroadcastLogs Error]', err);
+    return null;
   }
 }

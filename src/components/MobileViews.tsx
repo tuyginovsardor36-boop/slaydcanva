@@ -30,8 +30,10 @@ import {
   AiServiceId,
   AppPricingSettings,
   BalanceTransaction,
+  ManagerPermission,
   MobileTab,
   ProjectSummary,
+  StaffRole,
   TelegramUser,
   TolovgoPaymentMode,
   UserProfile,
@@ -40,6 +42,7 @@ import {
 import {
   formatTelegramDisplayName,
   getTelegramAuthHeaders,
+  redeemPromoCode,
   TelegramAccountResponse,
   TelegramConfigResponse,
 } from '../utils/telegramClient';
@@ -231,7 +234,13 @@ interface TopUpViewProps {
   balance: number;
   tolovgoMode?: TolovgoPaymentMode;
   telegramSessionToken?: string | null;
-  onTopUp: (amount: number, method: string, externalOrderId?: string) => void;
+  onTopUp: (
+    amount: number,
+    method: string,
+    externalOrderId?: string,
+    serverBalance?: number
+  ) => void;
+  onPromoRedeemed?: (bonusAmount: number, serverBalance: number, code: string) => void;
   onNotify?: (type: 'ok' | 'err', text: string) => void;
 }
 
@@ -252,12 +261,15 @@ export const TopUpView: React.FC<TopUpViewProps> = ({
   tolovgoMode = 'live',
   telegramSessionToken = null,
   onTopUp,
+  onPromoRedeemed,
   onNotify,
 }) => {
   const [amountText, setAmountText] = useState('50000');
   const [method, setMethod] = useState('Click');
   const [creating, setCreating] = useState(false);
   const [checking, setChecking] = useState(false);
+  const [promoInput, setPromoInput] = useState('');
+  const [redeemingPromo, setRedeemingPromo] = useState(false);
   const [serverConfig, setServerConfig] = useState<{
     isTestMode: boolean;
     hasLiveKey: boolean;
@@ -323,6 +335,7 @@ export const TopUpView: React.FC<TopUpViewProps> = ({
           paid?: boolean;
           newlyCredited?: boolean;
           amount?: number;
+          balance?: number;
           error?: string;
         };
 
@@ -344,7 +357,8 @@ export const TopUpView: React.FC<TopUpViewProps> = ({
             onTopUpRef.current(
               finalAmount,
               order.isTest ? `TolovGo (Sinov) · ${order.method}` : `TolovGo · ${order.method}`,
-              order.orderId
+              order.orderId,
+              typeof data.balance === 'number' ? data.balance : undefined
             );
             onNotifyRef.current?.('ok', `TolovGo to'lovi tasdiqlandi: +${formatSom(finalAmount)}`);
           }
@@ -429,6 +443,31 @@ export const TopUpView: React.FC<TopUpViewProps> = ({
       setErrorMsg("TolovGo xizmatiga ulanib bo'lmadi. Internet aloqasini tekshiring.");
     } finally {
       setCreating(false);
+    }
+  };
+
+  const handleRedeemPromo = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanCode = promoInput.trim().toUpperCase();
+    if (cleanCode.length < 3 || redeemingPromo) return;
+    setRedeemingPromo(true);
+    setErrorMsg(null);
+    try {
+      const res = await redeemPromoCode(cleanCode, telegramSessionToken);
+      if (!res.ok) {
+        setErrorMsg(res.error || "Promokodni faollashtirib bo'lmadi.");
+        return;
+      }
+      setPromoInput('');
+      if (typeof res.balance === 'number' && typeof res.bonusAmount === 'number') {
+        onPromoRedeemed?.(res.bonusAmount, res.balance, cleanCode);
+      }
+      onNotifyRef.current?.(
+        'ok',
+        `Promokod (${cleanCode}) faollashtirildi: +${formatSom(res.bonusAmount || 0)}`
+      );
+    } finally {
+      setRedeemingPromo(false);
     }
   };
 
@@ -610,6 +649,36 @@ export const TopUpView: React.FC<TopUpViewProps> = ({
             </button>
           </form>
         )}
+
+        {/* Promo Code Redemption (Server-Verified Only) */}
+        <div className="pt-4 border-t border-slate-100">
+          <form onSubmit={handleRedeemPromo} className="space-y-2">
+            <label
+              htmlFor="promo-code-input"
+              className="flex items-center gap-1.5 text-xs font-medium text-slate-700"
+            >
+              <Gift className="w-3.5 h-3.5 text-red-600" />
+              <span>Promokod bormi?</span>
+            </label>
+            <div className="flex items-center gap-2">
+              <input
+                id="promo-code-input"
+                type="text"
+                value={promoInput}
+                onChange={(e) => setPromoInput(e.target.value.toUpperCase())}
+                placeholder="Masalan: SLAYD5000"
+                className="flex-1 min-w-0 text-xs font-mono uppercase text-slate-900 bg-slate-50 border border-slate-200 focus:border-red-600 focus:bg-white rounded-xl px-3 py-2 outline-none"
+              />
+              <button
+                type="submit"
+                disabled={promoInput.trim().length < 3 || redeemingPromo}
+                className="px-3.5 py-2 rounded-xl bg-[#111113] hover:bg-zinc-800 disabled:opacity-45 text-white text-xs font-medium shrink-0 transition-colors"
+              >
+                {redeemingPromo ? 'Tekshirilmoqda...' : 'Faollashtirish'}
+              </button>
+            </div>
+          </form>
+        </div>
       </div>
     </main>
   );
@@ -695,6 +764,7 @@ interface ProfileViewProps {
   pptxCount: number;
   pdfCount: number;
   isAdmin?: boolean;
+  staffRole?: StaffRole;
   pricingSettings?: AppPricingSettings;
   botUsername?: string | null;
   telegramUser?: TelegramUser | null;
@@ -705,6 +775,9 @@ interface ProfileViewProps {
     account?: TelegramAccountResponse;
     kvConfigured?: boolean;
     isAdmin?: boolean;
+    isManager?: boolean;
+    staffRole?: StaffRole;
+    managerPermissions?: ManagerPermission[];
   }) => void;
   onUpdateTelegramPrefs?: (prefs: { autoSendFiles?: boolean; notifyOnActivity?: boolean }) => void;
   onTelegramLogout?: () => void;
@@ -726,6 +799,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
   pptxCount,
   pdfCount,
   isAdmin = false,
+  staffRole = 'user',
   pricingSettings,
   botUsername,
   telegramUser,
@@ -796,6 +870,9 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
           account?: TelegramAccountResponse;
           kvConfigured?: boolean;
           isAdmin?: boolean;
+          isManager?: boolean;
+          staffRole?: StaffRole;
+          managerPermissions?: ManagerPermission[];
         };
         if (data.authenticated && data.user && data.sessionToken && active) {
           setWaitingTelegramAuth(false);
@@ -805,6 +882,9 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
             account: data.account,
             kvConfigured: data.kvConfigured,
             isAdmin: data.isAdmin,
+            isManager: data.isManager,
+            staffRole: data.staffRole,
+            managerPermissions: data.managerPermissions,
           });
         }
       } catch {
@@ -1169,24 +1249,28 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
         </section>
       )}
 
-      {/* Faqat ADMIN_TELEGRAM_ID foydalanuvchisi uchun Admin Panel kirish tugmasi */}
-      {isAdmin && onOpenAdminPanel && (
+      {/* Super Admin yoki Menejer uchun CRM Panelga kirish */}
+      {(isAdmin || staffRole === 'super_admin' || staffRole === 'manager') && onOpenAdminPanel && (
         <section className="max-w-md mx-auto bg-[#111113] text-white border border-zinc-800 rounded-2xl p-5 flex items-center justify-between gap-3">
           <div>
             <div className="flex items-center gap-1.5 text-sm font-semibold">
               <Shield className="w-4 h-4 text-red-500" />
-              <span>Boshqaruv paneli (Admin)</span>
+              <span>
+                {staffRole === 'manager' ? 'Menejer CRM Paneli' : 'Boshqaruv paneli (Admin CRM)'}
+              </span>
             </div>
             <p className="text-[11px] text-zinc-400 mt-0.5">
-              Narxlar, foydalanuvchilar, balanslar va TolovGo sozlamalari
+              {staffRole === 'manager'
+                ? 'CRM xabarnomalar, foydalanuvchilar, buyurtmalar va promokodlar'
+                : '20 xil CRM boshqaruvi, menejerlar, narxlar va TolovGo nazorati'}
             </p>
           </div>
           <button
             type="button"
             onClick={onOpenAdminPanel}
-            className="px-4 py-2 rounded-full bg-red-600 hover:bg-red-500 text-white text-xs font-semibold transition-colors shrink-0"
+            className="px-4 py-2 rounded-full bg-red-600 hover:bg-red-500 text-white text-xs font-semibold transition-colors shrink-0 whitespace-nowrap"
           >
-            Admin Panel
+            {staffRole === 'manager' ? 'Menejer Panel' : 'Admin Panel'}
           </button>
         </section>
       )}
