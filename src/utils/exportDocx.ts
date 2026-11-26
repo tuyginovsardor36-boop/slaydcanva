@@ -227,14 +227,24 @@ export async function exportToDocx(
     }
 
     if (tag === 'hr') {
-      children.push(
-        new Paragraph({
-          border: {
-            bottom: { color: 'CBD5E1', size: 6, space: 1, style: BorderStyle.SINGLE },
-          },
-          spacing: { before: 120, after: 120 },
-        })
-      );
+      if (el.classList.contains('doc-page-break')) {
+        children.push(
+          new Paragraph({
+            pageBreakBefore: true,
+            spacing: { before: 0, after: 0 },
+            children: [],
+          })
+        );
+      } else {
+        children.push(
+          new Paragraph({
+            border: {
+              bottom: { color: 'CBD5E1', size: 6, space: 1, style: BorderStyle.SINGLE },
+            },
+            spacing: { before: 120, after: 120 },
+          })
+        );
+      }
       return;
     }
 
@@ -267,11 +277,17 @@ export async function exportToDocx(
       return;
     }
 
+    const isAcademicDoc = docData.marginPreset === 'gost_academic';
+    const hasIndent = Boolean(el.style?.textIndent && el.style.textIndent !== '0' && el.style.textIndent !== '0px');
     const runs = collectRuns(el, {}, defaultFont, baseSizePt);
     children.push(
       new Paragraph({
         alignment: getAlignment(el),
-        spacing: { after: 140 },
+        indent: hasIndent ? { firstLine: 709 } : undefined,
+        spacing: {
+          after: isAcademicDoc ? 100 : 140,
+          line: isAcademicDoc ? 360 : undefined,
+        },
         children: runs.length ? runs : [new TextRun('')],
       })
     );
@@ -299,20 +315,21 @@ export async function exportToDocx(
     children.push(new Paragraph({ text: '' }));
   }
 
-  const marginTwips =
-    docData.marginPreset === 'narrow' ? 720 : docData.marginPreset === 'wide' ? 1800 : 1440;
+  const pageMargin =
+    docData.marginPreset === 'gost_academic'
+      ? { top: 1134, bottom: 1134, left: 1701, right: 1134 } // O'zDST: 3cm left, 2cm top/right/bottom
+      : docData.marginPreset === 'narrow'
+        ? { top: 720, bottom: 720, left: 720, right: 720 }
+        : docData.marginPreset === 'wide'
+          ? { top: 1800, bottom: 1800, left: 1800, right: 1800 }
+          : { top: 1440, bottom: 1440, left: 1440, right: 1440 };
 
   const doc = new Document({
     sections: [
       {
         properties: {
           page: {
-            margin: {
-              top: marginTwips,
-              bottom: marginTwips,
-              left: marginTwips,
-              right: marginTwips,
-            },
+            margin: pageMargin,
           },
         },
         children,

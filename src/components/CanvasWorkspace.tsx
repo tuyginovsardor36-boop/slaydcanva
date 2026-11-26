@@ -1,15 +1,20 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   AlignCenter,
+  AlignHorizontalJustifyCenter,
   AlignLeft,
   AlignRight,
   ArrowDown,
   ArrowUp,
   Bold,
+  Check,
+  ChevronDown,
   Circle,
   Copy,
   ImagePlus,
   Italic,
+  LayoutTemplate,
+  Loader2,
   Minus,
   Palette,
   Plus,
@@ -19,6 +24,7 @@ import {
   Type,
   Underline,
   Undo2,
+  Wand2,
   X,
   Layers,
   Sparkles,
@@ -31,7 +37,23 @@ import {
   PPTX_CANVAS,
   uid,
 } from '../data/defaults';
-import { CanvasElement, CanvasPage, PdfOrientation, WorkspaceMode } from '../types/editor';
+import {
+  AI_TONE_OPTIONS,
+  applyThemeToCanvasPage,
+  createPresetSlidePage,
+  SLIDE_LAYOUT_PRESETS,
+  SLIDE_THEMES,
+  SlideLayoutPresetId,
+} from '../data/slideThemes';
+import {
+  AiTone,
+  CanvasElement,
+  CanvasPage,
+  PdfOrientation,
+  SlideDesignTheme,
+  WorkspaceMode,
+} from '../types/editor';
+import { getTelegramAuthHeaders } from '../utils/telegramClient';
 import { AiCanvasDrawModal } from './AiCanvasDrawModal';
 
 interface CanvasWorkspaceProps {
@@ -39,6 +61,8 @@ interface CanvasWorkspaceProps {
   onModeChange?: (mode: WorkspaceMode) => void;
   pages: CanvasPage[];
   activePageId: string;
+  telegramSessionToken?: string;
+  docTitle?: string;
   orientation?: PdfOrientation;
   onOrientationChange?: (orientation: PdfOrientation) => void;
   onSelectPage: (id: string) => void;
@@ -242,6 +266,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   onModeChange,
   pages,
   activePageId,
+  telegramSessionToken,
+  docTitle,
   orientation = 'portrait',
   onOrientationChange,
   onSelectPage,
@@ -264,6 +290,16 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const [showColorPalette, setShowColorPalette] = useState(false);
   const [showAiDrawModal, setShowAiDrawModal] = useState(false);
 
+  const [activeThemeId, setActiveThemeId] = useState<SlideDesignTheme>('academic_gold');
+  const [showLayoutMenu, setShowLayoutMenu] = useState(false);
+  const [showStyleMenu, setShowStyleMenu] = useState(false);
+  const [showAiAssist, setShowAiAssist] = useState(false);
+  const [aiAssistLoading, setAiAssistLoading] = useState(false);
+  const [aiAssistTip, setAiAssistTip] = useState<string | null>(null);
+  const [aiAssistError, setAiAssistError] = useState<string | null>(null);
+  const [aiNewSlidePrompt, setAiNewSlidePrompt] = useState('');
+  const [aiAssistTone, setAiAssistTone] = useState<AiTone>('academic');
+
   const dragRef = useRef<DragState | null>(null);
   const livePagesRef = useRef<CanvasPage[]>(pages);
   livePagesRef.current = pages;
@@ -272,6 +308,14 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
 
   const imageInputRef = useRef<HTMLInputElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
+
+  const closeAllPanels = () => {
+    setShowBgPalette(false);
+    setShowColorPalette(false);
+    setShowLayoutMenu(false);
+    setShowStyleMenu(false);
+    setShowAiAssist(false);
+  };
 
   // Reset zoom gracefully when switching between PPTX and PDF or changing orientation
   useEffect(() => {
@@ -294,6 +338,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     setEditingTextId(null);
     setShowBgPalette(false);
     setShowColorPalette(false);
+    setAiAssistTip(null);
+    setAiAssistError(null);
   }, [activePageId]);
 
   const selectedElement =
@@ -324,6 +370,11 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         return;
       }
 
+      if (e.key === 'Escape') {
+        closeAllPanels();
+        return;
+      }
+
       const target = e.target as HTMLElement | null;
       if (
         target &&
@@ -342,6 +393,32 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         } else {
           onUndo();
         }
+        return;
+      }
+
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'd' && selectedId) {
+        e.preventDefault();
+        duplicateSelected();
+        return;
+      }
+
+      if (
+        selectedId &&
+        (e.key === 'ArrowLeft' ||
+          e.key === 'ArrowRight' ||
+          e.key === 'ArrowUp' ||
+          e.key === 'ArrowDown')
+      ) {
+        e.preventDefault();
+        const step = e.shiftKey ? 10 : 1;
+        const dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0;
+        const dy = e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0;
+        updateActivePage((page) => ({
+          ...page,
+          elements: page.elements.map((el) =>
+            el.id === selectedId ? { ...el, x: el.x + dx, y: el.y + dy } : el
+          ),
+        }));
         return;
       }
 
@@ -545,6 +622,155 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     setEditingTextId(null);
   };
 
+  const duplicateSelected = () => {
+    if (!selectedElement) return;
+    const copy: CanvasElement = {
+      ...selectedElement,
+      id: uid(selectedElement.type),
+      x: Math.min(dims.width - 40, selectedElement.x + 22),
+      y: Math.min(dims.height - 40, selectedElement.y + 22),
+    };
+    updateActivePage((p) => ({
+      ...p,
+      elements: [...p.elements, copy],
+    }));
+    setSelectedId(copy.id);
+    setEditingTextId(null);
+  };
+
+  const centerSelectedHorizontally = () => {
+    if (!selectedElement) return;
+    updateSelectedElement({
+      x: Math.round((dims.width - selectedElement.width) / 2),
+    });
+  };
+
+  const insertPresetSlide = (layoutId: SlideLayoutPresetId) => {
+    const newPage = createPresetSlidePage(layoutId, activeThemeId, dims);
+    const activeIdx = pages.findIndex((p) => p.id === activePage.id);
+    const next = [...pages];
+    next.splice(activeIdx >= 0 ? activeIdx + 1 : pages.length, 0, newPage);
+    onUpdatePages(next, newPage.id);
+    setShowLayoutMenu(false);
+  };
+
+  const applyThemeStyle = (themeId: SlideDesignTheme, scope: 'current' | 'all') => {
+    setActiveThemeId(themeId);
+    if (scope === 'current') {
+      const idx = pages.findIndex((p) => p.id === activePage.id);
+      const next = pages.map((p, i) =>
+        p.id === activePage.id ? applyThemeToCanvasPage(p, themeId, i === 0) : p
+      );
+      onUpdatePages(next, idx >= 0 ? pages[idx].id : undefined);
+    } else {
+      const next = pages.map((p, i) => applyThemeToCanvasPage(p, themeId, i === 0));
+      onUpdatePages(next);
+    }
+    setShowStyleMenu(false);
+  };
+
+  const runAiAssistImprove = async (
+    action: 'sharpen' | 'shorten' | 'expand_facts' | 'polish_uzbek' | 'business_tone'
+  ) => {
+    const textItems = activePage.elements
+      .filter((el) => el.type === 'text' && typeof el.text === 'string' && el.text.trim().length > 0)
+      .map((el) => ({ id: el.id, text: formatCanvasText(el.text) }));
+
+    if (!textItems.length) {
+      setAiAssistError("Joriy slaydda tahrirlash uchun matn elementi topilmadi.");
+      return;
+    }
+
+    setAiAssistLoading(true);
+    setAiAssistError(null);
+    setAiAssistTip(null);
+    try {
+      const res = await fetch('/api/ai/canvas-assist', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...getTelegramAuthHeaders(telegramSessionToken),
+        },
+        body: JSON.stringify({
+          mode: 'improve_slide',
+          action,
+          pageTitle: activePage.title || docTitle || 'Slayd',
+          deckTopic: docTitle || activePage.title,
+          textItems,
+        }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(payload?.error || "AI yordamchi javob bermadi.");
+      }
+      const updates = Array.isArray(payload?.updates)
+        ? (payload.updates as Array<{ id: string; text: string }>)
+        : [];
+      if (updates.length > 0) {
+        const updateMap = new Map(updates.map((u) => [u.id, u.text]));
+        updateActivePage((p) => ({
+          ...p,
+          elements: p.elements.map((el) =>
+            updateMap.has(el.id) ? { ...el, text: updateMap.get(el.id) } : el
+          ),
+        }));
+      }
+      setAiAssistTip(
+        typeof payload?.tip === 'string' && payload.tip.trim()
+          ? payload.tip.trim()
+          : 'Slayd matnlari muvaffaqiyatli yaxshilandi.'
+      );
+    } catch (err) {
+      setAiAssistError(err instanceof Error ? err.message : 'Xatolik yuz berdi.');
+    } finally {
+      setAiAssistLoading(false);
+    }
+  };
+
+  const runAiAssistNewSlide = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const clean = aiNewSlidePrompt.trim();
+    if (!clean) {
+      setAiAssistError("Yangi slayd uchun qisqa mavzu yoki g'oya yozing.");
+      return;
+    }
+    setAiAssistLoading(true);
+    setAiAssistError(null);
+    setAiAssistTip(null);
+    try {
+      const res = await fetch('/api/ai/canvas-assist', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...getTelegramAuthHeaders(telegramSessionToken),
+        },
+        body: JSON.stringify({
+          mode: 'generate_slide',
+          prompt: clean,
+          deckTopic: docTitle || activePage.title,
+          designTheme: activeThemeId,
+          aiTone: aiAssistTone,
+          includeTopicImages: true,
+        }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok || !payload?.page) {
+        throw new Error(payload?.error || "Slayd yaratishda xatolik yuz berdi.");
+      }
+      const generated = payload.page as CanvasPage;
+      const activeIdx = pages.findIndex((p) => p.id === activePage.id);
+      const next = [...pages];
+      next.splice(activeIdx >= 0 ? activeIdx + 1 : pages.length, 0, generated);
+      onUpdatePages(next, generated.id);
+      setAiNewSlidePrompt('');
+      setShowAiAssist(false);
+    } catch (err) {
+      setAiAssistError(err instanceof Error ? err.message : 'Xatolik yuz berdi.');
+    } finally {
+      setAiAssistLoading(false);
+    }
+  };
+
   // Page management
   const addPage = () => {
     const newPage: CanvasPage = {
@@ -610,7 +836,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   };
 
   return (
-    <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+    <div className="flex-1 flex flex-col min-h-0 overflow-hidden relative">
       {/* Contextual Toolbar */}
       <div className="h-[46px] shrink-0 bg-white border-b border-slate-200 px-3 md:px-4 flex items-center justify-between gap-3 overflow-x-auto">
         <div className="flex items-center gap-1.5 shrink-0">
@@ -620,7 +846,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
               aria-label="Muhit"
               value={kind}
               onChange={(e) => onModeChange(e.target.value as WorkspaceMode)}
-              className="md:hidden text-xs font-semibold text-slate-800 bg-slate-100 border border-slate-200 rounded-full px-2.5 py-1 outline-none"
+              className="md:hidden text-xs font-semibold text-slate-800 bg-slate-100 border border-slate-200 rounded-lg px-2.5 py-1.5 outline-none"
             >
               <option value="pptx">PPTX</option>
               <option value="word">Word</option>
@@ -631,7 +857,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
             <button
               type="button"
               onClick={onOpenMobileSheet}
-              className="md:hidden flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-slate-700 bg-slate-100 rounded-full whitespace-nowrap"
+              className="md:hidden flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 rounded-lg whitespace-nowrap"
             >
               <Layers className="w-3.5 h-3.5" />
               <span className="font-mono tabular-nums">{pages.length}</span>
@@ -700,15 +926,77 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
             onChange={handleImageUpload}
             className="hidden"
           />
+
+          <span className="h-4 w-px bg-slate-200 mx-1" aria-hidden="true" />
+
+          {/* 1-Click Maketlar, Stil Temalari & AI Tools */}
+          <button
+            type="button"
+            onClick={() => {
+              const next = !showLayoutMenu;
+              closeAllPanels();
+              setShowLayoutMenu(next);
+            }}
+            className={`flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap border ${
+              showLayoutMenu
+                ? 'bg-slate-900 text-white border-slate-900'
+                : 'text-slate-700 bg-slate-50 hover:bg-slate-100 border-slate-200'
+            }`}
+          >
+            <LayoutTemplate className="w-3.5 h-3.5" />
+            <span>Maketlar</span>
+            <ChevronDown className="w-3 h-3 opacity-70" />
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              const next = !showStyleMenu;
+              closeAllPanels();
+              setShowStyleMenu(next);
+            }}
+            className={`flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap border ${
+              showStyleMenu
+                ? 'bg-slate-900 text-white border-slate-900'
+                : 'text-slate-700 bg-slate-50 hover:bg-slate-100 border-slate-200'
+            }`}
+          >
+            <Palette className="w-3.5 h-3.5 text-red-600" />
+            <span>Stil</span>
+            <ChevronDown className="w-3 h-3 opacity-70" />
+          </button>
+
           {kind === 'pptx' && (
-            <button
-              type="button"
-              onClick={() => setShowAiDrawModal(true)}
-              className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-red-700 bg-red-50 hover:bg-red-100 border border-red-200/80 rounded-md transition-colors whitespace-nowrap"
-            >
-              <Sparkles className="w-3.5 h-3.5 text-red-600" />
-              <span>AI Dizayn</span>
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={() => {
+                  const next = !showAiAssist;
+                  closeAllPanels();
+                  setShowAiAssist(next);
+                }}
+                className={`flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap border ${
+                  showAiAssist
+                    ? 'bg-red-600 text-white border-red-600'
+                    : 'text-red-700 bg-red-50 hover:bg-red-100 border-red-200/80'
+                }`}
+              >
+                <Wand2 className="w-3.5 h-3.5" />
+                <span>AI Yordamchi</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  closeAllPanels();
+                  setShowAiDrawModal(true);
+                }}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md transition-colors whitespace-nowrap"
+              >
+                <Sparkles className="w-3.5 h-3.5 text-red-600" />
+                <span>AI Dizayn</span>
+              </button>
+            </>
           )}
 
           {/* Selection Formatting */}
@@ -731,20 +1019,46 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                     ))}
                   </select>
 
-                  <select
-                    aria-label="O'lcham"
-                    value={selectedElement.fontSize || 18}
-                    onChange={(e) =>
-                      updateSelectedElement({ fontSize: Number(e.target.value) })
-                    }
-                    className="text-xs font-mono tabular-nums text-slate-700 bg-slate-50 border border-slate-200 rounded-md px-2 py-1 outline-none focus:border-red-500"
-                  >
-                    {[12, 14, 16, 18, 20, 24, 28, 32, 36, 44, 54, 64].map((sz) => (
-                      <option key={sz} value={sz}>
-                        {sz}
-                      </option>
-                    ))}
-                  </select>
+                  <div className="flex items-center bg-slate-50 border border-slate-200 rounded-md overflow-hidden">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        updateSelectedElement({
+                          fontSize: Math.max(10, (selectedElement.fontSize || 18) - 2),
+                        })
+                      }
+                      title="Matnni kichraytirish"
+                      className="px-1.5 py-1 text-slate-600 hover:bg-slate-100"
+                    >
+                      <Minus className="w-3 h-3" />
+                    </button>
+                    <select
+                      aria-label="O'lcham"
+                      value={selectedElement.fontSize || 18}
+                      onChange={(e) =>
+                        updateSelectedElement({ fontSize: Number(e.target.value) })
+                      }
+                      className="text-xs font-mono tabular-nums text-slate-700 bg-transparent px-1 py-1 outline-none"
+                    >
+                      {[10, 12, 14, 16, 18, 20, 22, 24, 28, 32, 36, 44, 54, 64].map((sz) => (
+                        <option key={sz} value={sz}>
+                          {sz}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        updateSelectedElement({
+                          fontSize: Math.min(84, (selectedElement.fontSize || 18) + 2),
+                        })
+                      }
+                      title="Matnni kattalashtirish"
+                      className="px-1.5 py-1 text-slate-600 hover:bg-slate-100"
+                    >
+                      <Plus className="w-3 h-3" />
+                    </button>
+                  </div>
 
                   <button
                     type="button"
@@ -902,8 +1216,55 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                 </div>
               )}
 
+              {(selectedElement.type === 'rect' || selectedElement.type === 'image') && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const cur = selectedElement.borderRadius || 0;
+                      const next = cur === 0 ? 12 : cur === 12 ? 24 : 0;
+                      updateSelectedElement({ borderRadius: next });
+                    }}
+                    title="Burchak radiusi"
+                    className="px-2 py-1 text-[11px] font-mono text-slate-700 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-md whitespace-nowrap"
+                  >
+                    R:{selectedElement.borderRadius || 0}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      updateSelectedElement({ shadow: !selectedElement.shadow })
+                    }
+                    title="Soya effekti"
+                    className={`px-2 py-1 text-[11px] font-medium border rounded-md whitespace-nowrap transition-colors ${
+                      selectedElement.shadow
+                        ? 'bg-slate-900 text-white border-slate-900'
+                        : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+                    }`}
+                  >
+                    Soya
+                  </button>
+                </>
+              )}
+
               <span className="h-4 w-px bg-slate-200 mx-0.5" aria-hidden="true" />
 
+              <button
+                type="button"
+                onClick={centerSelectedHorizontally}
+                title="Gorizontal markazlash"
+                className="p-1.5 rounded-md text-slate-600 hover:bg-slate-100"
+              >
+                <AlignHorizontalJustifyCenter className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={duplicateSelected}
+                title="Nusxalash (Ctrl+D)"
+                className="p-1.5 rounded-md text-slate-600 hover:bg-slate-100"
+              >
+                <Copy className="w-3.5 h-3.5" />
+              </button>
               <button
                 type="button"
                 onClick={() => moveLayer('up')}
@@ -1012,6 +1373,209 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         </div>
       </div>
 
+      {/* Floating Ergonomic Panels: Maketlar / Stil Temalari / AI Slayd Yordamchisi */}
+      {showLayoutMenu && (
+        <div className="absolute top-[52px] left-3 right-3 sm:right-auto sm:w-[460px] bg-white border border-slate-200 rounded-2xl shadow-xl p-3.5 z-40">
+          <div className="flex items-center justify-between mb-2.5">
+            <div>
+              <h3 className="text-xs font-bold text-slate-900">1-bosish tayyor slayd maketlari</h3>
+              <p className="text-[11px] text-slate-500">Tanlangan maket joriy slayddan keyin qo&apos;shiladi</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowLayoutMenu(false)}
+              className="p-1 rounded-md text-slate-400 hover:text-slate-700"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+          <div className="grid grid-cols-2 gap-2 max-h-[55vh] overflow-y-auto">
+            {SLIDE_LAYOUT_PRESETS.map((preset) => (
+              <button
+                key={preset.id}
+                type="button"
+                onClick={() => insertPresetSlide(preset.id)}
+                className="text-left p-2.5 rounded-xl border border-slate-200 hover:border-red-500 hover:bg-red-50/30 transition-colors"
+              >
+                <div className="text-xs font-semibold text-slate-900">{preset.title}</div>
+                <div className="text-[11px] text-slate-500 mt-0.5">{preset.subtitle}</div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {showStyleMenu && (
+        <div className="absolute top-[52px] left-3 right-3 sm:right-auto sm:w-[490px] bg-white border border-slate-200 rounded-2xl shadow-xl p-3.5 z-40">
+          <div className="flex items-center justify-between mb-2.5">
+            <div>
+              <h3 className="text-xs font-bold text-slate-900">Dizayn temasi va rang palitrasi</h3>
+              <p className="text-[11px] text-slate-500">Istalgan temani 1-bosishda slaydga qo&apos;llang</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowStyleMenu(false)}
+              className="p-1 rounded-md text-slate-400 hover:text-slate-700"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+          <div className="grid grid-cols-2 gap-2 max-h-[58vh] overflow-y-auto">
+            {SLIDE_THEMES.map((theme) => {
+              const isCur = activeThemeId === theme.id;
+              return (
+                <div
+                  key={theme.id}
+                  className={`rounded-xl border p-2.5 transition-colors ${
+                    isCur ? 'border-red-500 bg-red-50/30' : 'border-slate-200 bg-white'
+                  }`}
+                >
+                  <div className="flex items-center gap-2 mb-2">
+                    <div
+                      className="w-9 h-7 rounded border border-black/10 flex items-center justify-center shrink-0"
+                      style={{ backgroundColor: theme.pageBg }}
+                    >
+                      <span
+                        className="w-3.5 h-1.5 rounded-xs"
+                        style={{ backgroundColor: theme.primaryAccent }}
+                      />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="text-xs font-semibold text-slate-900 truncate">
+                        {theme.name}
+                      </div>
+                      <div className="text-[10px] text-slate-500 truncate">{theme.tagline}</div>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => applyThemeStyle(theme.id, 'current')}
+                      className="px-2 py-1.5 rounded-lg text-[11px] font-medium bg-slate-100 hover:bg-slate-200 text-slate-800 transition-colors"
+                    >
+                      Shu slaydga
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => applyThemeStyle(theme.id, 'all')}
+                      className="px-2 py-1.5 rounded-lg text-[11px] font-medium bg-slate-900 hover:bg-slate-800 text-white transition-colors"
+                    >
+                      Hammasiga
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {showAiAssist && kind === 'pptx' && (
+        <div className="absolute top-[52px] left-3 right-3 sm:left-auto sm:right-4 sm:w-[420px] bg-white border border-slate-200 rounded-2xl shadow-xl p-4 z-40 space-y-3.5">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Wand2 className="w-4 h-4 text-red-600" />
+              <h3 className="text-xs font-bold text-slate-900">AI Slayd Yordamchisi (Pro)</h3>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowAiAssist(false)}
+              className="p-1 rounded-md text-slate-400 hover:text-slate-700"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          <div className="space-y-1.5">
+            <div className="text-[11px] font-semibold text-slate-700">
+              Joriy slaydni AI bilan yaxshilash
+            </div>
+            <div className="grid grid-cols-2 gap-1.5">
+              {[
+                { id: 'sharpen' as const, label: 'Kuchaytirish (Pro)' },
+                { id: 'shorten' as const, label: 'Ixcham qisqartirish' },
+                { id: 'expand_facts' as const, label: "Fakt & raqam qo'shish" },
+                { id: 'polish_uzbek' as const, label: 'Adabiy imlo & uslub' },
+                { id: 'business_tone' as const, label: 'Biznes / Pitch uslubi' },
+              ].map((btn) => (
+                <button
+                  key={btn.id}
+                  type="button"
+                  disabled={aiAssistLoading}
+                  onClick={() => runAiAssistImprove(btn.id)}
+                  className="px-2.5 py-2 text-left text-[11px] font-medium rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 hover:border-slate-300 disabled:opacity-50 transition-colors"
+                >
+                  {btn.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <form onSubmit={runAiAssistNewSlide} className="pt-2.5 border-t border-slate-100 space-y-2">
+            <div className="text-[11px] font-semibold text-slate-700">
+              Keyingi slaydga AI bilan yangi sahifa qo&apos;shish
+            </div>
+            <div className="flex flex-wrap gap-1">
+              {AI_TONE_OPTIONS.map((t) => (
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => setAiAssistTone(t.id)}
+                  className={`px-2 py-1 rounded-md text-[10px] font-medium border ${
+                    aiAssistTone === t.id
+                      ? 'bg-slate-900 text-white border-slate-900'
+                      : 'bg-white text-slate-600 border-slate-200'
+                  }`}
+                >
+                  {t.label.split(' / ')[0]}
+                </button>
+              ))}
+            </div>
+            <div className="flex gap-1.5">
+              <input
+                type="text"
+                value={aiNewSlidePrompt}
+                onChange={(e) => setAiNewSlidePrompt(e.target.value)}
+                placeholder="Masalan: Xulosa va tavsiyalar 3 ta karta bilan..."
+                className="flex-1 text-xs bg-slate-50 border border-slate-200 focus:border-red-600 focus:bg-white rounded-lg px-2.5 py-2 outline-none"
+              />
+              <button
+                type="submit"
+                disabled={aiAssistLoading}
+                className="px-3 py-2 rounded-lg text-xs font-semibold text-white bg-red-600 hover:bg-red-700 disabled:opacity-60 flex items-center gap-1 shrink-0"
+              >
+                {aiAssistLoading ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Sparkles className="w-3.5 h-3.5" />
+                )}
+                <span>Qo&apos;shish</span>
+              </button>
+            </div>
+          </form>
+
+          {aiAssistLoading && (
+            <div className="flex items-center gap-2 text-xs text-slate-600 bg-slate-50 rounded-lg px-3 py-2">
+              <Loader2 className="w-3.5 h-3.5 animate-spin text-red-600" />
+              <span>AI tahlil qilmoqda...</span>
+            </div>
+          )}
+
+          {aiAssistTip && (
+            <div className="flex items-start gap-2 text-xs text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
+              <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
+              <span>{aiAssistTip}</span>
+            </div>
+          )}
+
+          {aiAssistError && (
+            <div className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+              {aiAssistError}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Main Workspace Area */}
       <div className="flex-1 flex min-h-0 overflow-hidden">
         {/* Left Slide/Page Rail (Desktop) */}
@@ -1110,8 +1674,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
             if (e.target === e.currentTarget) {
               setSelectedId(null);
               setEditingTextId(null);
-              setShowBgPalette(false);
-              setShowColorPalette(false);
+              closeAllPanels();
             }
           }}
           className="flex-1 relative overflow-auto bg-[#F1F3F5] flex items-center justify-center p-4 md:p-8"
@@ -1381,6 +1944,53 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
             </div>
           </div>
 
+          {/* Mobile Quick Action Bar when element is selected (>= 44px touch targets) */}
+          {selectedElement && !editingTextId && (
+            <div className="md:hidden fixed bottom-[82px] left-3 right-16 bg-white/95 backdrop-blur border border-slate-200 rounded-xl shadow-md p-1.5 flex items-center gap-1 overflow-x-auto z-20">
+              {selectedElement.type === 'text' && (
+                <button
+                  type="button"
+                  onClick={() => setEditingTextId(selectedElement.id)}
+                  className="min-h-[44px] px-3 rounded-lg bg-slate-900 text-white text-xs font-medium whitespace-nowrap"
+                >
+                  Tahrirlash
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={duplicateSelected}
+                className="min-h-[44px] px-3 rounded-lg bg-slate-100 text-slate-800 text-xs font-medium whitespace-nowrap flex items-center gap-1"
+              >
+                <Copy className="w-3.5 h-3.5" />
+                <span>Nusxa</span>
+              </button>
+              <button
+                type="button"
+                onClick={centerSelectedHorizontally}
+                className="min-h-[44px] px-3 rounded-lg bg-slate-100 text-slate-800 text-xs font-medium whitespace-nowrap flex items-center gap-1"
+              >
+                <AlignHorizontalJustifyCenter className="w-3.5 h-3.5" />
+                <span>Markaz</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => moveLayer('up')}
+                className="min-h-[44px] px-3 rounded-lg bg-slate-100 text-slate-800 text-xs font-medium whitespace-nowrap flex items-center gap-1"
+              >
+                <ArrowUp className="w-3.5 h-3.5" />
+                <span>Oldinga</span>
+              </button>
+              <button
+                type="button"
+                onClick={deleteSelected}
+                className="min-h-[44px] px-3 rounded-lg bg-red-50 text-red-700 text-xs font-medium whitespace-nowrap flex items-center gap-1"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>O&apos;chirish</span>
+              </button>
+            </div>
+          )}
+
           {/* Quiet Bottom-Right Zoom Bar */}
           <div className="fixed bottom-[82px] right-3 md:bottom-4 md:right-5 bg-white border border-slate-200 rounded-lg shadow-xs px-2 py-1 flex items-center gap-1.5 z-20">
             <button
@@ -1509,6 +2119,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         <AiCanvasDrawModal
           open={showAiDrawModal}
           onClose={() => setShowAiDrawModal(false)}
+          telegramSessionToken={telegramSessionToken}
+          initialTheme={activeThemeId}
           onApplyPage={(drawnPage, applyMode) => {
             if (applyMode === 'replace') {
               const nextPages = pages.map((p) =>

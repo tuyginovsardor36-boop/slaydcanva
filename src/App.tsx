@@ -1186,6 +1186,7 @@ export default function App() {
       pdfPages: result.targetMode === 'pdf' ? result.pages : prev.pdfPages,
       activePdfId:
         result.targetMode === 'pdf' ? result.pages[0]?.id || prev.activePdfId : prev.activePdfId,
+      wordDoc: result.targetMode === 'word' && result.wordDoc ? result.wordDoc : prev.wordDoc,
       pdfOrientation: result.pdfOrientation || prev.pdfOrientation,
       balance:
         result.serverCharged && typeof result.newBalance === 'number'
@@ -1229,6 +1230,16 @@ export default function App() {
               exported.fileName,
               tokenSnapshot,
               `✨ ${result.serviceTitle}: ${result.docTitle}`
+            );
+          } else if (result.targetMode === 'word' && result.wordDoc) {
+            const exported = await exportToDocx(result.wordDoc, result.docTitle, {
+              download: false,
+            });
+            await sendBlobToTelegram(
+              exported.blob,
+              exported.fileName,
+              tokenSnapshot,
+              `📄 ${result.serviceTitle}: ${result.docTitle}`
             );
           } else if (result.targetMode === 'pdf') {
             const exported = await exportCanvasPagesToPdf(
@@ -1542,6 +1553,8 @@ export default function App() {
             onModeChange={handleModeChange}
             pages={state.pptxPages}
             activePageId={state.activePptxId}
+            telegramSessionToken={state.telegramSessionToken}
+            docTitle={state.docTitle}
             onSelectPage={(id) => setState((prev) => ({ ...prev, activePptxId: id }))}
             onUpdatePages={(nextPages, nextActiveId, options) =>
               updateCanvasPages('pptx', nextPages, nextActiveId, options)
@@ -1562,6 +1575,8 @@ export default function App() {
             onModeChange={handleModeChange}
             pages={state.pdfPages}
             activePageId={state.activePdfId}
+            telegramSessionToken={state.telegramSessionToken}
+            docTitle={state.docTitle}
             orientation={state.pdfOrientation}
             onOrientationChange={(pdfOrientation: PdfOrientation) =>
               setState((prev) => ({ ...prev, pdfOrientation }))

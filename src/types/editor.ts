@@ -7,9 +7,32 @@ export type DesktopView = 'services' | 'editor';
 export type AiServiceId =
   | 'academic_wave_pptx'
   | 'white_card_pptx'
+  | 'ai_canvas_design'
+  | 'independent_work_word'
+  | 'course_work_word'
+  | 'essay_article_word'
   | 'stitched_notebook_pdf'
-  | 'five_block_infographic'
-  | 'ai_canvas_design';
+  | 'five_block_infographic';
+
+export type AcademicWordStyle =
+  | 'classic_otm'
+  | 'framed_academic'
+  | 'modern_university'
+  | 'imrad_journal'
+  | 'analytical_essay'
+  | 'conference_thesis';
+
+export type SlideDesignTheme =
+  | 'academic_gold'
+  | 'royal_navy'
+  | 'crimson_dark'
+  | 'clean_white'
+  | 'emerald_green'
+  | 'terracotta_editorial'
+  | 'obsidian_minimal'
+  | 'violet_tech';
+
+export type AiTone = 'academic' | 'business' | 'lesson' | 'creative';
 
 export type ElementType = 'text' | 'rect' | 'circle' | 'image';
 
@@ -59,7 +82,7 @@ export interface WordDocumentData {
   html: string;
   fontFamily: string;
   fontSize: number;
-  marginPreset: 'normal' | 'narrow' | 'wide';
+  marginPreset: 'gost_academic' | 'normal' | 'narrow' | 'wide';
 }
 
 export interface BalanceTransaction {
@@ -119,9 +142,12 @@ export interface AppPricingSettings {
   services: {
     academic_wave_pptx: ServicePricingConfig;
     white_card_pptx: ServicePricingConfig;
+    ai_canvas_design: ServicePricingConfig;
+    independent_work_word: ServicePricingConfig;
+    course_work_word: ServicePricingConfig;
+    essay_article_word: ServicePricingConfig;
     stitched_notebook_pdf: ServicePricingConfig;
     five_block_infographic: { basePrice: number };
-    ai_canvas_design: ServicePricingConfig;
   };
   welcomeBonus: number;
   referralInviterBonus: number;

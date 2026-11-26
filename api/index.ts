@@ -78,9 +78,12 @@ import {
 type AiServiceId =
   | 'academic_wave_pptx'
   | 'white_card_pptx'
+  | 'ai_canvas_design'
+  | 'independent_work_word'
+  | 'course_work_word'
+  | 'essay_article_word'
   | 'stitched_notebook_pdf'
-  | 'five_block_infographic'
-  | 'ai_canvas_design';
+  | 'five_block_infographic';
 
 interface PreviousSlideSummary {
   tag?: string;
@@ -97,12 +100,27 @@ interface GeneratePreviousContext {
   previousSlides?: PreviousSlideSummary[];
 }
 
+type SlideDesignTheme =
+  | 'academic_gold'
+  | 'royal_navy'
+  | 'crimson_dark'
+  | 'clean_white'
+  | 'emerald_green'
+  | 'terracotta_editorial'
+  | 'obsidian_minimal'
+  | 'violet_tech';
+
+type AiTone = 'academic' | 'business' | 'lesson' | 'creative';
+
 interface GenerateRequestBody {
   serviceId: AiServiceId;
   topic: string;
   details?: string;
   slideCount?: number;
   institution?: string;
+  faculty?: string;
+  department?: string;
+  course?: string;
   authorName?: string;
   groupName?: string;
   subject?: string;
@@ -111,7 +129,10 @@ interface GenerateRequestBody {
   notebookNumber?: string;
   academicYear?: string;
   taskCount?: number;
-  designTheme?: 'academic_gold' | 'crimson_dark' | 'clean_white' | 'emerald_green';
+  sectionCount?: number;
+  academicStyle?: string;
+  designTheme?: SlideDesignTheme;
+  aiTone?: AiTone;
   includeTopicImages?: boolean;
   splitMode?: 'single' | 'part1' | 'part2';
   part1Count?: number;
@@ -199,6 +220,8 @@ const COMPACT_SCHEMA_GUIDES: Record<string, string> = {
     '{"mainTitle":"...","subTitle":"...","iconTheme":"science|medicine|education|tech|business","blocks":[{"number":1,"title":"...","bullets":[{"lead":"...","text":"..."}],"calloutLabels":["..."]}]}',
   slaydcanva_canvas_design:
     '{"deckTitle":"...","topicImageQueries":["english photo query 1","english photo query 2"],"slides":[{"title":"...","background":"#FFFFFF","primaryColor":"#1D4ED8","accentColor":"#DC2626","svgArtwork":"<svg xmlns=\\"http://www.w3.org/2000/svg\\" width=\\"960\\" height=\\"540\\" viewBox=\\"0 0 960 540\\">...</svg>","photoSlot":{"enabled":true,"x":550,"y":110,"width":356,"height":268,"borderRadius":16},"elements":[{"type":"rect|circle|text","x":56,"y":64,"width":450,"height":72,"text":"...","fontSize":32,"fontWeight":"bold","textAlign":"left","color":"#0F172A","fill":"#F8FAFC","stroke":"transparent","borderRadius":12,"shadow":true}]}]}',
+  slaydcanva_academic_doc:
+    '{"docKind":"independent_work|course_work|essay_article","title":"...","subtitle":"...","ministryHeader":"O\'ZBEKISTON RESPUBLIKASI OLIY TA\'LIM, FAN VA INNOVATSIYALAR VAZIRLIGI","abstract":"...","keywords":["..."],"planOutline":[{"code":"1-bob.","title":"..."}],"introduction":{"relevance":"...","priorResearch":"...","goal":"...","tasks":["..."],"object":"...","subjectMatter":"...","methods":"..."},"chapters":[{"code":"I BOB","title":"...","sections":[{"code":"1.1","title":"...","paragraphs":["...","..."]}]}],"comparisonTable":{"caption":"1-jadval. ...","headers":["...","...","..."],"rows":[["...","...","..."]]},"conclusion":["..."],"references":["..."]}',
 };
 
 async function readSseContent(
@@ -447,6 +470,7 @@ async function generateViaGemini(
     prompt: string;
     systemInstruction: string;
     responseSchema: Record<string, unknown>;
+    thinkingLevel?: ThinkingLevel;
     trace?: string[];
   }
 ): Promise<unknown> {
@@ -469,7 +493,7 @@ async function generateViaGemini(
           systemInstruction: params.systemInstruction,
           responseMimeType: 'application/json',
           responseSchema: params.responseSchema,
-          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          thinkingConfig: { thinkingLevel: params.thinkingLevel || ThinkingLevel.MEDIUM },
         },
       });
       params.trace?.push(`gem(${attempt.model}):ok:${Date.now() - tg}ms`);
@@ -490,6 +514,7 @@ async function generateStructuredJson(params: {
   prompt: string;
   systemInstruction: string;
   responseSchema: Record<string, unknown>;
+  thinkingLevel?: ThinkingLevel;
   trace?: string[];
 }): Promise<unknown> {
   const openRouterKey = process.env.OPENROUTER_API_KEY?.trim();
@@ -518,6 +543,66 @@ async function generateStructuredJson(params: {
   }
 
   throw new Error('AI_API_KEY_MISSING');
+}
+
+function getAiToneGuidance(tone?: AiTone): { label: string; promptRule: string; systemRole: string } {
+  switch (tone) {
+    case 'business':
+      return {
+        label: 'Biznes / Boshqaruv Pitch',
+        systemRole:
+          "Siz McKinsey/BCG darajasidagi strategik biznes maslahatchi va taqdimot me'morisiz.",
+        promptRule:
+          "USLUB: Biznes va rahbariyat uchun (Executive Pitch). Har bir slayd sarlavhasi shunchaki mavzu nomi emas, balki ANIQ XULOSA VA NATIJA bildirsin (masalan: 'Raqamlashtirish xarajatlarni 32% qisqartiradi'). Aniq KPI raqamlari, bozor ko'rsatkichlari, ROI va amaliy qarorlar keltir.",
+      };
+    case 'lesson':
+      return {
+        label: 'Pedagogik Darslik',
+        systemRole:
+          "Siz tajribali metodist va zamonaviy ta'lim dizaynerisiz.",
+        promptRule:
+          "USLUB: O'quvchi va tinglovchi uchun o'ta tushunarli pedagogik uslub. Har bir murakkab atamani sodda izoh + hayotiy misol bilan ochib ber, bosqichma-bosqich qoidalar, qiyosiy jadvallar va esda qoluvchi xulosalar tuz.",
+      };
+    case 'creative':
+      return {
+        label: 'Kreativ / Tahririy Hikoya',
+        systemRole:
+          "Siz TED va zamonaviy tahririy taqdimotlar muallifi hamda vizual hikoyachisiz.",
+        promptRule:
+          "USLUB: Kuchli vizual hikoya (Storytelling). Qiziqarli savol yoki fakt bilan boshla, ta'sirchan qisqa sarlavhalar yoz, kontrastli g'oyalar va yodda qoluvchi yakuniy tezis yarat.",
+      };
+    case 'academic':
+    default:
+      return {
+        label: 'Akademik / Ilmiy Tadqiqot',
+        systemRole:
+          "Siz yuqori malakali ilmiy muharrir, professor va akademik taqdimot dizaynerisiz.",
+        promptRule:
+          "USLUB: Ilmiy va himoya darajasida. Aniq ilmiy atamalar, tarixiy sanalar, statistik dalillar, muallif/olimlarning qarashlari, metodologik tahlil va real ilmiy adabiyotlar ro'yxatini keltir.",
+      };
+  }
+}
+
+function getThemePaletteHint(theme?: string): string {
+  switch (theme) {
+    case 'royal_navy':
+      return "Rang palitrasi: To'q qirollik ko'k (#0B132B / #0F172A fon), Oltin (#D4AF37) va Och moviy (#38BDF8) urg'u, matnlar oq (#F8FAFC / #E2E8F0), kartalar #1E293B.";
+    case 'crimson_dark':
+      return "Rang palitrasi: Chuqur qora-antratsit (#0F0F12 fon), Yoqut qizil (#DC2626) va Qahrabo (#F59E0B) urg'u, matnlar yorqin oq (#FFFFFF / #E4E4E7), kartalar #1F1F27.";
+    case 'emerald_green':
+      return "Rang palitrasi: Yalpiz-och yashil (#F0FDF4 / #F7FDF9 fon), Zumrad yashil (#059669 / #064E3B) urg'u, matnlar #064E3B / #1E293B, kartalar #ECFDF5.";
+    case 'terracotta_editorial':
+      return "Rang palitrasi: Iliq qum-krem (#FDF8F2 fon), Terakota marjon (#C2410C) va Oltin (#D97706) urg'u, matnlar to'q shokolad (#291D14 / #44352A), kartalar #F9F0E6.";
+    case 'obsidian_minimal':
+      return "Rang palitrasi: Zamonaviy kiber-tun (#090D16 / #0D131F fon), Moviy-tsian (#06B6D4) va Indigo (#818CF8) urg'u, matnlar #F8FAFC / #CBD5E1, kartalar #172236.";
+    case 'violet_tech':
+      return "Rang palitrasi: Och binafsha (#F5F3FF / #FAF9FF fon), Chuqur binafsha (#6D28D9) va Pushti (#EC4899) urg'u, matnlar #1E1B4B / #312E81, kartalar #F1EEFE.";
+    case 'academic_gold':
+      return "Rang palitrasi: Issiq krem-oltin (#FFFDF7 / #FFD443 fon), Safir ko'k (#1E40AF) va Oltin (#D97706) urg'u, matnlar #0F172A / #1E293B, kartalar #FAF6EE.";
+    case 'clean_white':
+    default:
+      return "Rang palitrasi: Sof oq (#FFFFFF fon), Kobalt ko'k (#2563EB) va Marjon (#EE6C5D) urg'u, matnlar #0F172A / #334155, kartalar #F6F7FA.";
+  }
 }
 
 const SLIDE_RESPONSE_SCHEMA = {
@@ -737,6 +822,79 @@ const CANVAS_DESIGN_SCHEMA = {
     },
   },
   required: ['deckTitle', 'slides'],
+};
+
+const ACADEMIC_DOC_RESPONSE_SCHEMA = {
+  type: Type.OBJECT,
+  properties: {
+    docKind: { type: Type.STRING },
+    title: { type: Type.STRING },
+    subtitle: { type: Type.STRING },
+    ministryHeader: { type: Type.STRING },
+    abstract: { type: Type.STRING },
+    keywords: { type: Type.ARRAY, items: { type: Type.STRING } },
+    planOutline: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          code: { type: Type.STRING },
+          title: { type: Type.STRING },
+        },
+        required: ['code', 'title'],
+      },
+    },
+    introduction: {
+      type: Type.OBJECT,
+      properties: {
+        relevance: { type: Type.STRING },
+        priorResearch: { type: Type.STRING },
+        goal: { type: Type.STRING },
+        tasks: { type: Type.ARRAY, items: { type: Type.STRING } },
+        object: { type: Type.STRING },
+        subjectMatter: { type: Type.STRING },
+        methods: { type: Type.STRING },
+      },
+      required: ['relevance', 'goal', 'tasks'],
+    },
+    chapters: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          code: { type: Type.STRING },
+          title: { type: Type.STRING },
+          sections: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                code: { type: Type.STRING },
+                title: { type: Type.STRING },
+                paragraphs: { type: Type.ARRAY, items: { type: Type.STRING } },
+              },
+              required: ['code', 'title', 'paragraphs'],
+            },
+          },
+        },
+        required: ['code', 'title', 'sections'],
+      },
+    },
+    comparisonTable: {
+      type: Type.OBJECT,
+      properties: {
+        caption: { type: Type.STRING },
+        headers: { type: Type.ARRAY, items: { type: Type.STRING } },
+        rows: {
+          type: Type.ARRAY,
+          items: { type: Type.ARRAY, items: { type: Type.STRING } },
+        },
+      },
+    },
+    conclusion: { type: Type.ARRAY, items: { type: Type.STRING } },
+    references: { type: Type.ARRAY, items: { type: Type.STRING } },
+  },
+  required: ['title', 'introduction', 'chapters', 'conclusion', 'references'],
 };
 
 const WIKIMEDIA_USER_AGENT = 'SlaydCanva/1.0 (https://slaydcanva.app; support@slaydcanva.app)';
@@ -1615,6 +1773,7 @@ app.post('/api/ai/canvas-draw', async (req, res) => {
     const body = (req.body || {}) as {
       prompt?: string;
       styleHint?: string;
+      designTheme?: string;
       includeTopicImages?: boolean;
     };
     const rawPrompt = typeof body.prompt === 'string' ? body.prompt.trim() : '';
@@ -1624,27 +1783,33 @@ app.post('/api/ai/canvas-draw', async (req, res) => {
     }
     const userPrompt = rawPrompt.slice(0, 600);
     const styleHint = typeof body.styleHint === 'string' ? body.styleHint.trim().slice(0, 240) : '';
+    const paletteHint = body.designTheme ? getThemePaletteHint(body.designTheme) : '';
     const includePhotos = body.includeTopicImages !== false;
 
     const prompt = `
 Foydalanuvchi so'rovi: "${userPrompt}"
-Uslub ishorasi: "${styleHint || "Zamonaviy tahririy (editorial) dizayn, aniq ierarxiya, chiroyli vektor illyustratsiya"}"
+Uslub ishorasi: "${styleHint || "Zamonaviy tahririy (editorial) dizayn, kuchli tipografik ierarxiya, chiroyli vektor illyustratsiya"}"
+${paletteHint}
 Real mavzu rasmi qo'shilsinmi: ${includePhotos ? "HA (photoSlot ajratilsin)" : "YO'Q (faqat AI vektor illyustratsiya va grafik elementlar)"}
 
-Vazifa: 960x540 o'lchamdagi 16:9 Canvas uchun aynan 1 ta noyob, professional slayd dizaynini O'ZING CHIZ.
+Vazifa: 960x540 o'lchamdagi 16:9 Canvas uchun aynan 1 ta noyob, tajribali art-direktor darajasidagi slayd dizaynini O'ZING CHIZ.
 Qoidalar:
-1. svgArtwork maydonida to'liq 960x540 o'lchamli chiroyli <svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540">...</svg> vektor kompozitsiya chiz: fon gradientlari, yumshoq geometrik to'lqinlar/shakllar va mavzuga mos maxsus vektor illyustratsiya yoki sxema. (SVG ichiga uzun matn yozma — matnlar elements massivida bo'lsin!).
-2. elements massivida o'zbek tilida (lotin yozuvida) tahrirlanadigan UI kartochkalar, badge, sarlavha (fontSize: 28-36), qisqa izoh va 2-4 ta asosiy blok (rect + text) joylashtir. Matnlar bir-birining ustiga chiqmasin!
-3. Kontrast mukammal bo'lsin: och fonda to'q matn (#0F172A), to'q fonda oq matn (#FFFFFF).
-4. ${includePhotos ? "photoSlot (enabled: true) uchun matn bilan to'qnashmaydigan alohida toza joy (masalan x:556, y:108, width:356, height:268) ajrat va topicImageQueries ga mavzuga aynan mos inglizcha 2-3 ta aniq fotosurat qidiruv so'zini yoz." : "photoSlot.enabled = false qil va bo'sh joyni SVG illyustratsiya bilan to'ldir."}
+1. svgArtwork maydonida to'liq 960x540 o'lchamli chiroyli <svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540">...</svg> vektor kompozitsiya chiz: fon gradientlari, yumshoq geometrik to'lqinlar/shakllar va mavzuga mos vektor illyustratsiya yoki sxema. (SVG ichida uzun matn yozma — barcha matnlar elements massivida bo'lsin!).
+2. elements massivida o'zbek tilida (lotin yozuvida) aniq tahrirlanadigan UI bloklar yarat:
+   - Yuqori chap badge (rect + text),
+   - Kuchli, mazmunli sarlavha (fontSize: 28-36, bold), qisqa izoh (fontSize: 13-15),
+   - 2-4 ta mazmunli karta (rect + text) aniq fakt, son yoki qisqa tezislar bilan. Matnlar kartalar chegarasidan chiqib ketmasin va bir-birining ustiga chiqmasin!
+3. Kontrast mukammal bo'lsin: och fonda to'q matn (#0F172A), to'q fonda yorqin oq matn (#FFFFFF / #E2E8F0).
+4. ${includePhotos ? "photoSlot (enabled: true) uchun matn bilan to'qnashmaydigan alohida toza joy (masalan x:556, y:110, width:356, height:268) ajrat va topicImageQueries ga mavzuga aynan mos inglizcha 2-3 ta aniq fotosurat qidiruv so'zini yoz." : "photoSlot.enabled = false qil va bo'sh joyni SVG illyustratsiya bilan boyit."}
 `;
 
     const rawData = (await generateStructuredJson({
       schemaName: 'slaydcanva_canvas_design',
       prompt,
       systemInstruction:
-        "Siz professional grafik dizayner va SVG illyustratorsiz. 960x540 slayd kanvasiga chiroyli, bir-birini to'smaydigan, kontrastli dizayn chizib JSON qaytaring.",
+        "Siz senior art-direktor, grafik dizayner va SVG illyustratorsiz. 960x540 slayd kanvasiga mukammal proporsiyali, bir-birini to'smaydigan, kontrastli va ma'lumotga boy dizayn chizib faqat JSON qaytaring.",
       responseSchema: CANVAS_DESIGN_SCHEMA,
+      thinkingLevel: ThinkingLevel.MEDIUM,
       trace,
     })) as Record<string, unknown>;
 
@@ -1675,6 +1840,162 @@ Qoidalar:
     res.status(500).json({
       error: "AI dizayn chizishda xatolik yuz berdi. Qaytadan urinib ko'ring.",
     });
+  }
+});
+
+const CANVAS_ASSIST_TEXT_SCHEMA = {
+  type: Type.OBJECT,
+  properties: {
+    updates: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          id: { type: Type.STRING },
+          text: { type: Type.STRING },
+        },
+        required: ['id', 'text'],
+      },
+    },
+    tip: { type: Type.STRING },
+  },
+  required: ['updates'],
+};
+
+app.post('/api/ai/canvas-assist', async (req, res) => {
+  const trace: string[] = [];
+  try {
+    const tgUser = getAuthenticatedTelegramUser(req);
+    if (!tgUser) {
+      res.status(401).json({ error: 'AI yordamchidan foydalanish uchun avval Telegram orqali kiring.' });
+      return;
+    }
+    const body = (req.body || {}) as {
+      mode?: 'improve_slide' | 'generate_slide';
+      action?: 'sharpen' | 'shorten' | 'expand_facts' | 'polish_uzbek' | 'business_tone';
+      pageTitle?: string;
+      deckTopic?: string;
+      designTheme?: string;
+      aiTone?: AiTone;
+      includeTopicImages?: boolean;
+      prompt?: string;
+      textItems?: Array<{ id: string; text: string }>;
+    };
+
+    if (body.mode === 'generate_slide') {
+      const rawPrompt = typeof body.prompt === 'string' ? body.prompt.trim() : '';
+      if (!rawPrompt) {
+        res.status(400).json({ error: "Yangi slayd uchun mavzu yoki ko'rsatma yozing." });
+        return;
+      }
+      const toneGuide = getAiToneGuidance(body.aiTone);
+      const paletteHint = getThemePaletteHint(body.designTheme);
+      const includePhotos = body.includeTopicImages !== false;
+      const deckCtx = typeof body.deckTopic === 'string' && body.deckTopic.trim() ? `Umumiy taqdimot mavzusi: "${body.deckTopic.trim().slice(0, 180)}".` : '';
+
+      const prompt = `
+${deckCtx}
+Yangi slayd so'rovi: "${rawPrompt.slice(0, 500)}"
+${toneGuide.promptRule}
+${paletteHint}
+Real rasm kerakmi: ${includePhotos ? 'HA (agar mavzuga mos foto foydali bo‘lsa photoSlot.enabled=true qo‘y)' : "YO'Q (photoSlot.enabled=false)"}
+
+Vazifa: 960x540 Canvas uchun aynan 1 ta yuqori sifatli, tayyor slayd yarat.
+Qoidalar:
+- svgArtwork: to'liq 960x540 <svg ...>...</svg> fon va dekorativ elementlar (matnsiz).
+- elements: sarlavha (bold, 26-34px), qisqa izoh va 2-4 ta mazmunli karta (rect + text). Elementlar bir-birining ustiga chiqmasin.
+- Matnlar sof, adabiy o'zbek tilida (lotin yozuvida), aniq fakt va raqamlarga boy bo'lsin.
+`;
+      const rawData = (await generateStructuredJson({
+        schemaName: 'slaydcanva_canvas_design',
+        prompt,
+        systemInstruction: `${toneGuide.systemRole} 960x540 slayd kanvasiga mukammal joylashuv va kontrast bilan faqat JSON qaytaring.`,
+        responseSchema: CANVAS_DESIGN_SCHEMA,
+        thinkingLevel: ThinkingLevel.MEDIUM,
+        trace,
+      })) as Record<string, unknown>;
+
+      const aiQueries = Array.isArray(rawData.topicImageQueries)
+        ? (rawData.topicImageQueries as unknown[]).map((x) => String(x || '').trim()).filter(Boolean)
+        : [];
+      const realPhotos = includePhotos ? await searchRealTopicImages(rawPrompt, aiQueries, 1) : [];
+      const pages = normalizeAiCanvasPages(rawData, realPhotos, includePhotos);
+      if (!pages.length) {
+        res.status(500).json({ error: 'Slayd yaratib bo‘lmadi.' });
+        return;
+      }
+      res.setHeader('X-AI-Trace', trace.join(' | '));
+      res.json({ ok: true, mode: 'generate_slide', page: pages[0] });
+      return;
+    }
+
+    const items = Array.isArray(body.textItems)
+      ? body.textItems
+          .filter((it) => it && typeof it.id === 'string' && typeof it.text === 'string' && it.text.trim().length > 0)
+          .slice(0, 20)
+          .map((it) => ({ id: it.id, text: it.text.slice(0, 700) }))
+      : [];
+
+    if (!items.length) {
+      res.status(400).json({ error: 'Slaydda tahrirlash uchun matn elementlari topilmadi.' });
+      return;
+    }
+
+    const actionMap: Record<string, string> = {
+      sharpen:
+        "Matnlarni professional, ta'sirchan va aniq tezis shaklida kuchaytir. Slayd sarlavhalarini ma'noli xulosaga aylantir, bo'sh gaplarni olib tashla.",
+      shorten:
+        "Har bir matnni 30-45% ga qisqartirib, faqat eng muhim fakt va kalit fikrlarni qoldir — slayd o'qishga oson bo'lsin.",
+      expand_facts:
+        "Mazmunni buzmagan holda aniq misollar, raqamlar, yillar yoki ilmiy/amaliy detallar bilan boyit (lekin slayd kartasiga sig'adigan ixcham hajmda qoldir).",
+      polish_uzbek:
+        "Imlo, tinish belgilari va uslubni mukammal adabiy o'zbek tiliga (lotin yozuvi: o', g', sh, ch) keltir.",
+      business_tone:
+        "Matnlarni zamonaviy biznes/pitch uslubiga o'tkaz: natija, samaradorlik va KPI urg'usi bilan.",
+    };
+    const actionRule = actionMap[body.action || 'sharpen'] || actionMap.sharpen;
+
+    const prompt = `
+Taqdimot mavzusi: "${(body.deckTopic || body.pageTitle || 'Taqdimot').slice(0, 180)}"
+Slayd sarlavhasi: "${(body.pageTitle || 'Slayd').slice(0, 140)}"
+Vazifa: ${actionRule}
+
+Quyidagi JSON massivdagi har bir elementning "id" sini o'zgartirmasdan, "text" qiymatini yaxshilangan o'zbekcha matn bilan qaytar:
+${JSON.stringify(items)}
+
+Muhim qoidalar:
+- Faqat berilgan "id" larni qaytar (raqamlar, qisqa teglar kabi 1-3 belgili elementlarni o'zgartirmasang ham bo'ladi).
+- Har bir elementning uzunligi asl hajmidan keskin oshib ketmasin, slayd dizayni buzilmasin.
+- "tip" maydonida 1 jumlalik qisqa muharrir tavsiyasi ber.
+`;
+
+    const result = (await generateStructuredJson({
+      schemaName: 'canvas_assist_text',
+      prompt,
+      systemInstruction:
+        "Siz tajribali o'zbek tili muharriri va taqdimot ekspertisiz. Faqat JSON {\"updates\":[{\"id\":\"...\",\"text\":\"...\"}],\"tip\":\"...\"} qaytaring.",
+      responseSchema: CANVAS_ASSIST_TEXT_SCHEMA,
+      thinkingLevel: ThinkingLevel.LOW,
+      trace,
+    })) as { updates?: Array<{ id?: string; text?: string }>; tip?: string };
+
+    const updates = Array.isArray(result?.updates)
+      ? result.updates
+          .filter((u) => typeof u?.id === 'string' && typeof u?.text === 'string' && u.text.trim())
+          .map((u) => ({ id: u.id as string, text: (u.text as string).trim() }))
+      : [];
+
+    res.setHeader('X-AI-Trace', trace.join(' | '));
+    res.json({
+      ok: true,
+      mode: 'improve_slide',
+      updates,
+      tip: typeof result?.tip === 'string' ? result.tip.trim() : '',
+    });
+  } catch (err) {
+    if (trace.length > 0) res.setHeader('X-AI-Trace', trace.join(' | '));
+    console.error('[SlaydCanva Canvas Assist Error]', err);
+    res.status(500).json({ error: "AI yordamchi so'rovida xatolik yuz berdi." });
   }
 });
 
@@ -1755,6 +2076,9 @@ app.post('/api/ai/generate', async (req, res) => {
       chargedBalance = chargeRes.balance;
     }
 
+    const toneGuide = getAiToneGuidance(body.aiTone);
+    const paletteHint = getThemePaletteHint(body.designTheme);
+
     if (body.serviceId === 'ai_canvas_design') {
       const requestedSlides = Math.min(20, Math.max(1, Number(body.slideCount) || 3));
       const includePhotos = body.includeTopicImages !== false;
@@ -1776,6 +2100,8 @@ Mavzu: "${topic}"
 Taqdimot sarlavhasi: "${deckTitleHint || topic}"
 Soha: "${subject || "Umumiy / Ta'lim"}"
 Qo'shimcha ko'rsatma: "${details || "Mavzuga mos o'ziga xos vektor illyustratsiyali zamonaviy slaydlar chiz"}"
+${toneGuide.promptRule}
+${paletteHint}
 1-QISMDA CHIZILGAN SLAYDLAR (takrorlama!):
 ${prevSummary}
 
@@ -1783,28 +2109,33 @@ VAZIFA (2/2-QISM DAVOMI): Yuqoridagi slaydlarning mantiqiy davomi sifatida, ${pr
 Real mavzu rasmlari: ${includePhotos && Number(body.pendingPhotoSlots || 0) > 0 ? `Faqat ${Math.min(2, Number(body.pendingPhotoSlots || 1))} ta slaydda photoSlot.enabled=true qil, qolganlarida photoSlot.enabled=false qil.` : "photoSlot.enabled=false qil, faqat vektor illyustratsiya chiz."}
 Qoidalar:
 - svgArtwork: har bir slayd uchun to'liq <svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540">...</svg> vektor grafika.
-- elements: sarlavha, badge va 2-4 ta karta (rect + text). Elementlar bir-birining ustiga chiqmasin!
+- elements: sarlavha, badge va 2-4 ta karta (rect + text). Elementlar bir-birining ustiga chiqmasin va kontrast yuqori bo'lsin!
+- QAT'IY QOIDA: Slayd sarlavhalari, badge yoki matnlarida slaydlar sonini ("N ta slayd", "qilindi", "tayyorlandi") va ortiqcha kirish gaplarini yozma — jiddiy va professional bo'l.
 `
           : `
 Mavzu: "${topic}"
 Soha: "${subject || "Umumiy / Ta'lim"}"
 Qo'shimcha ko'rsatma: "${details || "Mavzuga mos o'ziga xos vektor illyustratsiyali zamonaviy slaydlar chiz"}"
-Slaydlar soni: Aniq ${chunkCount} ta mustaqil, bir-birini takrorlamaydigan maxsus dizaynlangan slayd.
+${toneGuide.promptRule}
+${paletteHint}
+Slaydlar soni: Aniq ${chunkCount} ta mustaqil, bir-birini takrorlamaydigan maxsus dizaynlangan slayd (1-slayd kuchli Titul, qolganlari har xil kompozitsiyali kontent slaydlar bo'lsin).
 Real mavzu rasmlari: ${includePhotos ? "Jami 1-3 ta mavzuga aynan mos fotosurat joylashtirish uchun mos slaydlarga (ko'pi bilan 2 ta slaydda) photoSlot.enabled=true ajrat." : "photoSlot.enabled=false qil, faqat vektor illyustratsiya chiz."}
 
 Vazifa: 960x540 Canvas ustida har bir slayd uchun alohida vizual kompozitsiya, maxsus SVG illyustratsiya (svgArtwork) va tahrirlanadigan o'zbek tilidagi elementlar (elements) chiz.
 Qoidalar:
 - topicImageQueries ga mavzuga aynan tegishli ingliz tilida 3 ta aniq fotosurat qidiruv so'zi yoz.
 - svgArtwork: har bir slayd uchun to'liq <svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540">...</svg> vektor grafika (gradientlar, egri chiziqlar, mavzuviy ikon/diagramma/sahna). SVG ichida uzun matn bo'lmasin.
-- elements: har bir slaydda chiroyli sarlavha (fontSize: 26-36, bold), badge/teg va 2-4 ta mazmunli karta (rect + text). Elementlar bir-birining va photoSlot ning ustiga chiqmasin!
+- elements: har bir slaydda chiroyli sarlavha (fontSize: 26-36, bold), badge/teg va 2-4 ta aniq fakt/raqamga boy karta (rect + text). Elementlar bir-birining va photoSlot ning ustiga chiqmasin!
+- QAT'IY QOIDA: Slayd sarlavhalari, badge yoki matnlarida slaydlar sonini ("N ta slayd", "qilindi", "tayyorlandi") va ortiqcha kirish/reklama so'zlarini yozma — jiddiy va ilmiy/professional bo'l.
 `;
 
         return (await generateStructuredJson({
           schemaName: 'slaydcanva_canvas_design',
           prompt,
           systemInstruction:
-            "Siz professional grafik dizayner va SVG illyustratorsiz. 960x540 slayd kanvaslarida chiroyli, kontrastli, bir-birini to'smaydigan dizayn chizib faqat JSON qaytaring.",
+            `${toneGuide.systemRole} Siz senior grafik dizayner va SVG illyustratorsiz. 960x540 slayd kanvaslarida chiroyli, kontrastli, bir-birini to'smaydigan dizayn chizib faqat JSON qaytaring.`,
           responseSchema: CANVAS_DESIGN_SCHEMA,
+          thinkingLevel: ThinkingLevel.MEDIUM,
           trace,
         })) as Record<string, unknown>;
       };
@@ -1947,25 +2278,27 @@ Mavzu: "${topic}"
 Qo'shimcha ko'rsatma: "${details || "To'liq va ilmiy asoslangan taqdimot tayyorla"}"
 Muassasa: "${institution || "Oliy ta'lim muassasasi"}"
 Yo'nalish: "${subject || "Asosiy fan"}"
+${toneGuide.promptRule}
 ${
   isSplit
     ? `Bu ${totalSlides} sahifalik katta taqdimotning 1/2-QISMI. Dastlabki ${chunkCount} ta kontent slaydni yarat (qolgan slaydlar keyingi so'rovda davomidan ulanadi).`
     : `Jami kontent slaydlar soni: Aniq ${chunkCount} ta kontent slayd bo'lishi shart (Titul, Reja va Manbalar slaydlaridan tashqari, jami ${totalSlides} ta slayd hosil qilinsin).`
 }
 
-Vazifa: Mavzuni chuqur tahlil qilgan holda, har bir slayd uchun o'ziga xos, bir-birini takrorlamaydigan, real ilmiy dalillar, faktlar va ma'lumotlarga boy o'zbek tilidagi (lotin yozuvida) taqdimot tuzilmasini JSON ko'rinishida yarat.
+Vazifa: Mavzuni chuqur tahlil qilgan holda, har bir slayd uchun o'ziga xos, bir-birini takrorlamaydigan, real dalillar, sanalar, statistika va ma'lumotlarga boy sof o'zbek tilidagi (lotin yozuvida) taqdimot tuzilmasini JSON ko'rinishida yarat.
 Qoidalar:
 - slides massivida ANIQ ${chunkCount} ta kontent slayd bo'lsin (1-bo'limdan ${chunkCount}-bo'limgacha).
 ${isSplit ? `- MUHIM: Bu faqat 1/2-qism bo'lgani uchun "Xulosa" yoki "Yakun" slaydini qo'shma — xulosa 2-qism oxirida bo'ladi.` : ''}
-- Har bir slayd mazmuni mavzuning aniq qismini yoritsin (takroriy gaplar yozish qat'iyan taqiqlanadi).
+- Har bir slayd mazmuni mavzuning alohida jihatini chuqur ochsin; umumiy quruq gaplar yozma, har bir blok body 18-34 so'zlik aniq fakt yoki tushuntirishdan iborat bo'lsin.
+- Ketma-ket keladigan ikkita slaydda bir xil "layout" ni takrorlama! Turli layoutlardan foydalan: "split_image_right", "split_image_left", "three_columns", "timeline", "table", "grid_2x2", "steps", "case_analysis", "schedule", "highlight_note".
 - topicImageQueries massiviga aynan ushbu mavzu bo'yicha Wikipedia va Wikimedia Commons'dan real fotosuratlar topish uchun ingliz tilida 3 ta aniq vizual qidiruv iborasini yoz.
 - Har bir slayd uchun ushbu slayd mazmuniga aynan mos keladigan inglizcha aniq "imageKeyword" yoz.
-- Har bir slaydning layout turi turlicha bo'lsin: "split_image_right", "split_image_left", "three_columns", "timeline", "table", "grid_2x2", "steps", "case_analysis", "schedule", "highlight_note".
-- Kamida 1-2 ta kontent slayd "split_image_right" yoki "split_image_left" bo'lsin.
-- "table" layoutida albatta tableHeaders (3 ta) va tableRows (kamida 4 ta qator, har qatorda 3 ta katak) to'ldirilsin. Boshqa layoutlarda tableHeaders va tableRows ni bo'sh massiv [] qilib ber.
+- Kamida 1-2 ta kontent slayd "split_image_right" yoki "split_image_left" bo'lsin, kamida 1 ta slayd "table" yoki "timeline" bo'lsin.
+- "table" layoutida albatta tableHeaders (3 ta) va tableRows (kamida 4 ta qator, har qatorda 3 ta katak) aniq raqamlar/solishtirishlar bilan to'ldirilsin. Boshqa layoutlarda tableHeaders va tableRows ni bo'sh massiv [] qilib ber.
 - "table" layoutidan tashqari BARCHA layoutlarda "blocks" massivi ALBATTA 2-4 ta to'ldirilgan elementdan iborat bo'lsin.
 - planItems 4 ta asosiy bo'limdan iborat bo'lsin (butun mavzuni qamrab olsin).
-- references ${isSplit ? '1-2 ta boshlang‘ich manba yoki bo‘sh massiv []' : '5 ta haqiqiy ilmiy adabiyot, monografiya va internet manbalaridan (muallif, asar nomi, yil, nashriyot)'} iborat bo'lsin.
+- references ${isSplit ? '1-2 ta boshlang‘ich manba yoki bo‘sh massiv []' : '5 ta haqiqiy ilmiy adabiyot, monografiya va ishonchli manbalardan (muallif, asar nomi, yil, nashriyot)'} iborat bo'lsin.
+- QAT'IY QOIDA: deckTitle, deckSubtitle, subtitle, footerCallout yoki blok matnlarida slaydlar sonini ("7 ta slayd", "ushbu taqdimot N slayddan iborat", "tayyorlandi", "qilindi") hamda ortiqcha maqtov/reklama so'zlarini HECH QACHON yozma. Jiddiy akademik ohangni saqla!
 `;
 
       const buildPart2Prompt = (
@@ -1983,7 +2316,8 @@ ${isSplit ? `- MUHIM: Bu faqat 1/2-qism bo'lgani uchun "Xulosa" yoki "Yakun" sla
         return `
 Mavzu: "${topic}"
 Taqdimot sarlavhasi: "${prev.deckTitle || topic}"
-Umumiy reja bandlari: ${planLines || 'Asosiy ilmiy reja'}
+Umiy reja bandlari: ${planLines || 'Asosiy ilmiy reja'}
+${toneGuide.promptRule}
 1-QISMDA YARATILGAN SLAYDLAR (bularni TAKRORLAMA!):
 ${prevSlideLines}
 
@@ -1991,12 +2325,13 @@ VAZIFA (2/2-QISM DAVOMI):
 Yuqoridagi 1-qismning bevosita DAVOMI sifatida, ${part1DoneCount + 1}-bo'limdan ${part1DoneCount + part2NeedCount}-bo'limgacha ANIQ ${part2NeedCount} ta YANGI, chuqur mazmunli va takrorlanmas kontent slayd yarat hamda oxirgi slayd uchun 5 ta haqiqiy ilmiy adabiyot/manba (references) tuz.
 Qoidalar:
 - slides massivida ANIQ ${part2NeedCount} ta kontent slayd bo'lsin (teg: "${String(part1DoneCount + 1).padStart(2, '0')}-BO'LIM" dan boshlab ketma-ket).
-- Faqat oxirgi (${part1DoneCount + part2NeedCount}-bo'lim) slaydni yakuniy xulosa va tavsiyalarga bag'ishla.
-- Layoutlarni rang-barang tanla: "split_image_right", "split_image_left", "three_columns", "timeline", "table", "grid_2x2", "steps", "case_analysis", "schedule", "highlight_note".
+- Faqat oxirgi (${part1DoneCount + part2NeedCount}-bo'lim) slaydni yakuniy xulosa va amaliy tavsiyalarga bag'ishla.
+- Ketma-ket bir xil layout qo'yma: "split_image_right", "split_image_left", "three_columns", "timeline", "table", "grid_2x2", "steps", "case_analysis", "schedule", "highlight_note".
 - Kamida 1-2 ta slayd "split_image_right" yoki "split_image_left" bo'lsin.
 - "table" layoutida albatta tableHeaders (3 ta) va tableRows (kamida 4 ta qator, har qatorda 3 ta katak) bo'lsin, boshqalarida [].
 - "table" dan tashqari barcha layoutlarda "blocks" 2-4 ta to'ldirilgan banddan iborat bo'lsin.
 - references massivida 5 ta haqiqiy ilmiy adabiyot va manba (muallif, asar nomi, yil, nashriyot) yoz.
+- QAT'IY QOIDA: Matnlarda "N ta slayd qilindi/tayyorlandi" kabi meta-iboralarni yozma. Jiddiy, faktlarga asoslangan matn ber!
 `;
       };
 
@@ -2006,8 +2341,9 @@ Qoidalar:
           schemaName: 'slaydcanva_deck',
           prompt: buildPart1Prompt(part1Count, true),
           systemInstruction:
-            "Siz professional o'zbek akademik taqdimot dizayneri va muharririsiz. Faqat so'ralgan JSON sxemasida aniq, toza, lo'nda o'zbekcha matn qaytaring.",
+            `${toneGuide.systemRole} Faqat so'ralgan JSON sxemasida aniq, faktlarga boy, toza o'zbekcha matn qaytaring.`,
           responseSchema: SLIDE_RESPONSE_SCHEMA,
+          thinkingLevel: ThinkingLevel.MEDIUM,
           trace,
         })) as Record<string, unknown>;
 
@@ -2039,8 +2375,9 @@ Qoidalar:
           schemaName: 'slaydcanva_deck_part2',
           prompt: buildPart2Prompt(part1Count, part2Count, prev),
           systemInstruction:
-            "Siz professional o'zbek akademik taqdimot muharririsiz. 1-qismning mantiqiy davomi sifatida faqat yangi slaydlar va manbalarni JSON shaklida qaytaring.",
+            `${toneGuide.systemRole} 1-qismning mantiqiy davomi sifatida faqat yangi slaydlar va manbalarni JSON shaklida qaytaring.`,
           responseSchema: SLIDE_PART2_SCHEMA,
+          thinkingLevel: ThinkingLevel.MEDIUM,
           trace,
         })) as Record<string, unknown>;
 
@@ -2062,8 +2399,9 @@ Qoidalar:
           schemaName: 'slaydcanva_deck',
           prompt: buildPart1Prompt(part1Count, true),
           systemInstruction:
-            "Siz professional o'zbek akademik taqdimot dizayneri va muharririsiz. Faqat so'ralgan JSON sxemasida aniq, toza, lo'nda o'zbekcha matn qaytaring.",
+            `${toneGuide.systemRole} Faqat so'ralgan JSON sxemasida aniq, toza, lo'nda o'zbekcha matn qaytaring.`,
           responseSchema: SLIDE_RESPONSE_SCHEMA,
+          thinkingLevel: ThinkingLevel.MEDIUM,
           trace,
         })) as Record<string, unknown>;
 
@@ -2093,8 +2431,9 @@ Qoidalar:
               })),
             }),
             systemInstruction:
-              "Siz professional o'zbek akademik taqdimot muharririsiz. 1-qismning mantiqiy davomi sifatida faqat yangi slaydlar va manbalarni JSON shaklida qaytaring.",
+              `${toneGuide.systemRole} 1-qismning mantiqiy davomi sifatida faqat yangi slaydlar va manbalarni JSON shaklida qaytaring.`,
             responseSchema: SLIDE_PART2_SCHEMA,
+            thinkingLevel: ThinkingLevel.MEDIUM,
             trace,
           }) as Promise<Record<string, unknown>>,
         ]);
@@ -2117,8 +2456,9 @@ Qoidalar:
         schemaName: 'slaydcanva_deck',
         prompt: buildPart1Prompt(totalContentCount, false),
         systemInstruction:
-          "Siz professional o'zbek akademik taqdimot dizayneri va muharririsiz. Faqat so'ralgan JSON sxemasida aniq, toza, lo'nda o'zbekcha matn qaytaring.",
+          `${toneGuide.systemRole} Faqat so'ralgan JSON sxemasida aniq, toza, lo'nda o'zbekcha matn qaytaring.`,
         responseSchema: SLIDE_RESPONSE_SCHEMA,
+        thinkingLevel: ThinkingLevel.MEDIUM,
         trace,
       })) as Record<string, unknown>;
 
@@ -2195,6 +2535,113 @@ Qoidalar:
         responseSchema: INFOGRAPHIC_RESPONSE_SCHEMA,
         trace,
       });
+      sendAiJson({ serviceId: body.serviceId, data });
+      return;
+    }
+
+    if (
+      body.serviceId === 'independent_work_word' ||
+      body.serviceId === 'course_work_word' ||
+      body.serviceId === 'essay_article_word'
+    ) {
+      const isCourse = body.serviceId === 'course_work_word';
+      const isEssay = body.serviceId === 'essay_article_word';
+      const chaptersTarget = isCourse
+        ? Math.min(4, Math.max(2, Number(body.sectionCount) || 3))
+        : isEssay
+          ? Math.min(2, Math.max(1, Number(body.sectionCount) || 1))
+          : Math.min(4, Math.max(2, Number(body.sectionCount) || 2));
+      const academicStyle = typeof body.academicStyle === 'string' ? body.academicStyle : '';
+
+      const facultyText = typeof body.faculty === 'string' ? body.faculty.trim().slice(0, 120) : '';
+      const deptText = typeof body.department === 'string' ? body.department.trim().slice(0, 120) : '';
+
+      const workLabel = isCourse
+        ? 'Kurs ishi'
+        : isEssay
+          ? academicStyle === 'analytical_essay'
+            ? 'Tahliliy esse'
+            : academicStyle === 'conference_thesis'
+              ? 'Konferensiya tezisi'
+              : 'Ilmiy maqola (IMRAD)'
+          : 'Mustaqil ish (Referat)';
+
+      const structureRules = isCourse
+        ? `
+- Bu O'zbekiston OTM davlat standarti darajasidagi KURS ISHI.
+- introduction:
+  - relevance: mavzuning dolzarbligi (100-140 so'z, jiddiy ilmiy asos);
+  - priorResearch: muammoning o'rganilganlik darajasi (mahalliy va xorijiy olimlar/tadqiqotchilar nuqtai nazari, 70-100 so'z);
+  - goal: tadqiqotning aniq ilmiy maqsadi (35-55 so'z);
+  - tasks: 4-5 ta aniq belgilangan ilmiy vazifa;
+  - object: tadqiqot obyekti;
+  - subjectMatter: tadqiqot predmeti;
+  - methods: qo'llanilgan metodlar (tizimli tahlil, qiyosiy tahlil, statistik va h.k.).
+- chapters: ANIQ ${chaptersTarget} ta bob (I BOB Nazariy-metodologik asoslar, II BOB Amaliy tahlil va empirik natijalar, III BOB Takomillashtirish yo'nalishlari va tavsiyalar). Har bir bobda 2 tadan paragraf (1.1, 1.2, 2.1, 2.2...). Har bir paragrafda kamida 3 ta chuqur, mazmunli, har biri 70-110 so'zli akademik xatboshi (paragraphs) bo'lsin.
+- comparisonTable: albatta mavzuga doir 3-4 ustunli, 4-5 qatorli qiyosiy yoki statistik tahlil jadvali ber (caption: "1-jadval. ...").
+- conclusion: 3-4 ta yakuniy ilmiy xulosa va amaliy takliflar paragrafi.
+- references: kamida 12 ta O'zDST tartibidagi haqiqiy ilmiy adabiyot (qonunlar/farmonlar, darslik/monografiyalar, ilmiy maqolalar, ishonchli manbalar).
+`
+        : isEssay
+          ? `
+- Bu ${workLabel} formatidagi professional matn.
+- abstract: 60-90 so'zlik ilmiy annotatsiya (IMRAD/tezis uchun).
+- keywords: 5-7 ta ilmiy kalit so'z.
+- introduction: dolzarblik (80-110 so'z), asosiy tezis/maqsad (goal), 3 ta vazifa (tasks), metodologiya (methods).
+- chapters: ${chaptersTarget === 2 ? '2 ta kengaytirilgan qism (I qism: Metodologiya va nazariy asos; II qism: Natijalar va muhokama)' : '1 ta asosiy qism (2-3 ta tahliliy bo‘lim: Nazariy tahlil, Asosiy natijalar va Muhokama)'}. Har bir bo‘limda 2-3 ta 65-95 so'zli kuchli dalillangan paragraf bo‘lsin.
+- comparisonTable: agar mavzuga foydali bo'lsa qisqa qiyosiy jadval ber (3 ustun, 3-4 qator).
+- conclusion: 2-3 ta sintez va xulosa xatboshisi.
+- references: 6-8 ta ilmiy maqola va monografiya manbasi.
+`
+          : `
+- Bu O'zbekiston OTM talablariga to'liq mos MUSTAQIL ISH (REFERAT).
+- introduction:
+  - relevance: mavzuning dolzarbligi (80-120 so'z);
+  - priorResearch: mavzu yuzasidan asosiy ilmiy qarashlar (50-80 so'z);
+  - goal: ishning asosiy maqsadi;
+  - tasks: 3-4 ta aniq vazifa;
+  - methods: tahlil usullari.
+- chapters: ANIQ ${chaptersTarget} ta bob. Har bir bobda 2 tadan paragraf (1.1, 1.2, 2.1, 2.2...). Har bir paragrafda 2-3 ta 65-95 so'zli teran ilmiy xatboshi yoz.
+- comparisonTable: mavzuga doir 3 ustunli, 3-4 qatorli tahliliy jadval (caption: "1-jadval. ...").
+- conclusion: 2-3 ta umumlashtiruvchi xulosa va taklif paragrafi.
+- references: kamida 8 ta haqiqiy o'zbek va jahon ilmiy adabiyoti (muallif, asar nomi, shahar/nashriyot, yil).
+`;
+
+      const prompt = `
+Ish turi: ${workLabel}
+Mavzu: "${topic}"
+Ta'lim muassasasi: "${institution || "Oliy ta'lim muassasasi"}"
+${facultyText ? `Fakultet: "${facultyText}"` : ''}
+${deptText ? `Kafedra: "${deptText}"` : ''}
+Fan nomi: "${subject || "Asosiy fan"}"
+Qo'shimcha ko'rsatma: "${details || "O'zbekiston OTM akademik standartlariga mos chuqur tahliliy ish tayyorla"}"
+${toneGuide.promptRule}
+
+VAZIFA: "${topic}" mavzusida sof adabiy o'zbek tilida (lotin yozuvida: o', g', sh, ch) jiddiy, ilmiy asoslangan, haqiqiy atamalar, dalillar va tahlillarga boy ${workLabel} matnini JSON ko'rinishida yarat.
+${structureRules}
+QAT'IY QOIDALAR:
+- Hech qayerda "N ta sahifa/slayd qilindi", "AI tomonidan tayyorlandi" yoki bo'sh kirish so'zlarini yozma.
+- Barcha atamalar, olimlar va manbalar mavzuga haqiqatan tegishli va jiddiy bo'lsin.
+- planOutline massivida bob va paragraflar ro'yxatini tartibli ber.
+`;
+
+      const data = (await generateStructuredJson({
+        schemaName: 'slaydcanva_academic_doc',
+        prompt,
+        systemInstruction:
+          `${toneGuide.systemRole} Siz O'zbekiston oliy ta'lim muassasalari (O'zDST) ilmiy ishlari bo'yicha katta ilmiy muharrirsiz. Faqat so'ralgan JSON sxemasida mukammal, chuqur va imloviy toza o'zbekcha akademik ish qaytaring.`,
+        responseSchema: ACADEMIC_DOC_RESPONSE_SCHEMA,
+        thinkingLevel: ThinkingLevel.MEDIUM,
+        trace,
+      })) as Record<string, unknown>;
+
+      data.docKind = isCourse
+        ? 'course_work'
+        : isEssay
+          ? 'essay_article'
+          : 'independent_work';
+      data.references = normalizeReferenceList(data.references);
+
       sendAiJson({ serviceId: body.serviceId, data });
       return;
     }
@@ -2751,6 +3198,26 @@ function sanitizePricingSettings(raw: unknown): AppPricingSettings {
         baseLimit: clampInt(rawSrv.white_card_pptx?.baseLimit, d.white_card_pptx.baseLimit, 3, 20),
         extraStepPrice: clampInt(rawSrv.white_card_pptx?.extraStepPrice, d.white_card_pptx.extraStepPrice),
       },
+      ai_canvas_design: {
+        basePrice: clampInt(rawSrv.ai_canvas_design?.basePrice, d.ai_canvas_design.basePrice),
+        baseLimit: clampInt(rawSrv.ai_canvas_design?.baseLimit, d.ai_canvas_design.baseLimit, 1, 15),
+        extraStepPrice: clampInt(rawSrv.ai_canvas_design?.extraStepPrice, d.ai_canvas_design.extraStepPrice),
+      },
+      independent_work_word: {
+        basePrice: clampInt(rawSrv.independent_work_word?.basePrice, d.independent_work_word.basePrice),
+        baseLimit: clampInt(rawSrv.independent_work_word?.baseLimit, d.independent_work_word.baseLimit, 1, 4),
+        extraStepPrice: clampInt(rawSrv.independent_work_word?.extraStepPrice, d.independent_work_word.extraStepPrice),
+      },
+      course_work_word: {
+        basePrice: clampInt(rawSrv.course_work_word?.basePrice, d.course_work_word.basePrice),
+        baseLimit: clampInt(rawSrv.course_work_word?.baseLimit, d.course_work_word.baseLimit, 2, 4),
+        extraStepPrice: clampInt(rawSrv.course_work_word?.extraStepPrice, d.course_work_word.extraStepPrice),
+      },
+      essay_article_word: {
+        basePrice: clampInt(rawSrv.essay_article_word?.basePrice, d.essay_article_word.basePrice),
+        baseLimit: clampInt(rawSrv.essay_article_word?.baseLimit, d.essay_article_word.baseLimit, 1, 2),
+        extraStepPrice: clampInt(rawSrv.essay_article_word?.extraStepPrice, d.essay_article_word.extraStepPrice),
+      },
       stitched_notebook_pdf: {
         basePrice: clampInt(rawSrv.stitched_notebook_pdf?.basePrice, d.stitched_notebook_pdf.basePrice),
         baseLimit: clampInt(rawSrv.stitched_notebook_pdf?.baseLimit, d.stitched_notebook_pdf.baseLimit, 2, 12),
@@ -2758,11 +3225,6 @@ function sanitizePricingSettings(raw: unknown): AppPricingSettings {
       },
       five_block_infographic: {
         basePrice: clampInt(rawSrv.five_block_infographic?.basePrice, d.five_block_infographic.basePrice),
-      },
-      ai_canvas_design: {
-        basePrice: clampInt(rawSrv.ai_canvas_design?.basePrice, d.ai_canvas_design.basePrice),
-        baseLimit: clampInt(rawSrv.ai_canvas_design?.baseLimit, d.ai_canvas_design.baseLimit, 1, 15),
-        extraStepPrice: clampInt(rawSrv.ai_canvas_design?.extraStepPrice, d.ai_canvas_design.extraStepPrice),
       },
     },
     welcomeBonus: clampInt(src.welcomeBonus, DEFAULT_PRICING_SETTINGS.welcomeBonus, 0, 50_000),
@@ -2801,6 +3263,24 @@ function calculateServerServicePrice(body: GenerateRequestBody, pricing: AppPric
   if (body.serviceId === 'ai_canvas_design') {
     const cfg = s.ai_canvas_design;
     const count = Math.min(20, Math.max(1, Number(body.slideCount) || 3));
+    if (count <= cfg.baseLimit) return cfg.basePrice;
+    return cfg.basePrice + (count - cfg.baseLimit) * cfg.extraStepPrice;
+  }
+  if (body.serviceId === 'independent_work_word') {
+    const cfg = s.independent_work_word;
+    const count = Math.min(4, Math.max(2, Number(body.sectionCount) || cfg.baseLimit));
+    if (count <= cfg.baseLimit) return cfg.basePrice;
+    return cfg.basePrice + (count - cfg.baseLimit) * cfg.extraStepPrice;
+  }
+  if (body.serviceId === 'course_work_word') {
+    const cfg = s.course_work_word;
+    const count = Math.min(4, Math.max(2, Number(body.sectionCount) || cfg.baseLimit));
+    if (count <= cfg.baseLimit) return cfg.basePrice;
+    return cfg.basePrice + (count - cfg.baseLimit) * cfg.extraStepPrice;
+  }
+  if (body.serviceId === 'essay_article_word') {
+    const cfg = s.essay_article_word;
+    const count = Math.min(2, Math.max(1, Number(body.sectionCount) || cfg.baseLimit));
     if (count <= cfg.baseLimit) return cfg.basePrice;
     return cfg.basePrice + (count - cfg.baseLimit) * cfg.extraStepPrice;
   }
@@ -4309,19 +4789,27 @@ app.all('/api/payments/tolovgo/callback', async (req, res) => {
 
     // Verify TOLOVGO_WEBHOOK_SECRET signature if configured in environment
     const sigCheck = verifyTolovgoWebhookSignature(req, orderId, body);
-    if (sigCheck.configured && !sigCheck.valid) {
+    if (sigCheck.configured && !sigCheck.valid && sigCheck.provided) {
       await recordSecurityEvent({
-        severity: sigCheck.provided ? 'critical' : 'high',
+        severity: 'critical',
         category: 'webhook_signature',
         title: `TolovGo webhook signatura xatosi (#${orderId})`,
-        details: sigCheck.provided
-          ? `Buyurtma #${orderId} uchun noto'g'ri HMAC webhook signaturasi yuborildi.`
-          : `Buyurtma #${orderId} uchun webhook signaturasi taqdim etilmadi.`,
+        details: `Buyurtma #${orderId} uchun noto'g'ri HMAC webhook signaturasi yuborildi.`,
         req,
         forceNotify: true,
       });
       res.status(401).json({ ok: false, error: 'Invalid webhook signature' });
       return;
+    }
+    if (sigCheck.configured && !sigCheck.valid && !sigCheck.provided) {
+      await recordSecurityEvent({
+        severity: 'medium',
+        category: 'webhook_signature',
+        title: `TolovGo webhook signaturasi yo'q (#${orderId})`,
+        details: `Buyurtma #${orderId} uchun webhook signaturasi taqdim etilmadi, lekin serverlararo (GET /status) tekshiruvga o'tildi.`,
+        req,
+        forceNotify: false,
+      });
     }
 
     const existing = await loadOrderRecord(orderId);
@@ -6021,7 +6509,7 @@ app.post('/api/admin/security/analyze', async (req, res) => {
     try {
       const sample = unresolved.slice(0, 15).map((l) => `[${l.severity}] ${l.category}: ${l.title} (${l.ipAddress || 'no-ip'})`).join('\n');
       const aiRes = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-4-hydrogen',
         contents: `Quyidagi xavfsizlik loglarini o'zbek tilida 3 ta qisqa jumlada tahlil qil va aniq tavsiya ber:\n${sample}`,
       });
       if (aiRes.text && aiRes.text.trim()) {

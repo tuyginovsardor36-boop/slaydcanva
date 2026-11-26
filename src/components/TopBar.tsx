@@ -44,7 +44,7 @@ interface TopBarProps {
 const MOBILE_TAB_TITLES: Record<MobileTab, string> = {
   home: 'Bosh sahifa',
   files: 'Fayllar va Amaliyotlar',
-  editor: 'Slayd qilish',
+  editor: 'Hujjat muharriri',
   topup: "Balans to'ldirish",
   balance: 'Balans',
   profile: 'Profil',
@@ -114,9 +114,9 @@ export const TopBar: React.FC<TopBarProps> = ({
         )}
       </div>
 
-      {/* Zone 2: Mode Switcher (Desktop) */}
+      {/* Zone 2: Primary View Switcher (Desktop) */}
       <nav
-        aria-label="Muhit tanlash"
+        aria-label="Bo'lim tanlash"
         className="hidden md:flex items-center gap-1 bg-zinc-900 border border-zinc-800 p-1 rounded-lg shrink-0"
       >
         <button
@@ -129,57 +129,29 @@ export const TopBar: React.FC<TopBarProps> = ({
           }`}
         >
           <Sparkles className="w-3.5 h-3.5" />
-          <span>AI Xizmatlar</span>
-        </button>
-
-        <span className="h-3.5 w-px bg-zinc-700 mx-0.5" aria-hidden="true" />
-
-        <button
-          type="button"
-          onClick={() => {
-            onDesktopViewChange('editor');
-            onModeChange('pptx');
-          }}
-          className={`flex items-center gap-1.5 px-3 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
-            desktopView === 'editor' && mode === 'pptx'
-              ? 'bg-white text-zinc-950 shadow-xs'
-              : 'text-zinc-400 hover:text-white hover:bg-zinc-800/70'
-          }`}
-        >
-          <Presentation className="w-3.5 h-3.5" />
-          <span>Slayd · PPTX</span>
+          <span>Xizmatlar</span>
         </button>
 
         <button
           type="button"
           onClick={() => {
             onDesktopViewChange('editor');
-            onModeChange('word');
+            onModeChange(mode);
           }}
           className={`flex items-center gap-1.5 px-3 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
-            desktopView === 'editor' && mode === 'word'
+            desktopView === 'editor'
               ? 'bg-white text-zinc-950 shadow-xs'
               : 'text-zinc-400 hover:text-white hover:bg-zinc-800/70'
           }`}
         >
-          <FileText className="w-3.5 h-3.5" />
-          <span>Hujjat · Word</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => {
-            onDesktopViewChange('editor');
-            onModeChange('pdf');
-          }}
-          className={`flex items-center gap-1.5 px-3 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
-            desktopView === 'editor' && mode === 'pdf'
-              ? 'bg-white text-zinc-950 shadow-xs'
-              : 'text-zinc-400 hover:text-white hover:bg-zinc-800/70'
-          }`}
-        >
-          <FileType2 className="w-3.5 h-3.5" />
-          <span>PDF</span>
+          {mode === 'word' ? (
+            <FileText className="w-3.5 h-3.5" />
+          ) : mode === 'pdf' ? (
+            <FileType2 className="w-3.5 h-3.5" />
+          ) : (
+            <Presentation className="w-3.5 h-3.5" />
+          )}
+          <span>Joriy hujjat</span>
         </button>
       </nav>
 

@@ -1,5 +1,6 @@
 import { uid } from '../data/defaults';
-import { CanvasElement, CanvasPage } from '../types/editor';
+import { getSlideTheme } from '../data/slideThemes';
+import { CanvasElement, CanvasPage, SlideDesignTheme } from '../types/editor';
 
 export interface SlideDeckBlock {
   heading: string;
@@ -76,14 +77,17 @@ export interface GeneratedInfographicData {
 
 export interface TemplateMetadata {
   institution?: string;
-  authorName?: string;
-  groupName?: string;
+  faculty?: string;
+  department?: string;
   subject?: string;
+  course?: string;
+  groupName?: string;
+  authorName?: string;
   teacher?: string;
   city?: string;
   notebookNumber?: string;
   academicYear?: string;
-  designTheme?: 'academic_gold' | 'crimson_dark' | 'clean_white' | 'emerald_green';
+  designTheme?: SlideDesignTheme;
 }
 
 function escapeXml(str: string): string {
@@ -324,24 +328,12 @@ export function buildAcademicWaveDeck(
   data: GeneratedSlideDeckData,
   meta: TemplateMetadata
 ): CanvasPage[] {
-  const theme = meta.designTheme || 'academic_gold';
-  let titleBgUri = createAcademicWaveBgSvg();
-  let titleBgColor = '#FFD443';
-  let titleAccentColor = '#D94E41';
-
-  if (theme === 'crimson_dark') {
-    titleBgUri = createCrimsonDarkBgSvg();
-    titleBgColor = '#0F0F12';
-    titleAccentColor = '#DC2626';
-  } else if (theme === 'clean_white') {
-    titleBgUri = createCleanWhiteBgSvg();
-    titleBgColor = '#FFFFFF';
-    titleAccentColor = '#2563EB';
-  } else if (theme === 'emerald_green') {
-    titleBgUri = createEmeraldBgSvg();
-    titleBgColor = '#F0FDF4';
-    titleAccentColor = '#059669';
-  }
+  const t = getSlideTheme(meta.designTheme || 'academic_gold');
+  const titleBgUri = t.getTitleBgSvg();
+  const titleBgColor = t.titleBg;
+  const titleAccentColor = t.secondaryAccent;
+  const contentBgUri = t.getContentBgSvg();
+  const accents = t.accents;
 
   const pages: CanvasPage[] = [];
   const totalContentSlides = data.slides || [];
@@ -370,56 +362,63 @@ export function buildAcademicWaveDeck(
       id: uid('txt'),
       type: 'text',
       x: 88,
-      y: 54,
-      width: hasHeroPhoto ? 480 : 700,
-      height: 44,
+      y: 50,
+      width: hasHeroPhoto ? 480 : 760,
+      height: 40,
       text: (meta.institution || data.institution || "OLIY TA'LIM MUASSASASI").toUpperCase(),
-      fontFamily: 'Georgia, serif',
-      fontSize: 20,
+      fontFamily: t.headingFont,
+      fontSize: 18,
       fontWeight: 'bold',
-      color: theme === 'crimson_dark' ? '#F4F4F5' : '#1E293B',
+      color: t.headingColor,
       textAlign: 'left',
     },
     {
       id: uid('txt'),
       type: 'text',
       x: 88,
-      y: 112,
-      width: hasHeroPhoto ? 480 : 600,
-      height: 52,
-      text: `${meta.subject || data.direction || "Asosiy yo'nalish"}\n${meta.groupName ? `${meta.groupName}` : "Akademik guruh"}`,
-      fontFamily: 'Georgia, serif',
-      fontSize: 15,
+      y: 94,
+      width: hasHeroPhoto ? 460 : 660,
+      height: 68,
+      text: [
+        meta.faculty ? `Fakultet: ${meta.faculty}` : '',
+        meta.department ? `Kafedra: ${meta.department}` : '',
+        `Fan: ${meta.subject || data.direction || "Asosiy yo'nalish"}`,
+      ]
+        .filter(Boolean)
+        .join('\n'),
+      fontFamily: t.bodyFont,
+      fontSize: 13,
       fontWeight: 'normal',
-      color: theme === 'crimson_dark' ? '#A1A1AA' : '#57534E',
+      color: t.mutedColor,
       textAlign: 'left',
+      lineHeight: 1.35,
     },
     {
       id: uid('txt'),
       type: 'text',
       x: 88,
-      y: 196,
+      y: 176,
       width: 240,
       height: 24,
       text: 'TAQDIMOT',
       fontFamily: 'Plus Jakarta Sans, sans-serif',
       fontSize: 12,
       fontWeight: 'bold',
-      color: theme === 'crimson_dark' ? '#EF4444' : '#B45309',
+      color: t.secondaryAccent,
       textAlign: 'left',
     },
     {
       id: uid('txt'),
       type: 'text',
       x: 88,
-      y: 226,
+      y: 204,
       width: titleWidth,
-      height: 114,
+      height: 112,
       text: data.deckTitle || 'Taqdimot mavzusi',
-      fontFamily: 'Georgia, serif',
-      fontSize: hasHeroPhoto ? 30 : 34,
+      fontFamily: t.headingFont,
+      fontSize: hasHeroPhoto ? 28 : 32,
       fontWeight: 'bold',
-      color: theme === 'crimson_dark' ? '#FFFFFF' : '#1E293B',
+      color: t.headingColor,
       textAlign: 'left',
       lineHeight: 1.2,
     },
@@ -427,14 +426,14 @@ export function buildAcademicWaveDeck(
       id: uid('txt'),
       type: 'text',
       x: 88,
-      y: 344,
+      y: 320,
       width: titleWidth,
-      height: 48,
-      text: data.deckSubtitle || "Fan bo'yicha taqdimot materiallari",
-      fontFamily: 'Georgia, serif',
-      fontSize: 15,
+      height: 46,
+      text: data.deckSubtitle || "Ilmiy-tahliliy taqdimot materiallari",
+      fontFamily: t.bodyFont,
+      fontSize: 14,
       fontWeight: 'normal',
-      color: theme === 'crimson_dark' ? '#D4D4D8' : '#57534E',
+      color: t.mutedColor,
       textAlign: 'left',
     },
   ];
@@ -448,8 +447,8 @@ export function buildAcademicWaveDeck(
         y: 112,
         width: 368,
         height: 278,
-        fill: '#FFFFFF',
-        stroke: '#E2E8F0',
+        fill: t.surfaceFill,
+        stroke: t.surfaceStroke,
         strokeWidth: 1,
         borderRadius: 20,
         shadow: true,
@@ -469,36 +468,30 @@ export function buildAcademicWaveDeck(
     );
   }
 
-  titleElements.push(
-    {
-      id: uid('txt'),
-      type: 'text',
-      x: 480,
-      y: 416,
-      width: 380,
-      height: 30,
-      text: `Tayyorladi: ${meta.authorName || 'Talaba'}`,
-      fontFamily: 'Georgia, serif',
-      fontSize: 15,
-      fontWeight: 'bold',
-      color: theme === 'crimson_dark' ? '#FFFFFF' : '#1E293B',
-      textAlign: 'right',
-    },
-    {
-      id: uid('txt'),
-      type: 'text',
-      x: 480,
-      y: 446,
-      width: 380,
-      height: 26,
-      text: `${meta.subject || data.direction || 'Yoʻnalish'} • ${meta.groupName || 'Guruh'}`,
-      fontFamily: 'DM Sans, sans-serif',
-      fontSize: 12,
-      fontWeight: 'normal',
-      color: theme === 'crimson_dark' ? '#A1A1AA' : '#475569',
-      textAlign: 'right',
-    }
-  );
+  const waveMetaLines = [
+    `Tayyorladi: ${meta.authorName || '__________________'}`,
+    meta.course ? `Kurs: ${meta.course}` : '',
+    meta.groupName ? `Guruh: ${meta.groupName}` : '',
+    meta.teacher ? `Tekshirdi: ${meta.teacher}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  titleElements.push({
+    id: uid('txt'),
+    type: 'text',
+    x: 470,
+    y: 394,
+    width: 446,
+    height: 108,
+    text: waveMetaLines,
+    fontFamily: t.bodyFont,
+    fontSize: 13,
+    fontWeight: 'normal',
+    color: t.headingColor,
+    textAlign: 'right',
+    lineHeight: 1.4,
+  });
 
   pages.push({
     id: uid('wave_s1'),
@@ -516,20 +509,20 @@ export function buildAcademicWaveDeck(
       type: 'text',
       x: 52,
       y: 48,
-      width: 720,
+      width: 760,
       height: 44,
       text: 'TAQDIMOT REJASI VA ASOSIY BOʻLIMLAR',
-      fontFamily: 'Georgia, serif',
+      fontFamily: t.headingFont,
       fontSize: 22,
       fontWeight: 'bold',
-      color: '#1E293B',
+      color: t.headingColor,
       textAlign: 'left',
     },
   ];
 
   planItems.forEach((item, idx) => {
     const y = 114 + idx * 78;
-    const pillColor = WAVE_ACCENT_COLORS[idx % WAVE_ACCENT_COLORS.length];
+    const pillColor = accents[idx % accents.length];
     slide2Elements.push(
       {
         id: uid('rect'),
@@ -541,7 +534,7 @@ export function buildAcademicWaveDeck(
         fill: pillColor,
         stroke: 'transparent',
         strokeWidth: 0,
-        borderRadius: 15,
+        borderRadius: 10,
         shadow: true,
       },
       {
@@ -563,13 +556,13 @@ export function buildAcademicWaveDeck(
         type: 'text',
         x: 198,
         y: y - 2,
-        width: 590,
+        width: 640,
         height: 58,
         text: item.title,
-        fontFamily: 'DM Sans, sans-serif',
+        fontFamily: t.bodyFont,
         fontSize: 15,
         fontWeight: 'normal',
-        color: '#1E293B',
+        color: t.bodyColor,
         textAlign: 'left',
       }
     );
@@ -578,45 +571,36 @@ export function buildAcademicWaveDeck(
   slide2Elements.push({
     id: uid('txt'),
     type: 'text',
-    x: 64,
+    x: 52,
     y: 462,
     width: 680,
     height: 30,
     text: "Quyidagi slaydlarda har bir bo'lim alohida ko'rsatilgan va izchil yoritilgan.",
-    fontFamily: 'Georgia, serif',
+    fontFamily: t.headingFont,
     fontSize: 13,
     fontWeight: 'normal',
-    color: theme === 'crimson_dark' ? '#D4D4D8' : '#475569',
+    color: t.mutedColor,
     textAlign: 'left',
   });
-
-  const rejaBgColor =
-    theme === 'crimson_dark'
-      ? '#141418'
-      : theme === 'clean_white'
-        ? '#FAFAFA'
-        : theme === 'emerald_green'
-          ? '#F7FDF9'
-          : '#FFFDF7';
 
   pages.push({
     id: uid('wave_s2'),
     title: 'Reja',
-    background: rejaBgColor,
+    background: t.pageBg,
+    backgroundImage: contentBgUri,
     elements: slide2Elements,
   });
 
   // SLIDES 3 .. N-1: Dynamic Layout Slides
   totalContentSlides.forEach((s, index) => {
     const slideNum = index + 3;
-    const pillColor = WAVE_ACCENT_COLORS[index % WAVE_ACCENT_COLORS.length];
+    const pillColor = accents[index % accents.length];
     const photoUrl = resolveSlidePhotoUrl(s);
     const elements: CanvasElement[] = [
-      // Top-left colored pill
       {
         id: uid('rect'),
         type: 'rect',
-        x: 32,
+        x: 36,
         y: 18,
         width: 168,
         height: 30,
@@ -629,7 +613,7 @@ export function buildAcademicWaveDeck(
       {
         id: uid('txt'),
         type: 'text',
-        x: 32,
+        x: 36,
         y: 22,
         width: 168,
         height: 24,
@@ -640,19 +624,18 @@ export function buildAcademicWaveDeck(
         color: '#FFFFFF',
         textAlign: 'center',
       },
-      // Slide Heading
       {
         id: uid('txt'),
         type: 'text',
         x: 42,
         y: 62,
-        width: 750,
+        width: 820,
         height: 44,
         text: s.title || 'Mavzu qismi',
-        fontFamily: 'Plus Jakarta Sans, sans-serif',
+        fontFamily: t.headingFont,
         fontSize: 26,
         fontWeight: 'bold',
-        color: '#0F172A',
+        color: t.headingColor,
         textAlign: 'left',
       },
     ];
@@ -664,13 +647,13 @@ export function buildAcademicWaveDeck(
         type: 'text',
         x: 42,
         y: 104,
-        width: 740,
+        width: 820,
         height: 28,
         text: s.subtitle,
-        fontFamily: 'DM Sans, sans-serif',
+        fontFamily: t.bodyFont,
         fontSize: 13,
         fontWeight: 'normal',
-        color: '#475569',
+        color: t.mutedColor,
         textAlign: 'left',
       });
       bodyStartY = 138;
@@ -692,7 +675,7 @@ export function buildAcademicWaveDeck(
         y: bodyStartY + 42,
         width: endX - startX,
         height: 5,
-        fill: '#E2E8F0',
+        fill: t.dividerColor,
         stroke: 'transparent',
         strokeWidth: 0,
         borderRadius: 2,
@@ -709,7 +692,7 @@ export function buildAcademicWaveDeck(
             y: bodyStartY + 26,
             width: 36,
             height: 36,
-            fill: WAVE_ACCENT_COLORS[i % WAVE_ACCENT_COLORS.length],
+            fill: accents[i % accents.length],
             stroke: 'transparent',
             strokeWidth: 0,
             shadow: true,
@@ -722,10 +705,10 @@ export function buildAcademicWaveDeck(
             width: colW,
             height: 34,
             text: b.heading,
-            fontFamily: 'Plus Jakarta Sans, sans-serif',
+            fontFamily: t.headingFont,
             fontSize: 14,
             fontWeight: 'bold',
-            color: '#0F172A',
+            color: t.headingColor,
             textAlign: 'center',
           },
           {
@@ -736,10 +719,10 @@ export function buildAcademicWaveDeck(
             width: colW,
             height: 150,
             text: b.body,
-            fontFamily: 'DM Sans, sans-serif',
+            fontFamily: t.bodyFont,
             fontSize: 12,
             fontWeight: 'normal',
-            color: '#334155',
+            color: t.bodyColor,
             textAlign: 'center',
           }
         );
@@ -751,13 +734,13 @@ export function buildAcademicWaveDeck(
           type: 'text',
           x: 64,
           y: 430,
-          width: 740,
+          width: 780,
           height: 54,
           text: s.footerCallout,
-          fontFamily: 'Plus Jakarta Sans, sans-serif',
+          fontFamily: t.headingFont,
           fontSize: 15,
           fontWeight: 'bold',
-          color: '#1E293B',
+          color: t.headingColor,
           textAlign: 'center',
         });
       }
@@ -768,20 +751,34 @@ export function buildAcademicWaveDeck(
       const colXs = [52, 276, 590];
 
       headers.forEach((h, cIdx) => {
-        elements.push({
-          id: uid('txt'),
-          type: 'text',
-          x: colXs[cIdx],
-          y: bodyStartY,
-          width: colWidths[cIdx],
-          height: 32,
-          text: h,
-          fontFamily: 'Plus Jakarta Sans, sans-serif',
-          fontSize: 14,
-          fontWeight: 'bold',
-          color: '#FFFFFF',
-          textAlign: cIdx === 0 ? 'left' : 'left',
-        });
+        elements.push(
+          {
+            id: uid('rect'),
+            type: 'rect',
+            x: colXs[cIdx] - 4,
+            y: bodyStartY - 4,
+            width: colWidths[cIdx] - 4,
+            height: 34,
+            fill: accents[cIdx % accents.length],
+            stroke: 'transparent',
+            strokeWidth: 0,
+            borderRadius: 6,
+          },
+          {
+            id: uid('txt'),
+            type: 'text',
+            x: colXs[cIdx] + 4,
+            y: bodyStartY + 2,
+            width: colWidths[cIdx] - 16,
+            height: 28,
+            text: h,
+            fontFamily: 'Plus Jakarta Sans, sans-serif',
+            fontSize: 13,
+            fontWeight: 'bold',
+            color: '#FFFFFF',
+            textAlign: 'left',
+          }
+        );
       });
 
       rows.forEach((row, rIdx) => {
@@ -793,7 +790,7 @@ export function buildAcademicWaveDeck(
           y: ry,
           width: 828,
           height: 1,
-          fill: '#B48B22',
+          fill: t.dividerColor,
           stroke: 'transparent',
           strokeWidth: 0,
         });
@@ -806,10 +803,10 @@ export function buildAcademicWaveDeck(
             width: colWidths[cIdx],
             height: 40,
             text: cell,
-            fontFamily: 'DM Sans, sans-serif',
+            fontFamily: t.bodyFont,
             fontSize: 13,
             fontWeight: cIdx === 0 ? 'bold' : 'normal',
-            color: '#0F172A',
+            color: cIdx === 0 ? t.headingColor : t.bodyColor,
             textAlign: 'left',
           });
         });
@@ -824,10 +821,10 @@ export function buildAcademicWaveDeck(
           width: 780,
           height: 28,
           text: s.footerCallout,
-          fontFamily: 'DM Sans, sans-serif',
+          fontFamily: t.bodyFont,
           fontSize: 12,
           fontStyle: 'italic',
-          color: '#475569',
+          color: t.mutedColor,
           textAlign: 'left',
         });
       }
@@ -842,7 +839,7 @@ export function buildAcademicWaveDeck(
             y: sy,
             width: 34,
             height: 34,
-            fill: WAVE_ACCENT_COLORS[i % WAVE_ACCENT_COLORS.length],
+            fill: accents[i % accents.length],
             stroke: 'transparent',
             strokeWidth: 0,
             shadow: true,
@@ -869,10 +866,10 @@ export function buildAcademicWaveDeck(
             width: 170,
             height: 34,
             text: b.heading,
-            fontFamily: 'Plus Jakarta Sans, sans-serif',
+            fontFamily: t.headingFont,
             fontSize: 15,
             fontWeight: 'bold',
-            color: '#0F172A',
+            color: t.headingColor,
             textAlign: 'left',
           },
           {
@@ -880,13 +877,13 @@ export function buildAcademicWaveDeck(
             type: 'text',
             x: 290,
             y: sy + 2,
-            width: 530,
+            width: 560,
             height: 54,
             text: b.body,
-            fontFamily: 'DM Sans, sans-serif',
+            fontFamily: t.bodyFont,
             fontSize: 14,
             fontWeight: 'normal',
-            color: '#1E293B',
+            color: t.bodyColor,
             textAlign: 'left',
           }
         );
@@ -895,7 +892,6 @@ export function buildAcademicWaveDeck(
       Boolean(photoUrl) &&
       (s.layout === 'split_image_right' || s.layout === 'split_image_left')
     ) {
-      // DEDICATED SPLIT IMAGE LAYOUT: High-res authentic topic photo in 4:3 mat frame + structured cards
       const isRight = s.layout === 'split_image_right';
       const imgX = isRight ? 542 : 48;
       const imgY = bodyStartY + 26;
@@ -910,8 +906,8 @@ export function buildAcademicWaveDeck(
           y: imgY - 6,
           width: 384,
           height: 290,
-          fill: '#FFFFFF',
-          stroke: '#E2E8F0',
+          fill: t.surfaceFill,
+          stroke: t.surfaceStroke,
           strokeWidth: 1,
           borderRadius: 18,
           shadow: true,
@@ -932,7 +928,7 @@ export function buildAcademicWaveDeck(
 
       blocks.slice(0, 3).forEach((b, i) => {
         const cy = bodyStartY + 6 + i * 112;
-        const pillColor = WAVE_ACCENT_COLORS[(index + i) % WAVE_ACCENT_COLORS.length];
+        const barCol = accents[(index + i) % accents.length];
         elements.push(
           {
             id: uid('rect'),
@@ -941,7 +937,7 @@ export function buildAcademicWaveDeck(
             y: cy,
             width: 6,
             height: 98,
-            fill: pillColor,
+            fill: barCol,
             stroke: 'transparent',
             strokeWidth: 0,
             borderRadius: 3,
@@ -955,10 +951,10 @@ export function buildAcademicWaveDeck(
             width: textW - 20,
             height: 28,
             text: b.heading,
-            fontFamily: 'Plus Jakarta Sans, sans-serif',
+            fontFamily: t.headingFont,
             fontSize: 16,
             fontWeight: 'bold',
-            color: '#0F172A',
+            color: t.headingColor,
             textAlign: 'left',
           },
           {
@@ -969,10 +965,10 @@ export function buildAcademicWaveDeck(
             width: textW - 20,
             height: 70,
             text: b.body,
-            fontFamily: 'DM Sans, sans-serif',
+            fontFamily: t.bodyFont,
             fontSize: 13,
             fontWeight: 'normal',
-            color: '#1E293B',
+            color: t.bodyColor,
             textAlign: 'left',
           }
         );
@@ -987,10 +983,10 @@ export function buildAcademicWaveDeck(
           width: textW - 20,
           height: 24,
           text: s.footerCallout,
-          fontFamily: 'DM Sans, sans-serif',
+          fontFamily: t.bodyFont,
           fontSize: 12,
           fontStyle: 'italic',
-          color: '#64748B',
+          color: t.mutedColor,
           textAlign: 'left',
         });
       }
@@ -1010,7 +1006,7 @@ export function buildAcademicWaveDeck(
             y: cy,
             width: 7,
             height: 138,
-            fill: WAVE_ACCENT_COLORS[i % WAVE_ACCENT_COLORS.length],
+            fill: accents[i % accents.length],
             stroke: 'transparent',
             strokeWidth: 0,
             borderRadius: 3,
@@ -1024,10 +1020,10 @@ export function buildAcademicWaveDeck(
             width: cw,
             height: 30,
             text: b.heading,
-            fontFamily: 'Plus Jakarta Sans, sans-serif',
+            fontFamily: t.headingFont,
             fontSize: 16,
             fontWeight: 'bold',
-            color: '#0F172A',
+            color: t.headingColor,
             textAlign: 'left',
           },
           {
@@ -1038,10 +1034,10 @@ export function buildAcademicWaveDeck(
             width: cw,
             height: 96,
             text: b.body,
-            fontFamily: 'DM Sans, sans-serif',
+            fontFamily: t.bodyFont,
             fontSize: 13,
             fontWeight: 'normal',
-            color: '#1E293B',
+            color: t.bodyColor,
             textAlign: 'left',
           }
         );
@@ -1056,10 +1052,10 @@ export function buildAcademicWaveDeck(
           width: 780,
           height: 54,
           text: s.footerCallout,
-          fontFamily: 'Plus Jakarta Sans, sans-serif',
+          fontFamily: t.headingFont,
           fontSize: 14,
           fontWeight: 'bold',
-          color: '#0F172A',
+          color: t.headingColor,
           textAlign: 'left',
         });
       }
@@ -1068,37 +1064,49 @@ export function buildAcademicWaveDeck(
         const sy = bodyStartY + 8 + i * 56;
         elements.push(
           {
+            id: uid('rect'),
+            type: 'rect',
+            x: 54,
+            y: sy,
+            width: 144,
+            height: 34,
+            fill: accents[i % accents.length],
+            stroke: 'transparent',
+            strokeWidth: 0,
+            borderRadius: 8,
+            shadow: true,
+          },
+          {
             id: uid('txt'),
             type: 'text',
-            x: 82,
+            x: 62,
             y: sy + 6,
-            width: 118,
-            height: 30,
+            width: 128,
+            height: 24,
             text: b.badge || b.heading,
             fontFamily: 'Plus Jakarta Sans, sans-serif',
-            fontSize: 14,
+            fontSize: 12,
             fontWeight: 'bold',
             color: '#FFFFFF',
-            textAlign: 'left',
+            textAlign: 'center',
           },
           {
             id: uid('txt'),
             type: 'text',
             x: 218,
             y: sy + 4,
-            width: 600,
+            width: 640,
             height: 44,
             text: b.badge ? `${b.heading} — ${b.body}` : b.body,
-            fontFamily: 'DM Sans, sans-serif',
+            fontFamily: t.bodyFont,
             fontSize: 14,
             fontWeight: 'normal',
-            color: '#0F172A',
+            color: t.bodyColor,
             textAlign: 'left',
           }
         );
       });
     } else if (s.layout === 'case_analysis') {
-      // 3 columns top + 4 cream shadowed algorithm bars bottom
       blocks.slice(0, 3).forEach((b, i) => {
         const cx = 52 + i * 282;
         elements.push(
@@ -1109,7 +1117,7 @@ export function buildAcademicWaveDeck(
             y: bodyStartY + 8,
             width: 7,
             height: 128,
-            fill: WAVE_ACCENT_COLORS[i % WAVE_ACCENT_COLORS.length],
+            fill: accents[i % accents.length],
             stroke: 'transparent',
             strokeWidth: 0,
             borderRadius: 3,
@@ -1123,10 +1131,10 @@ export function buildAcademicWaveDeck(
             width: 242,
             height: 28,
             text: b.heading,
-            fontFamily: 'Plus Jakarta Sans, sans-serif',
+            fontFamily: t.headingFont,
             fontSize: 15,
             fontWeight: 'bold',
-            color: '#0F172A',
+            color: t.headingColor,
             textAlign: 'left',
           },
           {
@@ -1137,10 +1145,10 @@ export function buildAcademicWaveDeck(
             width: 242,
             height: 102,
             text: b.body,
-            fontFamily: 'DM Sans, sans-serif',
+            fontFamily: t.bodyFont,
             fontSize: 13,
             fontWeight: 'normal',
-            color: '#1E293B',
+            color: t.bodyColor,
             textAlign: 'left',
           }
         );
@@ -1165,8 +1173,8 @@ export function buildAcademicWaveDeck(
             y: by,
             width: 800,
             height: 26,
-            fill: '#FAF6EE',
-            stroke: '#E2D6BA',
+            fill: t.surfaceFill,
+            stroke: t.surfaceStroke,
             strokeWidth: 1,
             borderRadius: 6,
             shadow: true,
@@ -1179,10 +1187,10 @@ export function buildAcademicWaveDeck(
             width: 772,
             height: 22,
             text: `${i + 1}. ${line.replace(/^\d+\.\s*/, '')}`,
-            fontFamily: 'DM Sans, sans-serif',
+            fontFamily: t.bodyFont,
             fontSize: 12,
             fontWeight: 'normal',
-            color: '#1E293B',
+            color: t.bodyColor,
             textAlign: 'left',
           }
         );
@@ -1203,8 +1211,8 @@ export function buildAcademicWaveDeck(
             y: imgY - 6,
             width: 384,
             height: 290,
-            fill: '#FFFFFF',
-            stroke: '#E2E8F0',
+            fill: t.surfaceFill,
+            stroke: t.surfaceStroke,
             strokeWidth: 1,
             borderRadius: 18,
             shadow: true,
@@ -1235,10 +1243,10 @@ export function buildAcademicWaveDeck(
             width: photoUrl ? textW - 20 : 800,
             height: 28,
             text: b.heading,
-            fontFamily: 'Plus Jakarta Sans, sans-serif',
+            fontFamily: t.headingFont,
             fontSize: 16,
             fontWeight: 'bold',
-            color: i === 0 ? '#EB6A5B' : '#B45309',
+            color: accents[i % accents.length],
             textAlign: 'left',
           },
           {
@@ -1249,10 +1257,10 @@ export function buildAcademicWaveDeck(
             width: photoUrl ? textW - 20 : 800,
             height: 76,
             text: b.body,
-            fontFamily: 'DM Sans, sans-serif',
+            fontFamily: t.bodyFont,
             fontSize: 14,
             fontWeight: 'normal',
-            color: '#1E293B',
+            color: t.bodyColor,
             textAlign: 'left',
           }
         );
@@ -1267,15 +1275,14 @@ export function buildAcademicWaveDeck(
           width: photoUrl ? textW - 20 : 750,
           height: 54,
           text: s.footerCallout,
-          fontFamily: 'Plus Jakarta Sans, sans-serif',
+          fontFamily: t.headingFont,
           fontSize: 14,
           fontWeight: 'bold',
-          color: '#0F172A',
+          color: t.headingColor,
           textAlign: 'left',
         });
       }
     } else {
-      // Default: three_columns (Spacious, full height, no jammed image!)
       blocks.slice(0, 3).forEach((b, i) => {
         const cx = 52 + i * 286;
         elements.push(
@@ -1286,7 +1293,7 @@ export function buildAcademicWaveDeck(
             y: bodyStartY + 8,
             width: 7,
             height: 290,
-            fill: WAVE_ACCENT_COLORS[i % WAVE_ACCENT_COLORS.length],
+            fill: accents[i % accents.length],
             stroke: 'transparent',
             strokeWidth: 0,
             borderRadius: 3,
@@ -1300,10 +1307,10 @@ export function buildAcademicWaveDeck(
             width: 250,
             height: 32,
             text: b.heading,
-            fontFamily: 'Plus Jakarta Sans, sans-serif',
+            fontFamily: t.headingFont,
             fontSize: 16,
             fontWeight: 'bold',
-            color: '#0F172A',
+            color: t.headingColor,
             textAlign: 'left',
           },
           {
@@ -1314,10 +1321,10 @@ export function buildAcademicWaveDeck(
             width: 250,
             height: 248,
             text: b.body,
-            fontFamily: 'DM Sans, sans-serif',
+            fontFamily: t.bodyFont,
             fontSize: 13,
             fontWeight: 'normal',
-            color: '#1E293B',
+            color: t.bodyColor,
             textAlign: 'left',
           }
         );
@@ -1332,10 +1339,10 @@ export function buildAcademicWaveDeck(
           width: 780,
           height: 48,
           text: s.footerCallout,
-          fontFamily: 'DM Sans, sans-serif',
+          fontFamily: t.bodyFont,
           fontSize: 13,
           fontStyle: 'italic',
-          color: '#475569',
+          color: t.mutedColor,
           textAlign: 'left',
         });
       }
@@ -1350,7 +1357,7 @@ export function buildAcademicWaveDeck(
         y: 510,
         width: 878,
         height: 2,
-        fill: '#FFFFFF',
+        fill: t.dividerColor,
         stroke: 'transparent',
         strokeWidth: 0,
       },
@@ -1362,10 +1369,10 @@ export function buildAcademicWaveDeck(
         width: 720,
         height: 20,
         text: footerLabel,
-        fontFamily: 'DM Sans, sans-serif',
+        fontFamily: t.bodyFont,
         fontSize: 10,
         fontWeight: 'normal',
-        color: '#475569',
+        color: t.mutedColor,
         textAlign: 'left',
       },
       {
@@ -1379,25 +1386,17 @@ export function buildAcademicWaveDeck(
         fontFamily: 'JetBrains Mono, monospace',
         fontSize: 10,
         fontWeight: 'bold',
-        color: '#1E293B',
+        color: t.headingColor,
         textAlign: 'right',
       }
     );
 
-    const pageBg =
-      theme === 'crimson_dark'
-        ? '#0F0F12'
-        : theme === 'clean_white'
-          ? '#FFFFFF'
-          : theme === 'emerald_green'
-            ? '#F7FDF9'
-            : index % 2 === 0
-              ? '#FFFDF5'
-              : '#FFFFFF';
+    const pageBg = index % 2 === 0 ? t.pageBg : t.altPageBg;
     pages.push({
       id: uid('wave_s'),
       title: s.title,
       background: pageBg,
+      backgroundImage: contentBgUri,
       elements,
     });
   });
@@ -1412,11 +1411,11 @@ export function buildAcademicWaveDeck(
     {
       id: uid('rect'),
       type: 'rect',
-      x: 32,
+      x: 36,
       y: 18,
       width: 152,
       height: 30,
-      fill: '#9B7EDE',
+      fill: accents[3 % accents.length],
       stroke: 'transparent',
       strokeWidth: 0,
       borderRadius: 8,
@@ -1425,7 +1424,7 @@ export function buildAcademicWaveDeck(
     {
       id: uid('txt'),
       type: 'text',
-      x: 32,
+      x: 36,
       y: 22,
       width: 152,
       height: 24,
@@ -1444,10 +1443,10 @@ export function buildAcademicWaveDeck(
       width: 700,
       height: 44,
       text: 'Foydalanilgan manbalar',
-      fontFamily: 'Plus Jakarta Sans, sans-serif',
+      fontFamily: t.headingFont,
       fontSize: 28,
       fontWeight: 'bold',
-      color: '#0F172A',
+      color: t.headingColor,
       textAlign: 'left',
     },
   ];
@@ -1462,7 +1461,7 @@ export function buildAcademicWaveDeck(
         y: ry,
         width: 28,
         height: 28,
-        fill: WAVE_ACCENT_COLORS[i % WAVE_ACCENT_COLORS.length],
+        fill: accents[i % accents.length],
         stroke: 'transparent',
         strokeWidth: 0,
         shadow: true,
@@ -1489,10 +1488,10 @@ export function buildAcademicWaveDeck(
         width: 750,
         height: 44,
         text: refText,
-        fontFamily: 'DM Sans, sans-serif',
+        fontFamily: t.bodyFont,
         fontSize: 13,
         fontWeight: 'normal',
-        color: '#1E293B',
+        color: t.bodyColor,
         textAlign: 'left',
       }
     );
@@ -1506,7 +1505,7 @@ export function buildAcademicWaveDeck(
       y: 510,
       width: 878,
       height: 2,
-      fill: '#FFFFFF',
+      fill: t.dividerColor,
       stroke: 'transparent',
       strokeWidth: 0,
     },
@@ -1518,9 +1517,9 @@ export function buildAcademicWaveDeck(
       width: 720,
       height: 20,
       text: footerLabel,
-      fontFamily: 'DM Sans, sans-serif',
+      fontFamily: t.bodyFont,
       fontSize: 10,
-      color: '#475569',
+      color: t.mutedColor,
       textAlign: 'left',
     },
     {
@@ -1534,24 +1533,16 @@ export function buildAcademicWaveDeck(
       fontFamily: 'JetBrains Mono, monospace',
       fontSize: 10,
       fontWeight: 'bold',
-      color: '#1E293B',
+      color: t.headingColor,
       textAlign: 'right',
     }
   );
 
-  const refBgColor =
-    theme === 'crimson_dark'
-      ? '#0F0F12'
-      : theme === 'clean_white'
-        ? '#FFFFFF'
-        : theme === 'emerald_green'
-          ? '#F7FDF9'
-          : '#FFFDF7';
-
   pages.push({
     id: uid('wave_refs'),
     title: 'Manbalar',
-    background: refBgColor,
+    background: t.pageBg,
+    backgroundImage: contentBgUri,
     elements: refElements,
   });
 
@@ -1568,6 +1559,9 @@ export function buildWhiteCardDeck(
   data: GeneratedSlideDeckData,
   meta: TemplateMetadata
 ): CanvasPage[] {
+  const t = getSlideTheme(meta.designTheme || 'clean_white');
+  const accents = t.accents;
+  const cardBg = t.pageBg;
   const pages: CanvasPage[] = [];
   const totalContentSlides = data.slides || [];
   const footerLabel = (data.footerTopic || data.deckTitle || 'TAQDIMOT').toUpperCase();
@@ -1581,7 +1575,7 @@ export function buildWhiteCardDeck(
       y: -74,
       width: 245,
       height: 245,
-      fill: '#FCD34D',
+      fill: accents[1] || '#FCD34D',
       stroke: 'transparent',
       strokeWidth: 0,
       shadow: true,
@@ -1593,7 +1587,7 @@ export function buildWhiteCardDeck(
       y: 396,
       width: 170,
       height: 170,
-      fill: '#F48FB1',
+      fill: accents[4] || t.secondaryAccent,
       stroke: 'transparent',
       strokeWidth: 0,
       shadow: true,
@@ -1605,7 +1599,7 @@ export function buildWhiteCardDeck(
       y: 38,
       width: 172,
       height: 36,
-      fill: '#EE6C5D',
+      fill: t.primaryAccent,
       stroke: 'transparent',
       strokeWidth: 0,
       borderRadius: 8,
@@ -1633,10 +1627,10 @@ export function buildWhiteCardDeck(
       width: wcHeroPhoto ? 470 : 700,
       height: 156,
       text: data.deckTitle || 'Taqdimot mavzusi',
-      fontFamily: 'Plus Jakarta Sans, sans-serif',
+      fontFamily: t.headingFont,
       fontSize: 34,
       fontWeight: 'bold',
-      color: '#1F2937',
+      color: t.headingColor,
       textAlign: 'left',
       lineHeight: 1.18,
     },
@@ -1644,25 +1638,25 @@ export function buildWhiteCardDeck(
       id: uid('txt'),
       type: 'text',
       x: 52,
-      y: 278,
+      y: 262,
       width: wcHeroPhoto ? 456 : 660,
-      height: 60,
+      height: 54,
       text: data.deckSubtitle || 'Asosiy mazmun va tahlil',
-      fontFamily: 'DM Sans, sans-serif',
-      fontSize: 16,
+      fontFamily: t.bodyFont,
+      fontSize: 15,
       fontWeight: 'normal',
-      color: '#6B7280',
+      color: t.mutedColor,
       textAlign: 'left',
     },
     {
       id: uid('rect'),
       type: 'rect',
       x: 52,
-      y: 368,
-      width: 320,
-      height: 54,
-      fill: '#FDFBF2',
-      stroke: '#EFECE2',
+      y: 334,
+      width: 456,
+      height: 92,
+      fill: t.surfaceFill,
+      stroke: t.surfaceStroke,
       strokeWidth: 1,
       borderRadius: 14,
       shadow: true,
@@ -1670,29 +1664,44 @@ export function buildWhiteCardDeck(
     {
       id: uid('txt'),
       type: 'text',
-      x: 64,
-      y: 378,
-      width: 296,
-      height: 36,
-      text: `${totalContentSlides.length + 3} ta slayd asosida tayyorlangan taqdimot`,
+      x: 68,
+      y: 344,
+      width: 424,
+      height: 74,
+      text: [
+        meta.institution || data.institution || "Oliy ta'lim muassasasi",
+        meta.faculty ? `Fakultet: ${meta.faculty}` : '',
+        meta.department ? `Kafedra: ${meta.department}` : '',
+      ]
+        .filter(Boolean)
+        .join('\n'),
       fontFamily: 'Plus Jakarta Sans, sans-serif',
-      fontSize: 13,
+      fontSize: 12,
       fontWeight: 'bold',
-      color: '#1F2937',
-      textAlign: 'center',
+      color: t.headingColor,
+      textAlign: 'left',
+      lineHeight: 1.38,
     },
     {
       id: uid('txt'),
       type: 'text',
       x: 52,
-      y: 486,
-      width: 460,
-      height: 28,
-      text: `Tayyorladi: ${meta.authorName || '__________________'}   Guruh: ${meta.groupName || '________'}`,
-      fontFamily: 'DM Sans, sans-serif',
+      y: 442,
+      width: 680,
+      height: 76,
+      text: [
+        `Tayyorladi: ${meta.authorName || '__________________'}`,
+        meta.course ? `Kurs: ${meta.course}` : '',
+        meta.groupName ? `Guruh: ${meta.groupName}` : '',
+        meta.teacher ? `Tekshirdi: ${meta.teacher}` : '',
+      ]
+        .filter(Boolean)
+        .join('   |   '),
+      fontFamily: t.bodyFont,
       fontSize: 12,
-      color: '#6B7280',
+      color: t.mutedColor,
       textAlign: 'left',
+      lineHeight: 1.35,
     },
   ];
 
@@ -1705,8 +1714,8 @@ export function buildWhiteCardDeck(
         y: 112,
         width: 376,
         height: 286,
-        fill: '#FFFFFF',
-        stroke: '#ECEAE2',
+        fill: t.surfaceFill,
+        stroke: t.surfaceStroke,
         strokeWidth: 1,
         borderRadius: 22,
         shadow: true,
@@ -1726,11 +1735,11 @@ export function buildWhiteCardDeck(
     );
   }
 
-  // SLIDE 1: White Title Slide with decorative right circles + optional topic photo
+  // SLIDE 1: Card Title Slide
   pages.push({
     id: uid('wc_s1'),
     title: 'Titul',
-    background: '#FFFFFF',
+    background: cardBg,
     elements: wcTitleElems,
   });
 
@@ -1744,7 +1753,7 @@ export function buildWhiteCardDeck(
       y: 18,
       width: 112,
       height: 28,
-      fill: '#F5A642',
+      fill: accents[1] || t.secondaryAccent,
       stroke: 'transparent',
       strokeWidth: 0,
       borderRadius: 8,
@@ -1772,10 +1781,10 @@ export function buildWhiteCardDeck(
       width: 680,
       height: 44,
       text: 'Taqdimot tuzilishi',
-      fontFamily: 'Plus Jakarta Sans, sans-serif',
+      fontFamily: t.headingFont,
       fontSize: 28,
       fontWeight: 'bold',
-      color: '#1F2937',
+      color: t.headingColor,
       textAlign: 'left',
     },
     {
@@ -1786,9 +1795,9 @@ export function buildWhiteCardDeck(
       width: 720,
       height: 26,
       text: "Bo'limlar mantiqiy ketma-ketlikda va amaliy misollar bilan yoritildi.",
-      fontFamily: 'DM Sans, sans-serif',
+      fontFamily: t.bodyFont,
       fontSize: 13,
-      color: '#6B7280',
+      color: t.mutedColor,
       textAlign: 'left',
     },
   ];
@@ -1803,7 +1812,7 @@ export function buildWhiteCardDeck(
         y: ry + 4,
         width: 42,
         height: 42,
-        fill: CARD_ACCENTS[idx % CARD_ACCENTS.length],
+        fill: accents[idx % accents.length],
         stroke: 'transparent',
         strokeWidth: 0,
         shadow: true,
@@ -1829,8 +1838,8 @@ export function buildWhiteCardDeck(
         y: ry,
         width: 786,
         height: 50,
-        fill: '#F6F5F0',
-        stroke: '#ECEAE2',
+        fill: t.surfaceFill,
+        stroke: t.surfaceStroke,
         strokeWidth: 1,
         borderRadius: 12,
         shadow: true,
@@ -1843,10 +1852,10 @@ export function buildWhiteCardDeck(
         width: 746,
         height: 30,
         text: item.title,
-        fontFamily: 'Plus Jakarta Sans, sans-serif',
+        fontFamily: t.headingFont,
         fontSize: 15,
         fontWeight: 'bold',
-        color: '#1F2937',
+        color: t.headingColor,
         textAlign: 'left',
       }
     );
@@ -1860,7 +1869,7 @@ export function buildWhiteCardDeck(
       y: 508,
       width: 880,
       height: 2,
-      fill: '#E5E7EB',
+      fill: t.dividerColor,
       stroke: 'transparent',
       strokeWidth: 0,
     },
@@ -1872,9 +1881,9 @@ export function buildWhiteCardDeck(
       width: 720,
       height: 20,
       text: footerLabel,
-      fontFamily: 'DM Sans, sans-serif',
+      fontFamily: t.bodyFont,
       fontSize: 10,
-      color: '#6B7280',
+      color: t.mutedColor,
       textAlign: 'left',
     },
     {
@@ -1888,7 +1897,7 @@ export function buildWhiteCardDeck(
       fontFamily: 'JetBrains Mono, monospace',
       fontSize: 10,
       fontWeight: 'bold',
-      color: '#374151',
+      color: t.headingColor,
       textAlign: 'right',
     }
   );
@@ -1896,14 +1905,14 @@ export function buildWhiteCardDeck(
   pages.push({
     id: uid('wc_s2'),
     title: 'Taqdimot tuzilishi',
-    background: '#FFFFFF',
+    background: cardBg,
     elements: s2Elems,
   });
 
   // SLIDES 3 .. N-1
   totalContentSlides.forEach((s, index) => {
     const slideNum = index + 3;
-    const pillColor = CARD_ACCENTS[index % CARD_ACCENTS.length];
+    const pillColor = accents[index % accents.length];
     const photoUrl = resolveSlidePhotoUrl(s);
     const elements: CanvasElement[] = [
       {
@@ -1941,10 +1950,10 @@ export function buildWhiteCardDeck(
         width: 876,
         height: 44,
         text: s.title || 'Boʻlim',
-        fontFamily: 'Plus Jakarta Sans, sans-serif',
+        fontFamily: t.headingFont,
         fontSize: 26,
         fontWeight: 'bold',
-        color: '#1F2937',
+        color: t.headingColor,
         textAlign: 'left',
       },
     ];
@@ -1959,9 +1968,9 @@ export function buildWhiteCardDeck(
         width: 870,
         height: 26,
         text: s.subtitle,
-        fontFamily: 'DM Sans, sans-serif',
+        fontFamily: t.bodyFont,
         fontSize: 13,
-        color: '#6B7280',
+        color: t.mutedColor,
         textAlign: 'left',
       });
       bodyStartY = 138;
@@ -1974,7 +1983,6 @@ export function buildWhiteCardDeck(
       const rows = s.tableRows.slice(0, 6);
       const colWidths = [180, 326, 356];
       const colXs = [46, 232, 564];
-      const headerColors = ['#EE6C5D', '#F5A642', '#6BB17E'];
 
       headers.forEach((h, cIdx) => {
         elements.push(
@@ -1985,7 +1993,7 @@ export function buildWhiteCardDeck(
             y: bodyStartY,
             width: colWidths[cIdx],
             height: 38,
-            fill: headerColors[cIdx % 3],
+            fill: accents[cIdx % accents.length],
             stroke: 'transparent',
             strokeWidth: 0,
             borderRadius: 8,
@@ -2019,8 +2027,8 @@ export function buildWhiteCardDeck(
               y: ry,
               width: colWidths[cIdx],
               height: 40,
-              fill: '#F6F5F0',
-              stroke: '#ECEAE2',
+              fill: t.surfaceFill,
+              stroke: t.surfaceStroke,
               strokeWidth: 1,
               borderRadius: 6,
               shadow: true,
@@ -2033,10 +2041,10 @@ export function buildWhiteCardDeck(
               width: colWidths[cIdx] - 20,
               height: 28,
               text: cell,
-              fontFamily: 'DM Sans, sans-serif',
+              fontFamily: t.bodyFont,
               fontSize: 12,
               fontWeight: cIdx === 0 ? 'bold' : 'normal',
-              color: '#1F2937',
+              color: cIdx === 0 ? t.headingColor : t.bodyColor,
               textAlign: 'left',
             }
           );
@@ -2056,7 +2064,7 @@ export function buildWhiteCardDeck(
         y: bodyStartY + 42,
         width: endX - startX,
         height: 5,
-        fill: '#E5E7EB',
+        fill: t.dividerColor,
         stroke: 'transparent',
         strokeWidth: 0,
         borderRadius: 2,
@@ -2073,7 +2081,7 @@ export function buildWhiteCardDeck(
             y: bodyStartY + 26,
             width: 36,
             height: 36,
-            fill: CARD_ACCENTS[i % CARD_ACCENTS.length],
+            fill: accents[i % accents.length],
             stroke: 'transparent',
             strokeWidth: 0,
             shadow: true,
@@ -2086,10 +2094,10 @@ export function buildWhiteCardDeck(
             width: colW,
             height: 34,
             text: b.heading,
-            fontFamily: 'Plus Jakarta Sans, sans-serif',
+            fontFamily: t.headingFont,
             fontSize: 14,
             fontWeight: 'bold',
-            color: '#1F2937',
+            color: t.headingColor,
             textAlign: 'center',
           },
           {
@@ -2100,9 +2108,9 @@ export function buildWhiteCardDeck(
             width: colW,
             height: 136,
             text: b.body,
-            fontFamily: 'DM Sans, sans-serif',
+            fontFamily: t.bodyFont,
             fontSize: 12,
-            color: '#4B5563',
+            color: t.bodyColor,
             textAlign: 'center',
           }
         );
@@ -2117,8 +2125,8 @@ export function buildWhiteCardDeck(
             y: 410,
             width: 816,
             height: 58,
-            fill: '#FDFBF2',
-            stroke: '#EFECE2',
+            fill: t.surfaceFill,
+            stroke: t.surfaceStroke,
             strokeWidth: 1,
             borderRadius: 12,
             shadow: true,
@@ -2131,10 +2139,10 @@ export function buildWhiteCardDeck(
             width: 776,
             height: 44,
             text: s.footerCallout,
-            fontFamily: 'Plus Jakarta Sans, sans-serif',
+            fontFamily: t.headingFont,
             fontSize: 14,
             fontWeight: 'bold',
-            color: '#1F2937',
+            color: t.headingColor,
             textAlign: 'center',
           }
         );
@@ -2150,7 +2158,7 @@ export function buildWhiteCardDeck(
             y: sy,
             width: 146,
             height: 36,
-            fill: CARD_ACCENTS[i % CARD_ACCENTS.length],
+            fill: accents[i % accents.length],
             stroke: 'transparent',
             strokeWidth: 0,
             borderRadius: 8,
@@ -2178,9 +2186,9 @@ export function buildWhiteCardDeck(
             width: 660,
             height: 42,
             text: b.badge ? `${b.heading} — ${b.body}` : b.body,
-            fontFamily: 'DM Sans, sans-serif',
+            fontFamily: t.bodyFont,
             fontSize: 14,
-            color: '#1F2937',
+            color: t.bodyColor,
             textAlign: 'left',
           }
         );
@@ -2196,7 +2204,7 @@ export function buildWhiteCardDeck(
             y: sy,
             width: 34,
             height: 34,
-            fill: CARD_ACCENTS[i % CARD_ACCENTS.length],
+            fill: accents[i % accents.length],
             stroke: 'transparent',
             strokeWidth: 0,
             shadow: true,
@@ -2223,10 +2231,10 @@ export function buildWhiteCardDeck(
             width: 170,
             height: 34,
             text: b.heading,
-            fontFamily: 'Plus Jakarta Sans, sans-serif',
+            fontFamily: t.headingFont,
             fontSize: 15,
             fontWeight: 'bold',
-            color: '#1F2937',
+            color: t.headingColor,
             textAlign: 'left',
           },
           {
@@ -2237,9 +2245,9 @@ export function buildWhiteCardDeck(
             width: 590,
             height: 52,
             text: b.body,
-            fontFamily: 'DM Sans, sans-serif',
+            fontFamily: t.bodyFont,
             fontSize: 13,
-            color: '#4B5563',
+            color: t.bodyColor,
             textAlign: 'left',
           }
         );
@@ -2258,8 +2266,8 @@ export function buildWhiteCardDeck(
             y: cy,
             width: 412,
             height: 116,
-            fill: '#F6F5F0',
-            stroke: '#ECEAE2',
+            fill: t.surfaceFill,
+            stroke: t.surfaceStroke,
             strokeWidth: 1,
             borderRadius: 12,
             shadow: true,
@@ -2271,7 +2279,7 @@ export function buildWhiteCardDeck(
             y: cy,
             width: 8,
             height: 116,
-            fill: CARD_ACCENTS[i % CARD_ACCENTS.length],
+            fill: accents[i % accents.length],
             stroke: 'transparent',
             strokeWidth: 0,
             borderRadius: 4,
@@ -2284,10 +2292,10 @@ export function buildWhiteCardDeck(
             width: 374,
             height: 28,
             text: b.heading,
-            fontFamily: 'Plus Jakarta Sans, sans-serif',
+            fontFamily: t.headingFont,
             fontSize: 16,
             fontWeight: 'bold',
-            color: '#1F2937',
+            color: t.headingColor,
             textAlign: 'left',
           },
           {
@@ -2298,9 +2306,9 @@ export function buildWhiteCardDeck(
             width: 374,
             height: 64,
             text: b.body,
-            fontFamily: 'DM Sans, sans-serif',
+            fontFamily: t.bodyFont,
             fontSize: 13,
-            color: '#374151',
+            color: t.bodyColor,
             textAlign: 'left',
           }
         );
@@ -2315,8 +2323,8 @@ export function buildWhiteCardDeck(
             y: 426,
             width: 816,
             height: 52,
-            fill: '#FDFBF2',
-            stroke: '#EFECE2',
+            fill: t.surfaceFill,
+            stroke: t.surfaceStroke,
             strokeWidth: 1,
             borderRadius: 12,
             shadow: true,
@@ -2332,7 +2340,7 @@ export function buildWhiteCardDeck(
             fontFamily: 'Plus Jakarta Sans, sans-serif',
             fontSize: 13,
             fontWeight: 'bold',
-            color: '#6B4E9B',
+            color: t.primaryAccent,
             textAlign: 'center',
           }
         );
@@ -2355,8 +2363,8 @@ export function buildWhiteCardDeck(
           y: imgY - 6,
           width: 384,
           height: 290,
-          fill: '#FFFFFF',
-          stroke: '#ECEAE2',
+          fill: t.surfaceFill,
+          stroke: t.surfaceStroke,
           strokeWidth: 1,
           borderRadius: 18,
           shadow: true,
@@ -2377,7 +2385,7 @@ export function buildWhiteCardDeck(
 
       blocks.slice(0, 3).forEach((b, i) => {
         const cy = bodyStartY + 6 + i * 112;
-        const pillColor = CARD_ACCENTS[(index + i) % CARD_ACCENTS.length];
+        const barColor = accents[(index + i) % accents.length];
         elements.push(
           {
             id: uid('rect'),
@@ -2386,8 +2394,8 @@ export function buildWhiteCardDeck(
             y: cy,
             width: textW,
             height: 98,
-            fill: '#F6F5F0',
-            stroke: '#ECEAE2',
+            fill: t.surfaceFill,
+            stroke: t.surfaceStroke,
             strokeWidth: 1,
             borderRadius: 12,
             shadow: true,
@@ -2399,7 +2407,7 @@ export function buildWhiteCardDeck(
             y: cy,
             width: 8,
             height: 98,
-            fill: pillColor,
+            fill: barColor,
             stroke: 'transparent',
             strokeWidth: 0,
             borderRadius: 4,
@@ -2412,10 +2420,10 @@ export function buildWhiteCardDeck(
             width: textW - 32,
             height: 26,
             text: b.heading,
-            fontFamily: 'Plus Jakarta Sans, sans-serif',
+            fontFamily: t.headingFont,
             fontSize: 16,
             fontWeight: 'bold',
-            color: '#1F2937',
+            color: t.headingColor,
             textAlign: 'left',
           },
           {
@@ -2426,9 +2434,9 @@ export function buildWhiteCardDeck(
             width: textW - 32,
             height: 52,
             text: b.body,
-            fontFamily: 'DM Sans, sans-serif',
+            fontFamily: t.bodyFont,
             fontSize: 13,
-            color: '#374151',
+            color: t.bodyColor,
             textAlign: 'left',
           }
         );
@@ -2443,15 +2451,14 @@ export function buildWhiteCardDeck(
           width: textW - 20,
           height: 24,
           text: s.footerCallout,
-          fontFamily: 'DM Sans, sans-serif',
+          fontFamily: t.bodyFont,
           fontSize: 12,
           fontStyle: 'italic',
-          color: '#6B7280',
+          color: t.mutedColor,
           textAlign: 'left',
         });
       }
     } else {
-      // three_columns: 3 full height, elegant white cards (NO jammed image at bottom!)
       const cards = blocks.slice(0, 3);
       cards.forEach((b, i) => {
         const cx = 52 + i * 290;
@@ -2463,8 +2470,8 @@ export function buildWhiteCardDeck(
             y: bodyStartY + 8,
             width: 274,
             height: 290,
-            fill: '#F6F5F0',
-            stroke: '#ECEAE2',
+            fill: t.surfaceFill,
+            stroke: t.surfaceStroke,
             strokeWidth: 1,
             borderRadius: 12,
             shadow: true,
@@ -2476,7 +2483,7 @@ export function buildWhiteCardDeck(
             y: bodyStartY + 8,
             width: 8,
             height: 290,
-            fill: CARD_ACCENTS[i % CARD_ACCENTS.length],
+            fill: accents[i % accents.length],
             stroke: 'transparent',
             strokeWidth: 0,
             borderRadius: 4,
@@ -2489,10 +2496,10 @@ export function buildWhiteCardDeck(
             width: 240,
             height: 30,
             text: b.heading,
-            fontFamily: 'Plus Jakarta Sans, sans-serif',
+            fontFamily: t.headingFont,
             fontSize: 16,
             fontWeight: 'bold',
-            color: '#1F2937',
+            color: t.headingColor,
             textAlign: 'left',
           },
           {
@@ -2503,9 +2510,9 @@ export function buildWhiteCardDeck(
             width: 240,
             height: 230,
             text: b.body,
-            fontFamily: 'DM Sans, sans-serif',
+            fontFamily: t.bodyFont,
             fontSize: 13,
-            color: '#374151',
+            color: t.bodyColor,
             textAlign: 'left',
           }
         );
@@ -2520,16 +2527,15 @@ export function buildWhiteCardDeck(
           width: 780,
           height: 48,
           text: s.footerCallout,
-          fontFamily: 'DM Sans, sans-serif',
+          fontFamily: t.bodyFont,
           fontSize: 13,
           fontStyle: 'italic',
-          color: '#6B7280',
+          color: t.mutedColor,
           textAlign: 'left',
         });
       }
     }
 
-    // Footer hairline + label + number
     elements.push(
       {
         id: uid('rect'),
@@ -2538,7 +2544,7 @@ export function buildWhiteCardDeck(
         y: 508,
         width: 880,
         height: 2,
-        fill: '#E5E7EB',
+        fill: t.dividerColor,
         stroke: 'transparent',
         strokeWidth: 0,
       },
@@ -2550,9 +2556,9 @@ export function buildWhiteCardDeck(
         width: 720,
         height: 20,
         text: footerLabel,
-        fontFamily: 'DM Sans, sans-serif',
+        fontFamily: t.bodyFont,
         fontSize: 10,
-        color: '#6B7280',
+        color: t.mutedColor,
         textAlign: 'left',
       },
       {
@@ -2566,7 +2572,7 @@ export function buildWhiteCardDeck(
         fontFamily: 'JetBrains Mono, monospace',
         fontSize: 10,
         fontWeight: 'bold',
-        color: '#374151',
+        color: t.headingColor,
         textAlign: 'right',
       }
     );
@@ -2574,7 +2580,7 @@ export function buildWhiteCardDeck(
     pages.push({
       id: uid('wc_s'),
       title: s.title,
-      background: '#FFFFFF',
+      background: index % 2 === 0 ? cardBg : t.altPageBg,
       elements,
     });
   });
@@ -2593,7 +2599,7 @@ export function buildWhiteCardDeck(
       y: 18,
       width: 146,
       height: 28,
-      fill: '#9B7EDE',
+      fill: accents[3 % accents.length],
       stroke: 'transparent',
       strokeWidth: 0,
       borderRadius: 8,
@@ -2621,10 +2627,10 @@ export function buildWhiteCardDeck(
       width: 720,
       height: 44,
       text: 'Foydalanilgan manbalar',
-      fontFamily: 'Plus Jakarta Sans, sans-serif',
+      fontFamily: t.headingFont,
       fontSize: 28,
       fontWeight: 'bold',
-      color: '#1F2937',
+      color: t.headingColor,
       textAlign: 'left',
     },
   ];
@@ -2639,7 +2645,7 @@ export function buildWhiteCardDeck(
         y: ry,
         width: 28,
         height: 28,
-        fill: CARD_ACCENTS[i % CARD_ACCENTS.length],
+        fill: accents[i % accents.length],
         stroke: 'transparent',
         strokeWidth: 0,
         shadow: true,
@@ -2666,9 +2672,9 @@ export function buildWhiteCardDeck(
         width: 780,
         height: 44,
         text: refText,
-        fontFamily: 'DM Sans, sans-serif',
+        fontFamily: t.bodyFont,
         fontSize: 13,
-        color: '#374151',
+        color: t.bodyColor,
         textAlign: 'left',
       }
     );
@@ -2682,7 +2688,7 @@ export function buildWhiteCardDeck(
       y: 508,
       width: 880,
       height: 2,
-      fill: '#E5E7EB',
+      fill: t.dividerColor,
       stroke: 'transparent',
       strokeWidth: 0,
     },
@@ -2694,9 +2700,9 @@ export function buildWhiteCardDeck(
       width: 720,
       height: 20,
       text: footerLabel,
-      fontFamily: 'DM Sans, sans-serif',
+      fontFamily: t.bodyFont,
       fontSize: 10,
-      color: '#6B7280',
+      color: t.mutedColor,
       textAlign: 'left',
     },
     {
@@ -2710,7 +2716,7 @@ export function buildWhiteCardDeck(
       fontFamily: 'JetBrains Mono, monospace',
       fontSize: 10,
       fontWeight: 'bold',
-      color: '#374151',
+      color: t.headingColor,
       textAlign: 'right',
     }
   );
@@ -2718,7 +2724,7 @@ export function buildWhiteCardDeck(
   pages.push({
     id: uid('wc_refs'),
     title: 'Manbalar',
-    background: '#FFFFFF',
+    background: cardBg,
     elements: refElements,
   });
 

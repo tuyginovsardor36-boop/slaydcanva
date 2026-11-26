@@ -69,18 +69,60 @@ interface HomeViewProps {
 
 export const HomeView: React.FC<HomeViewProps> = ({
   docTitle,
-  pptxCount,
-  pdfCount,
   balance,
   pricingSettings,
-  onOpenEditor,
   onOpenAiService,
   onOpenTab,
 }) => {
   const effectivePricing = pricingSettings || DEFAULT_PRICING_SETTINGS;
+  const primaryCards: Array<{
+    id: AiServiceId;
+    title: string;
+    subtitle: string;
+    formatLabel: string;
+    basePrice: number;
+  }> = [
+    {
+      id: 'academic_wave_pptx',
+      title: 'Slayd (Prezentatsiya va taqdimot)',
+      subtitle: 'Akademik, oq kartochkali yoki erkin dizayn uslublari',
+      formatLabel: 'PPTX · PDF',
+      basePrice: effectivePricing.services.academic_wave_pptx.basePrice,
+    },
+    {
+      id: 'independent_work_word',
+      title: 'Mustaqil ish (Referat)',
+      subtitle: "O'zDST standarti: Titul, reja, boblar, xulosa, adabiyotlar",
+      formatLabel: 'DOCX · PDF',
+      basePrice:
+        effectivePricing.services.independent_work_word?.basePrice ??
+        DEFAULT_PRICING_SETTINGS.services.independent_work_word.basePrice,
+    },
+    {
+      id: 'course_work_word',
+      title: 'Kurs ishi',
+      subtitle: 'OTM talabiga mos 3 bobli chuqur tadqiqot va tahlil',
+      formatLabel: 'DOCX · PDF',
+      basePrice:
+        effectivePricing.services.course_work_word?.basePrice ??
+        DEFAULT_PRICING_SETTINGS.services.course_work_word.basePrice,
+    },
+    {
+      id: 'essay_article_word',
+      title: 'Esse va Ilmiy maqola',
+      subtitle: 'IMRAD ilmiy maqola, tahliliy esse yoki konferensiya tezisi',
+      formatLabel: 'DOCX · PDF',
+      basePrice:
+        effectivePricing.services.essay_article_word?.basePrice ??
+        DEFAULT_PRICING_SETTINGS.services.essay_article_word.basePrice,
+    },
+  ];
+
+  const secondaryTools = AI_SERVICES.filter((s) => s.category === 'tools');
+
   return (
-    <main className="flex-1 overflow-y-auto bg-[#F4F4F6] px-4 py-5 space-y-5">
-      {/* Balance summary strip - Obsidian hero card matching brand logo */}
+    <main className="flex-1 overflow-y-auto bg-[#F4F4F6] px-4 py-4 space-y-4">
+      {/* Balance summary strip */}
       <section className="bg-[#111113] text-white border border-zinc-800 rounded-2xl p-4 flex items-center justify-between gap-3 shadow-xs">
         <div>
           <div className="text-xs text-zinc-400">Joriy balans</div>
@@ -91,50 +133,52 @@ export const HomeView: React.FC<HomeViewProps> = ({
         <button
           type="button"
           onClick={() => onOpenTab('topup')}
-          className="px-4 py-2 text-xs font-medium text-white bg-red-600 hover:bg-red-500 rounded-full transition-colors whitespace-nowrap shrink-0"
+          className="px-4 py-2 text-xs font-medium text-white bg-red-600 hover:bg-red-500 rounded-xl transition-colors whitespace-nowrap shrink-0"
         >
           To'ldirish
         </button>
       </section>
 
-      {/* AI Services Section */}
+      {/* Primary AI Services */}
       <section className="space-y-2.5">
         <div className="flex items-center justify-between px-0.5">
           <div className="flex items-center gap-1.5">
             <Sparkles className="w-4 h-4 text-red-600" />
             <h2 className="text-sm font-semibold text-zinc-900">
-              AI Xizmatlar · Avtomatik tayyorlash
+              Asosiy xizmatlar
             </h2>
           </div>
         </div>
 
         <div className="grid grid-cols-1 gap-2.5">
-          {AI_SERVICES.map((svc) => (
+          {primaryCards.map((card) => (
             <button
-              key={svc.id}
+              key={card.id}
               type="button"
-              onClick={() => onOpenAiService(svc.id)}
-              className="w-full bg-white border border-zinc-200 hover:border-red-500 rounded-2xl p-3 text-left transition-colors flex items-center gap-3"
+              onClick={() => onOpenAiService(card.id)}
+              className="w-full bg-white border border-zinc-200 hover:border-red-500 rounded-2xl p-3 text-left transition-colors flex items-center gap-3 min-h-[44px]"
             >
-              <div className="w-28 shrink-0">
-                <ServiceThumbnail id={svc.id} />
+              <div className="w-24 shrink-0">
+                <ServiceThumbnail id={card.id} />
               </div>
               <div className="min-w-0 flex-1 space-y-1">
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-sm font-semibold text-zinc-900 truncate">
-                    {svc.title}
+                    {card.title}
+                  </span>
+                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-100 text-zinc-600 shrink-0">
+                    {card.formatLabel}
                   </span>
                 </div>
                 <p className="text-[11px] text-zinc-500 line-clamp-2 leading-snug">
-                  {svc.subtitle}
+                  {card.subtitle}
                 </p>
                 <div className="pt-0.5 flex items-center justify-between">
                   <span className="text-[11px] font-mono tabular-nums font-semibold text-red-600">
-                    {formatSom(effectivePricing.services[svc.id].basePrice)}
-                    {svc.id !== 'five_block_infographic' ? '+' : ''}
+                    {formatSom(card.basePrice)}+
                   </span>
                   <span className="text-[11px] font-medium text-zinc-500 flex items-center gap-1">
-                    Yaratish
+                    Tayyorlash
                     <ArrowRight className="w-3 h-3" />
                   </span>
                 </div>
@@ -144,77 +188,25 @@ export const HomeView: React.FC<HomeViewProps> = ({
         </div>
       </section>
 
-      {/* Quick Start Manual Tools */}
-      <section className="space-y-2.5">
-        <h2 className="text-sm font-semibold text-zinc-900 px-0.5">
-          Qo'lda tahrirlash muhiti
+      {/* Secondary Tools */}
+      <section className="space-y-2">
+        <h2 className="text-xs font-semibold text-zinc-600 px-0.5">
+          Qo'shimcha xizmatlar
         </h2>
-
-        <div className="bg-white border border-zinc-200 rounded-2xl divide-y divide-zinc-100">
-          <button
-            type="button"
-            onClick={() => onOpenEditor('pptx')}
-            className="w-full p-4 flex items-center justify-between gap-3 text-left hover:bg-zinc-50 transition-colors rounded-t-2xl"
-          >
-            <div className="flex items-center gap-3 min-w-0">
-              <span className="w-10 h-10 rounded-full bg-red-50 text-red-600 flex items-center justify-center shrink-0">
-                <Presentation className="w-5 h-5" />
-              </span>
-              <div className="min-w-0">
-                <div className="text-sm font-semibold text-slate-900">
-                  Slayd · PPTX
-                </div>
-                <div className="text-xs text-slate-500 truncate">
-                  16:9 taqdimot tayyorlash ·{' '}
-                  <span className="font-mono tabular-nums">{pptxCount}</span> ta slayd
-                </div>
+        <div className="grid grid-cols-2 gap-2">
+          {secondaryTools.map((svc) => (
+            <button
+              key={svc.id}
+              type="button"
+              onClick={() => onOpenAiService(svc.id)}
+              className="bg-white border border-zinc-200 hover:border-red-500 rounded-xl p-3 text-left transition-colors space-y-1.5 min-h-[44px]"
+            >
+              <div className="text-xs font-semibold text-zinc-900 truncate">{svc.shortTitle}</div>
+              <div className="text-[11px] font-mono tabular-nums font-semibold text-red-600">
+                {formatSom(effectivePricing.services[svc.id].basePrice)}
               </div>
-            </div>
-            <ArrowRight className="w-4 h-4 text-slate-400 shrink-0" />
-          </button>
-
-          <button
-            type="button"
-            onClick={() => onOpenEditor('word')}
-            className="w-full p-4 flex items-center justify-between gap-3 text-left hover:bg-slate-50 transition-colors"
-          >
-            <div className="flex items-center gap-3 min-w-0">
-              <span className="w-10 h-10 rounded-full bg-slate-100 text-slate-700 flex items-center justify-center shrink-0">
-                <FileText className="w-5 h-5" />
-              </span>
-              <div className="min-w-0">
-                <div className="text-sm font-semibold text-slate-900">
-                  Hujjat · Word
-                </div>
-                <div className="text-xs text-slate-500 truncate">
-                  A4 matn va jadval muhiti (.docx)
-                </div>
-              </div>
-            </div>
-            <ArrowRight className="w-4 h-4 text-slate-400 shrink-0" />
-          </button>
-
-          <button
-            type="button"
-            onClick={() => onOpenEditor('pdf')}
-            className="w-full p-4 flex items-center justify-between gap-3 text-left hover:bg-slate-50 transition-colors rounded-b-2xl"
-          >
-            <div className="flex items-center gap-3 min-w-0">
-              <span className="w-10 h-10 rounded-full bg-slate-100 text-slate-700 flex items-center justify-center shrink-0">
-                <FileType2 className="w-5 h-5" />
-              </span>
-              <div className="min-w-0">
-                <div className="text-sm font-semibold text-slate-900">
-                  PDF sahifa
-                </div>
-                <div className="text-xs text-slate-500 truncate">
-                  Tik va yotiq A4 sahifalar ·{' '}
-                  <span className="font-mono tabular-nums">{pdfCount}</span> ta sahifa
-                </div>
-              </div>
-            </div>
-            <ArrowRight className="w-4 h-4 text-slate-400 shrink-0" />
-          </button>
+            </button>
+          ))}
         </div>
       </section>
 
@@ -229,9 +221,9 @@ export const HomeView: React.FC<HomeViewProps> = ({
         <button
           type="button"
           onClick={() => onOpenTab('editor')}
-          className="px-4 py-2 text-xs font-medium text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-full transition-colors whitespace-nowrap shrink-0"
+          className="px-4 py-2 text-xs font-medium text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors whitespace-nowrap shrink-0"
         >
-          Davom etish
+          Ko'rish
         </button>
       </section>
     </main>

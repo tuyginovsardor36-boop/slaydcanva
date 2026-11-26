@@ -1,20 +1,28 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { AlertCircle, Check, Image as ImageIcon, Loader2, Paintbrush, Sparkles, X } from 'lucide-react';
-import { CanvasPage } from '../types/editor';
+import { AI_TONE_OPTIONS, SLIDE_THEMES } from '../data/slideThemes';
+import { AiTone, CanvasPage, SlideDesignTheme } from '../types/editor';
+import { getTelegramAuthHeaders } from '../utils/telegramClient';
 
 interface AiCanvasDrawModalProps {
   open: boolean;
   onClose: () => void;
   onApplyPage: (page: CanvasPage, mode: 'replace' | 'add') => void;
+  telegramSessionToken?: string;
+  initialTheme?: SlideDesignTheme;
 }
 
 export const AiCanvasDrawModal: React.FC<AiCanvasDrawModalProps> = ({
   open,
   onClose,
   onApplyPage,
+  telegramSessionToken,
+  initialTheme = 'academic_gold',
 }) => {
   const [prompt, setPrompt] = useState('');
   const [styleHint, setStyleHint] = useState('');
+  const [selectedTheme, setSelectedTheme] = useState<SlideDesignTheme>(initialTheme);
+  const [aiTone, setAiTone] = useState<AiTone>('academic');
   const [includeTopicImages, setIncludeTopicImages] = useState(true);
   const [applyMode, setApplyMode] = useState<'replace' | 'add'>('add');
   const [isDrawing, setIsDrawing] = useState(false);
@@ -22,6 +30,12 @@ export const AiCanvasDrawModal: React.FC<AiCanvasDrawModalProps> = ({
   const [previewPage, setPreviewPage] = useState<CanvasPage | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    if (open) {
+      setSelectedTheme(initialTheme);
+    }
+  }, [open, initialTheme]);
 
   // Live HTML5 canvas animation while AI is drawing or previewing
   useEffect(() => {
@@ -249,10 +263,15 @@ export const AiCanvasDrawModal: React.FC<AiCanvasDrawModalProps> = ({
     try {
       const res = await fetch('/api/ai/canvas-draw', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...getTelegramAuthHeaders(telegramSessionToken),
+        },
         body: JSON.stringify({
           prompt: clean,
           styleHint: styleHint.trim() || undefined,
+          designTheme: selectedTheme,
+          aiTone,
           includeTopicImages,
         }),
       });
@@ -323,7 +342,7 @@ export const AiCanvasDrawModal: React.FC<AiCanvasDrawModalProps> = ({
           </div>
 
           <form onSubmit={handleDraw} className="space-y-3">
-            <div className="space-y-1">
+            <div className="space-y-1.5">
               <label htmlFor="ai-canvas-prompt" className="block text-xs font-medium text-slate-700">
                 Nima chizish kerak? (Mavzu va kontent)
               </label>
@@ -335,19 +354,91 @@ export const AiCanvasDrawModal: React.FC<AiCanvasDrawModalProps> = ({
                 placeholder="Masalan: Quyosh tizimi sayyoralari — o'ng tomonda illyustratsiya va 3 ta asosiy fakt kartasi bilan chiz"
                 className="w-full text-sm text-slate-900 bg-slate-50 border border-slate-200 focus:border-red-600 focus:bg-white rounded-xl px-3 py-2 outline-none resize-none"
               />
+              <div className="flex flex-wrap gap-1.5">
+                {[
+                  "Loyihaning 4 bosqichli yo'l xaritasi",
+                  "3 ta asosiy KPI ko'rsatkich va tahlil",
+                  'Mahsulot afzalliklari va muammo-yechim taqqoslash',
+                ].map((ex) => (
+                  <button
+                    key={ex}
+                    type="button"
+                    onClick={() => setPrompt(ex)}
+                    className="px-2 py-1 text-[11px] font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors"
+                  >
+                    {ex}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-medium text-slate-700">Dizayn temasi</span>
+                <span className="text-[11px] text-slate-500">
+                  {SLIDE_THEMES.find((t) => t.id === selectedTheme)?.name}
+                </span>
+              </div>
+              <div className="grid grid-cols-4 sm:grid-cols-8 gap-1.5">
+                {SLIDE_THEMES.map((t) => {
+                  const active = selectedTheme === t.id;
+                  return (
+                    <button
+                      key={t.id}
+                      type="button"
+                      onClick={() => setSelectedTheme(t.id)}
+                      title={t.name}
+                      className={`p-1.5 rounded-lg border text-center transition-all ${
+                        active
+                          ? 'border-red-600 ring-2 ring-red-500/20 bg-red-50/40'
+                          : 'border-slate-200 bg-white hover:border-slate-300'
+                      }`}
+                    >
+                      <div
+                        className="w-full h-5 rounded flex items-center justify-center border border-black/10"
+                        style={{ backgroundColor: t.pageBg }}
+                      >
+                        <span
+                          className="w-3 h-1 rounded-xs"
+                          style={{ backgroundColor: t.primaryAccent }}
+                        />
+                      </div>
+                      <span className="block text-[10px] font-medium text-slate-700 truncate mt-1">
+                        {t.name.split(' ')[0]}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div className="space-y-1">
+              <div className="space-y-1.5">
                 <label htmlFor="ai-canvas-style" className="block text-xs font-medium text-slate-700">
-                  Dizayn uslubi / ranglar (ixtiyoriy)
+                  AI uslubi va qo&apos;shimcha ko&apos;rsatma
                 </label>
+                <div className="flex flex-wrap gap-1 mb-1">
+                  {AI_TONE_OPTIONS.map((t) => (
+                    <button
+                      key={t.id}
+                      type="button"
+                      onClick={() => setAiTone(t.id)}
+                      className={`px-2 py-1 rounded-md text-[11px] font-medium border transition-colors ${
+                        aiTone === t.id
+                          ? 'bg-slate-900 text-white border-slate-900'
+                          : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
+                      }`}
+                    >
+                      {t.label.split(' / ')[0]}
+                    </button>
+                  ))}
+                </div>
                 <input
                   id="ai-canvas-style"
                   type="text"
                   value={styleHint}
                   onChange={(e) => setStyleHint(e.target.value)}
-                  placeholder="Masalan: To'q ko'k va oltin, minimalist"
+                  placeholder="Masalan: Keng kartalar, o'ng tomonda rasm"
                   className="w-full text-xs text-slate-900 bg-slate-50 border border-slate-200 focus:border-red-600 focus:bg-white rounded-xl px-3 py-2 outline-none"
                 />
               </div>
@@ -368,7 +459,7 @@ export const AiCanvasDrawModal: React.FC<AiCanvasDrawModalProps> = ({
                   <button
                     type="button"
                     onClick={() => setApplyMode('add')}
-                    className={`px-2.5 py-1 rounded-full border transition-colors ${
+                    className={`px-3 py-1.5 rounded-lg border transition-colors ${
                       applyMode === 'add'
                         ? 'bg-slate-900 text-white border-slate-900'
                         : 'bg-white text-slate-600 border-slate-200'
@@ -379,7 +470,7 @@ export const AiCanvasDrawModal: React.FC<AiCanvasDrawModalProps> = ({
                   <button
                     type="button"
                     onClick={() => setApplyMode('replace')}
-                    className={`px-2.5 py-1 rounded-full border transition-colors ${
+                    className={`px-3 py-1.5 rounded-lg border transition-colors ${
                       applyMode === 'replace'
                         ? 'bg-slate-900 text-white border-slate-900'
                         : 'bg-white text-slate-600 border-slate-200'

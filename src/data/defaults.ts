@@ -18,6 +18,7 @@ export function getPdfDimensions(orientation: PdfOrientation) {
 }
 
 export const FONT_OPTIONS = [
+  { label: 'Times New Roman', value: 'Times New Roman, Times, serif', exportFont: 'Times New Roman' },
   { label: 'DM Sans', value: 'DM Sans, sans-serif', exportFont: 'Arial' },
   { label: 'Plus Jakarta Sans', value: 'Plus Jakarta Sans, sans-serif', exportFont: 'Calibri' },
   { label: 'Georgia', value: 'Georgia, serif', exportFont: 'Georgia' },
@@ -254,9 +255,12 @@ export const DEFAULT_PRICING_SETTINGS: AppPricingSettings = {
   services: {
     academic_wave_pptx: { basePrice: 4000, baseLimit: 7, extraStepPrice: 500 },
     white_card_pptx: { basePrice: 4000, baseLimit: 7, extraStepPrice: 500 },
+    ai_canvas_design: { basePrice: 3000, baseLimit: 3, extraStepPrice: 500 },
+    independent_work_word: { basePrice: 5000, baseLimit: 2, extraStepPrice: 1500 },
+    course_work_word: { basePrice: 9000, baseLimit: 3, extraStepPrice: 2000 },
+    essay_article_word: { basePrice: 4000, baseLimit: 1, extraStepPrice: 1000 },
     stitched_notebook_pdf: { basePrice: 3000, baseLimit: 4, extraStepPrice: 500 },
     five_block_infographic: { basePrice: 4000 },
-    ai_canvas_design: { basePrice: 3000, baseLimit: 3, extraStepPrice: 500 },
   },
   welcomeBonus: 1000,
   referralInviterBonus: 1000,
@@ -269,26 +273,44 @@ export function computeServicePrice(
   count: number,
   pricing: AppPricingSettings = DEFAULT_PRICING_SETTINGS
 ): number {
-  const s = pricing.services;
+  const s = pricing?.services || DEFAULT_PRICING_SETTINGS.services;
   if (serviceId === 'academic_wave_pptx' || serviceId === 'white_card_pptx') {
-    const cfg = s[serviceId];
+    const cfg = s[serviceId] || DEFAULT_PRICING_SETTINGS.services[serviceId];
     const safe = Math.min(30, Math.max(5, Math.round(count || cfg.baseLimit)));
     if (safe <= cfg.baseLimit) return cfg.basePrice;
     return cfg.basePrice + (safe - cfg.baseLimit) * cfg.extraStepPrice;
   }
   if (serviceId === 'ai_canvas_design') {
-    const cfg = s.ai_canvas_design;
+    const cfg = s.ai_canvas_design || DEFAULT_PRICING_SETTINGS.services.ai_canvas_design;
     const safe = Math.min(20, Math.max(1, Math.round(count || cfg.baseLimit)));
     if (safe <= cfg.baseLimit) return cfg.basePrice;
     return cfg.basePrice + (safe - cfg.baseLimit) * cfg.extraStepPrice;
   }
+  if (serviceId === 'independent_work_word') {
+    const cfg = s.independent_work_word || DEFAULT_PRICING_SETTINGS.services.independent_work_word;
+    const safe = Math.min(4, Math.max(2, Math.round(count || cfg.baseLimit)));
+    if (safe <= cfg.baseLimit) return cfg.basePrice;
+    return cfg.basePrice + (safe - cfg.baseLimit) * cfg.extraStepPrice;
+  }
+  if (serviceId === 'course_work_word') {
+    const cfg = s.course_work_word || DEFAULT_PRICING_SETTINGS.services.course_work_word;
+    const safe = Math.min(4, Math.max(2, Math.round(count || cfg.baseLimit)));
+    if (safe <= cfg.baseLimit) return cfg.basePrice;
+    return cfg.basePrice + (safe - cfg.baseLimit) * cfg.extraStepPrice;
+  }
+  if (serviceId === 'essay_article_word') {
+    const cfg = s.essay_article_word || DEFAULT_PRICING_SETTINGS.services.essay_article_word;
+    const safe = Math.min(2, Math.max(1, Math.round(count || cfg.baseLimit)));
+    if (safe <= cfg.baseLimit) return cfg.basePrice;
+    return cfg.basePrice + (safe - cfg.baseLimit) * cfg.extraStepPrice;
+  }
   if (serviceId === 'stitched_notebook_pdf') {
-    const cfg = s.stitched_notebook_pdf;
+    const cfg = s.stitched_notebook_pdf || DEFAULT_PRICING_SETTINGS.services.stitched_notebook_pdf;
     const safe = Math.min(8, Math.max(2, Math.round(count || cfg.baseLimit)));
     if (safe <= cfg.baseLimit) return cfg.basePrice;
     return cfg.basePrice + (safe - cfg.baseLimit) * cfg.extraStepPrice;
   }
-  return s.five_block_infographic.basePrice;
+  return (s.five_block_infographic || DEFAULT_PRICING_SETTINGS.services.five_block_infographic).basePrice;
 }
 
 export function formatSom(amount: number): string {

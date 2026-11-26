@@ -132,8 +132,14 @@ export const WordWorkspace: React.FC<WordWorkspaceProps> = ({
     }
   };
 
-  const paddingPx =
-    doc.marginPreset === 'narrow' ? 40 : doc.marginPreset === 'wide' ? 88 : 64;
+  const paddingStyle =
+    doc.marginPreset === 'gost_academic'
+      ? { top: 48, right: 48, bottom: 48, left: 72 }
+      : doc.marginPreset === 'narrow'
+        ? { top: 40, right: 40, bottom: 40, left: 40 }
+        : doc.marginPreset === 'wide'
+          ? { top: 84, right: 84, bottom: 84, left: 84 }
+          : { top: 64, right: 64, bottom: 64, left: 64 };
 
   return (
     <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
@@ -391,11 +397,12 @@ export const WordWorkspace: React.FC<WordWorkspaceProps> = ({
               <div className="text-xs font-medium text-slate-700 mb-1.5">
                 Chetki hoshiya
               </div>
-              <div className="grid grid-cols-3 gap-1 bg-slate-100 p-0.5 rounded-md">
+              <div className="grid grid-cols-2 gap-1 bg-slate-100 p-0.5 rounded-md">
                 {(
                   [
-                    { key: 'narrow', label: 'Tor' },
+                    { key: 'gost_academic', label: "O'zDST (3×2)" },
                     { key: 'normal', label: 'Oddiy' },
+                    { key: 'narrow', label: 'Tor' },
                     { key: 'wide', label: 'Keng' },
                   ] as const
                 ).map((m) => (
@@ -434,10 +441,13 @@ export const WordWorkspace: React.FC<WordWorkspaceProps> = ({
         <main className="flex-1 overflow-y-auto bg-[#F1F3F5] py-4 px-3 md:py-8 md:px-6 flex justify-center items-start">
           <div
             ref={paperRef}
-            className="w-full max-w-[794px] md:w-[794px] min-h-[760px] md:min-h-[1123px] bg-white border border-slate-200/90 shadow-sm shrink-0 p-5 md:p-(--word-pad)"
+            className="w-full max-w-[794px] md:w-[794px] min-h-[760px] md:min-h-[1123px] bg-white border border-slate-200/90 shadow-sm shrink-0 p-5 md:pt-(--word-pt) md:pr-(--word-pr) md:pb-(--word-pb) md:pl-(--word-pl)"
             style={
               {
-                '--word-pad': `${paddingPx}px`,
+                '--word-pt': `${paddingStyle.top}px`,
+                '--word-pr': `${paddingStyle.right}px`,
+                '--word-pb': `${paddingStyle.bottom}px`,
+                '--word-pl': `${paddingStyle.left}px`,
                 fontFamily: doc.fontFamily,
                 fontSize: `${doc.fontSize}px`,
               } as React.CSSProperties
@@ -511,11 +521,12 @@ export const WordWorkspace: React.FC<WordWorkspaceProps> = ({
 
               <div className="pt-3 border-t border-slate-200 space-y-3">
                 <div className="text-xs font-medium text-slate-700">Chetki hoshiya</div>
-                <div className="grid grid-cols-3 gap-1.5 bg-slate-100 p-1 rounded-xl">
+                <div className="grid grid-cols-2 gap-1.5 bg-slate-100 p-1 rounded-xl">
                   {(
                     [
-                      { key: 'narrow', label: 'Tor' },
+                      { key: 'gost_academic', label: "O'zDST (3×2 sm)" },
                       { key: 'normal', label: 'Oddiy' },
+                      { key: 'narrow', label: 'Tor' },
                       { key: 'wide', label: 'Keng' },
                     ] as const
                   ).map((m) => (

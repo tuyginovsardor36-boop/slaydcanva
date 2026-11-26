@@ -138,10 +138,13 @@ const SERVICE_LABELS: Array<{
   unitLabel: string;
   hasSteps: boolean;
 }> = [
-  { key: 'academic_wave_pptx', title: 'Akademik To‘lqin · PPTX', unitLabel: 'slayd', hasSteps: true },
-  { key: 'white_card_pptx', title: 'Oq Karta · PPTX', unitLabel: 'slayd', hasSteps: true },
+  { key: 'academic_wave_pptx', title: 'Slayd · Akademik To‘lqin', unitLabel: 'slayd', hasSteps: true },
+  { key: 'white_card_pptx', title: 'Slayd · Oq Karta', unitLabel: 'slayd', hasSteps: true },
+  { key: 'ai_canvas_design', title: 'Slayd · AI Erkin Kanvas', unitLabel: 'slayd', hasSteps: true },
+  { key: 'independent_work_word', title: 'Mustaqil ish (Referat) · Word', unitLabel: 'bob', hasSteps: true },
+  { key: 'course_work_word', title: 'Kurs ishi · Word', unitLabel: 'bob', hasSteps: true },
+  { key: 'essay_article_word', title: 'Esse va Ilmiy maqola · Word', unitLabel: 'qism', hasSteps: true },
   { key: 'stitched_notebook_pdf', title: 'Tikilgan Daftar · PDF', unitLabel: 'topshiriq bloki', hasSteps: true },
-  { key: 'ai_canvas_design', title: 'AI Erkin Kanvas Dizayni', unitLabel: 'slayd', hasSteps: true },
   { key: 'five_block_infographic', title: '5-Blokli Infografika', unitLabel: 'poster', hasSteps: false },
 ];
 
@@ -2895,13 +2898,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                             );
                           }
 
+                          const svcKey = item.key as Exclude<
+                            keyof AppPricingSettings['services'],
+                            'five_block_infographic'
+                          >;
                           const cfg =
-                            pricingDraft.services[
-                              item.key as Exclude<
-                                keyof AppPricingSettings['services'],
-                                'five_block_infographic'
-                              >
-                            ];
+                            pricingDraft.services?.[svcKey] ||
+                            DEFAULT_PRICING_SETTINGS.services[svcKey];
                           return (
                             <div
                               key={item.key}

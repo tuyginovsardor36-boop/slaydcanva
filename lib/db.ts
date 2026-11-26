@@ -66,9 +66,12 @@ export interface DbProjectSummary {
 export interface ServicePricingConfig {
   academic_wave_pptx: { basePrice: number; baseLimit: number; extraStepPrice: number };
   white_card_pptx: { basePrice: number; baseLimit: number; extraStepPrice: number };
+  ai_canvas_design: { basePrice: number; baseLimit: number; extraStepPrice: number };
+  independent_work_word: { basePrice: number; baseLimit: number; extraStepPrice: number };
+  course_work_word: { basePrice: number; baseLimit: number; extraStepPrice: number };
+  essay_article_word: { basePrice: number; baseLimit: number; extraStepPrice: number };
   stitched_notebook_pdf: { basePrice: number; baseLimit: number; extraStepPrice: number };
   five_block_infographic: { basePrice: number };
-  ai_canvas_design: { basePrice: number; baseLimit: number; extraStepPrice: number };
 }
 
 export interface AppPricingSettings {
@@ -256,9 +259,12 @@ export const DEFAULT_PRICING_SETTINGS: AppPricingSettings = {
   services: {
     academic_wave_pptx: { basePrice: 4000, baseLimit: 7, extraStepPrice: 500 },
     white_card_pptx: { basePrice: 4000, baseLimit: 7, extraStepPrice: 500 },
-    stitched_notebook_pdf: { basePrice: 3000, baseLimit: 4, extraStepPrice: 500 },
-    five_block_infographic: { basePrice: 3000 },
     ai_canvas_design: { basePrice: 3000, baseLimit: 3, extraStepPrice: 500 },
+    independent_work_word: { basePrice: 5000, baseLimit: 2, extraStepPrice: 1500 },
+    course_work_word: { basePrice: 9000, baseLimit: 3, extraStepPrice: 2000 },
+    essay_article_word: { basePrice: 4000, baseLimit: 1, extraStepPrice: 1000 },
+    stitched_notebook_pdf: { basePrice: 3000, baseLimit: 4, extraStepPrice: 500 },
+    five_block_infographic: { basePrice: 4000 },
   },
   welcomeBonus: 1000,
   referralInviterBonus: 1000,
