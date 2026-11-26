@@ -695,6 +695,8 @@ export const BalanceView: React.FC<BalanceViewProps> = ({
   transactions,
   onGoTopUp,
 }) => {
+  const [selectedTx, setSelectedTx] = useState<BalanceTransaction | null>(null);
+
   return (
     <main className="flex-1 overflow-y-auto bg-[#F4F4F6] px-4 py-5 space-y-5">
       <section className="max-w-md mx-auto bg-[#111113] text-white border border-zinc-800 rounded-2xl p-5 flex items-center justify-between gap-4">
@@ -717,20 +719,25 @@ export const BalanceView: React.FC<BalanceViewProps> = ({
       </section>
 
       <section className="max-w-md mx-auto space-y-2.5">
-        <h2 className="text-sm font-semibold text-slate-900 px-0.5">
-          Amaliyotlar tarixi
-        </h2>
+        <div className="flex items-center justify-between px-0.5">
+          <h2 className="text-sm font-semibold text-slate-900">
+            Amaliyotlar tarixi & Cheklar
+          </h2>
+          <span className="text-[11px] text-zinc-500">Batafsil ko'rish uchun bosing</span>
+        </div>
 
-        <div className="bg-white border border-slate-200 rounded-2xl divide-y divide-slate-100">
+        <div className="bg-white border border-slate-200 rounded-2xl divide-y divide-slate-100 overflow-hidden">
           {transactions.length === 0 ? (
             <div className="p-6 text-center text-xs text-slate-400">
               Hozircha amaliyotlar mavjud emas.
             </div>
           ) : (
             transactions.map((tx) => (
-              <div
+              <button
+                type="button"
                 key={tx.id}
-                className="px-4 py-3.5 flex items-center justify-between gap-3"
+                onClick={() => setSelectedTx(tx)}
+                className="w-full px-4 py-3.5 flex items-center justify-between gap-3 text-left hover:bg-zinc-50 transition-colors"
               >
                 <div className="min-w-0">
                   <div className="text-sm font-medium text-slate-900 truncate">
@@ -742,18 +749,74 @@ export const BalanceView: React.FC<BalanceViewProps> = ({
                     <span className="font-mono tabular-nums">{tx.date}</span>
                   </div>
                 </div>
-                <div
-                  className={`text-sm font-mono tabular-nums font-semibold whitespace-nowrap shrink-0 ${
-                    tx.amount < 0 ? 'text-slate-700' : 'text-emerald-700'
-                  }`}
-                >
-                  {tx.amount < 0 ? `-${formatSom(Math.abs(tx.amount))}` : `+${formatSom(tx.amount)}`}
+                <div className="flex items-center gap-2">
+                  <div
+                    className={`text-sm font-mono tabular-nums font-semibold whitespace-nowrap shrink-0 ${
+                      tx.amount < 0 ? 'text-slate-700' : 'text-emerald-700'
+                    }`}
+                  >
+                    {tx.amount < 0 ? `-${formatSom(Math.abs(tx.amount))}` : `+${formatSom(tx.amount)}`}
+                  </div>
+                  <span className="text-xs text-zinc-400">›</span>
                 </div>
-              </div>
+              </button>
             ))
           )}
         </div>
       </section>
+
+      {/* Receipt Modal */}
+      {selectedTx && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-sm w-full p-6 space-y-5 shadow-2xl border border-zinc-200 animate-in fade-in zoom-in-95">
+            <div className="text-center space-y-1">
+              <div className="w-12 h-12 rounded-full bg-emerald-50 text-emerald-600 flex items-center justify-center mx-auto text-xl font-bold">
+                ✓
+              </div>
+              <h3 className="text-base font-bold text-zinc-900">SlaydCanva Rasmiy Cheki</h3>
+              <p className="text-xs text-zinc-500 font-mono">ID: #{selectedTx.id}</p>
+            </div>
+
+            <div className="bg-zinc-50 rounded-2xl p-4 space-y-3 text-xs border border-zinc-200/80">
+              <div className="flex justify-between">
+                <span className="text-zinc-500">Amaliyot nomi</span>
+                <span className="font-semibold text-zinc-900 text-right">{selectedTx.title}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-zinc-500">To'lov / Amal usuli</span>
+                <span className="font-medium text-zinc-800">{selectedTx.method}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-zinc-500">Sana va Vaqt</span>
+                <span className="font-mono text-zinc-800">{selectedTx.date}</span>
+              </div>
+              <div className="pt-2 border-t border-zinc-200 flex justify-between items-center">
+                <span className="text-zinc-700 font-medium">Summa</span>
+                <span className={`text-base font-bold font-mono tabular-nums ${selectedTx.amount < 0 ? 'text-zinc-900' : 'text-emerald-600'}`}>
+                  {selectedTx.amount < 0 ? `-${formatSom(Math.abs(selectedTx.amount))}` : `+${formatSom(selectedTx.amount)}`}
+                </span>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <button
+                type="button"
+                onClick={() => window.print()}
+                className="w-full py-3 rounded-2xl bg-zinc-900 hover:bg-zinc-800 text-white text-xs font-semibold shadow-md transition-colors"
+              >
+                Chekni Chop Etish / Saqlash
+              </button>
+              <button
+                type="button"
+                onClick={() => setSelectedTx(null)}
+                className="w-full py-2.5 rounded-2xl bg-zinc-100 hover:bg-zinc-200 text-zinc-700 text-xs font-semibold transition-colors"
+              >
+                Yopish
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 };

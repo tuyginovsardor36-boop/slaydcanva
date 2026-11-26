@@ -7756,81 +7756,76 @@ app.post('/api/telegram/webhook', async (req, res) => {
             });
           }
         } else {
-          // Route /support <msg> or plain-text user messages directly into Support Inbox!
-          const supportBody =
-            cmd === '/support' ? text.replace(/^\/support(@\S+)?\s*/i, '').trim() : text;
-          if (supportBody && !supportBody.startsWith('/')) {
-            const defaultSupport = await resolveDefaultSupportAgent();
-            const ticket =
-              (await dbUpsertSupportTicket({
+          if (cmd === '/support') {
+            const supportBody = text.replace(/^\/support(@\S+)?\s*/i, '').trim();
+            if (supportBody) {
+              const defaultSupport = await resolveDefaultSupportAgent();
+              const ticket =
+                (await dbUpsertSupportTicket({
+                  telegramId: tid,
+                  userFirstName: user.firstName,
+                  userUsername: user.username,
+                  assignedTo: defaultSupport.telegramId,
+                  assignedName: defaultSupport.firstName,
+                  subject: 'Telegram bot murojaati',
+                  lastMessage: supportBody,
+                  incrementStaffUnread: true,
+                  status: 'open',
+                })) || {
+                  id: `sup_${tid}`,
+                  telegramId: tid,
+                  userFirstName: user.firstName,
+                  userUsername: user.username,
+                  assignedTo: defaultSupport.telegramId,
+                  assignedName: defaultSupport.firstName,
+                  status: 'open' as const,
+                  subject: 'Telegram bot murojaati',
+                  lastMessage: supportBody.slice(0, 400),
+                  unreadForStaff: 1,
+                  unreadForUser: 0,
+                  createdAt: Date.now(),
+                  updatedAt: Date.now(),
+                };
+              await saveSupportTicketKvFallback(ticket);
+              await appendInboxMessageSafe({
+                id: `msg_${Date.now().toString(36)}_${crypto.randomBytes(3).toString('hex')}`,
+                threadId: ticket.id,
                 telegramId: tid,
-                userFirstName: user.firstName,
-                userUsername: user.username,
-                assignedTo: defaultSupport.telegramId,
-                assignedName: defaultSupport.firstName,
-                subject: 'Telegram bot murojaati',
-                lastMessage: supportBody,
-                incrementStaffUnread: true,
-                status: 'open',
-              })) || {
-                id: `sup_${tid}`,
-                telegramId: tid,
-                userFirstName: user.firstName,
-                userUsername: user.username,
-                assignedTo: defaultSupport.telegramId,
-                assignedName: defaultSupport.firstName,
-                status: 'open' as const,
-                subject: 'Telegram bot murojaati',
-                lastMessage: supportBody.slice(0, 400),
-                unreadForStaff: 1,
-                unreadForUser: 0,
-                createdAt: Date.now(),
-                updatedAt: Date.now(),
-              };
-            await saveSupportTicketKvFallback(ticket);
-            await appendInboxMessageSafe({
-              id: `msg_${Date.now().toString(36)}_${crypto.randomBytes(3).toString('hex')}`,
-              threadId: ticket.id,
-              telegramId: tid,
-              senderRole: 'user',
-              senderId: tid,
-              senderName: user.firstName,
-              channel: 'telegram',
-              message: supportBody,
-              isRead: false,
-            });
-            await Promise.all([
-              recordCrmEventSafe({
-                eventType: 'support_message',
-                title: `Telegram Support xabari: ${user.firstName}`,
-                message: supportBody.slice(0, 180),
-                userId: tid,
-              }),
-              notifySupportStaffTelegram(ticket, supportBody),
-            ]);
-            await telegramApi('sendMessage', {
-              chat_id: cid,
-              text:
-                `✅ <b>Murojaatingiz Support jamoasiga yuborildi!</b>\n` +
-                `🎧 Mutaxassis: <b>${escapeTgHtml(defaultSupport.firstName)}</b> tez orada shu chatga yoki ilova ichiga javob yozadi.`,
-              parse_mode: 'HTML',
-            });
-          } else {
-            await telegramApi('sendMessage', {
-              chat_id: cid,
-              text:
-                `📌 <b>Mavjud buyruqlar:</b>\n` +
-                `/start — Bosh menyu va ilovani ochish\n` +
-                `/files — Telegramdagi fayllar ro'yxati\n` +
-                `/balance — Balans va to'ldirish\n` +
-                `/promo KOD — Promokod faollashtirish\n` +
-                `/referral — Referal havola olish\n` +
-                `/support Xabar — Supportga yozish\n` +
-                `/history — Amaliyotlar tarixi`,
-              parse_mode: 'HTML',
-              reply_markup: buildMainBotKeyboard(origin, staffLoginUrl),
-            });
+                senderRole: 'user',
+                senderId: tid,
+                senderName: user.firstName,
+                channel: 'telegram',
+                message: supportBody,
+                isRead: false,
+              });
+              await Promise.all([
+                recordCrmEventSafe({
+                  eventType: 'support_message',
+                  title: `Telegram Support xabari: ${user.firstName}`,
+                  message: supportBody.slice(0, 180),
+                  userId: tid,
+                }),
+                notifySupportStaffTelegram(ticket, supportBody),
+              ]);
+              await telegramApi('sendMessage', {
+                chat_id: cid,
+                text:
+                  `✅ <b>Murojaatingiz Support jamoasiga yuborildi!</b>\n` +
+                  `🎧 Mutaxassis: <b>${escapeTgHtml(defaultSupport.firstName)}</b> tez orada javob beradi.`,
+                parse_mode: 'HTML',
+              });
+              return;
+            }
           }
+          await telegramApi('sendMessage', {
+            chat_id: cid,
+            text:
+              `🤖 <b>SlaydCanva Bot</b>\n\n` +
+              `Iltimos, pastdagi menyudan tugmani tanlang yoki Mini App orqali xizmatlardan foydalaning.\n` +
+              `Support bilan bog'lanish uchun: <code>/support Xabaringiz</code>`,
+            parse_mode: 'HTML',
+            reply_markup: buildMainBotKeyboard(origin, staffLoginUrl),
+          });
         }
       }
     }
