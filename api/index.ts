@@ -1250,6 +1250,7 @@ interface TolovgoOrderRecord {
   amount: number;
   payUrl: string;
   status: TolovgoOrderStatus;
+  isTest: boolean;
   credited: boolean;
   createdAt: number;
 }
@@ -1262,7 +1263,7 @@ function getCleanEnvKey(value: string | undefined, placeholder: string): string 
   return raw;
 }
 
-function resolveTolovgoCredential(): {
+function resolveTolovgoCredential(requestedMode?: 'live' | 'test'): {
   apiKey: string;
   isTest: boolean;
   hasLiveKey: boolean;
@@ -1272,12 +1273,18 @@ function resolveTolovgoCredential(): {
     getCleanEnvKey(process.env.TOLOVGO_API_KEY, 'MY_TOLOVGO_API_KEY') ||
     getCleanEnvKey(process.env.TOLOVGO_KEY, 'MY_TOLOVGO_API_KEY');
   const testKey = getCleanEnvKey(process.env.TOLOVGO_TEST_API, 'MY_TOLOVGO_TEST_API');
-  const mode = process.env.TOLOVGO_MODE?.trim().toLowerCase();
+  const envMode = process.env.TOLOVGO_MODE?.trim().toLowerCase();
+  const effectiveMode =
+    requestedMode === 'test' || requestedMode === 'live'
+      ? requestedMode
+      : envMode === 'test' || envMode === 'live'
+        ? envMode
+        : undefined;
 
   const hasLiveKey = Boolean(liveKey);
   const hasTestKey = Boolean(testKey);
 
-  if (mode === 'test') {
+  if (effectiveMode === 'test') {
     if (testKey) return { apiKey: testKey, isTest: true, hasLiveKey, hasTestKey };
     if (liveKey && liveKey.startsWith('test_')) {
       return { apiKey: liveKey, isTest: true, hasLiveKey, hasTestKey };
@@ -1285,7 +1292,7 @@ function resolveTolovgoCredential(): {
     return null;
   }
 
-  if (mode === 'live') {
+  if (effectiveMode === 'live') {
     if (liveKey) {
       return {
         apiKey: liveKey,
@@ -2131,6 +2138,7 @@ app.get('/api/payments/tolovgo/config', (_req, res) => {
   res.json({
     configured: Boolean(cred),
     isTestMode: Boolean(cred?.isTest),
+    defaultMode: cred?.isTest ? 'test' : 'live',
     hasLiveKey,
     hasTestKey,
     provider: 'TolovGo',
@@ -2140,17 +2148,24 @@ app.get('/api/payments/tolovgo/config', (_req, res) => {
 
 app.post('/api/payments/tolovgo/create', async (req, res) => {
   try {
-    const cred = resolveTolovgoCredential();
+    const body = (req.body || {}) as {
+      amount?: unknown;
+      providerHint?: unknown;
+      mode?: unknown;
+    };
+    const requestedMode =
+      body.mode === 'test' || body.mode === 'live' ? body.mode : undefined;
+    const cred = resolveTolovgoCredential(requestedMode);
     if (!cred) {
       res.status(503).json({
         error:
-          "TOLOVGO_API_KEY yoki TOLOVGO_TEST_API sozlanmagan. Settings > Secrets (yoki Vercel Environment Variables) bo'limidan tolovgo.uz kalitingizni qo'shing.",
+          requestedMode === 'test'
+            ? "TOLOVGO_TEST_API sozlanmagan. Vercel / Secrets bo'limida test_ kalitini qo'shing."
+            : "TOLOVGO_API_KEY yoki TOLOVGO_TEST_API sozlanmagan. Settings > Secrets (yoki Vercel Environment Variables) bo'limidan tolovgo.uz kalitingizni qo'shing.",
       });
       return;
     }
     const apiKey = cred.apiKey;
-
-    const body = (req.body || {}) as { amount?: unknown; providerHint?: unknown };
     const rawAmount = Number(body.amount);
     if (
       !Number.isFinite(rawAmount) ||
@@ -2259,6 +2274,7 @@ app.post('/api/payments/tolovgo/create', async (req, res) => {
       amount: finalAmount,
       payUrl,
       status: normalizeTolovgoStatus(data.status),
+      isTest: Boolean(data.test) || cred.isTest,
       credited: false,
       createdAt: Date.now(),
     });
@@ -2288,7 +2304,16 @@ app.get('/api/payments/tolovgo/status/:orderId', async (req, res) => {
       return;
     }
 
-    const cred = resolveTolovgoCredential();
+    const existing = tolovgoOrders.get(orderId);
+    const queryMode =
+      req.query.mode === 'test' || req.query.mode === 'live'
+        ? req.query.mode
+        : existing
+          ? existing.isTest
+            ? 'test'
+            : 'live'
+          : undefined;
+    const cred = resolveTolovgoCredential(queryMode);
     if (!cred) {
       res.status(503).json({
         error: 'TOLOVGO_API_KEY yoki TOLOVGO_TEST_API sozlanmagan.',
@@ -2297,7 +2322,6 @@ app.get('/api/payments/tolovgo/status/:orderId', async (req, res) => {
     }
 
     const remote = await fetchRemoteTolovgoStatus(orderId, cred.apiKey);
-    const existing = tolovgoOrders.get(orderId);
     const trustedAmount = existing?.amount ?? remote.amount ?? 0;
 
     let newlyCredited = false;
@@ -2314,6 +2338,7 @@ app.get('/api/payments/tolovgo/status/:orderId', async (req, res) => {
           amount: trustedAmount,
           payUrl: '',
           status: 'paid',
+          isTest: cred.isTest,
           credited: true,
           createdAt: Date.now(),
         });
@@ -2354,7 +2379,10 @@ app.all('/api/payments/tolovgo/callback', async (req, res) => {
       return;
     }
 
-    const cred = resolveTolovgoCredential();
+    const existing = tolovgoOrders.get(orderId);
+    const cred = resolveTolovgoCredential(
+      existing ? (existing.isTest ? 'test' : 'live') : undefined
+    );
     if (!cred) {
       res.status(503).json({ ok: false, error: 'Not configured' });
       return;
@@ -2362,7 +2390,6 @@ app.all('/api/payments/tolovgo/callback', async (req, res) => {
 
     // Always verify callback server-to-server via TolovGo status endpoint
     const remote = await fetchRemoteTolovgoStatus(orderId, cred.apiKey);
-    const existing = tolovgoOrders.get(orderId);
     if (existing) {
       existing.status = remote.status;
     } else if (remote.amount) {
@@ -2371,6 +2398,7 @@ app.all('/api/payments/tolovgo/callback', async (req, res) => {
         amount: remote.amount,
         payUrl: '',
         status: remote.status,
+        isTest: cred.isTest,
         credited: false,
         createdAt: Date.now(),
       });

@@ -75,6 +75,8 @@ export interface UserProfile {
   contact: string;
 }
 
+export type TolovgoPaymentMode = 'live' | 'test';
+
 export interface SlaydCanvaState {
   mode: WorkspaceMode;
   docTitle: string;
@@ -87,4 +89,5 @@ export interface SlaydCanvaState {
   balance: number;
   transactions: BalanceTransaction[];
   profile: UserProfile;
+  tolovgoMode?: TolovgoPaymentMode;
 }

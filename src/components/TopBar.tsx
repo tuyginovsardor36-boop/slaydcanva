@@ -8,6 +8,7 @@ import {
   Presentation,
   RotateCcw,
   Sparkles,
+  User,
   Wallet,
 } from 'lucide-react';
 import { formatSom } from '../data/defaults';
@@ -28,6 +29,8 @@ interface TopBarProps {
   onExportSecondaryPdf?: () => void;
   onExportPng?: () => void;
   onResetCurrent: () => void;
+  onOpenTopUp?: () => void;
+  onOpenProfile?: () => void;
   isExporting: boolean;
 }
 
@@ -53,6 +56,8 @@ export const TopBar: React.FC<TopBarProps> = ({
   onExportSecondaryPdf,
   onExportPng,
   onResetCurrent,
+  onOpenTopUp,
+  onOpenProfile,
   isExporting,
 }) => {
   const primaryLabel =
@@ -168,11 +173,29 @@ export const TopBar: React.FC<TopBarProps> = ({
       {/* Zone 3: Primary Export & Reset / Balance */}
       <div className="flex items-center gap-1.5 md:gap-2 shrink-0">
         {desktopView === 'services' ? (
-          <div className="hidden md:flex items-center gap-1.5 text-xs bg-zinc-900 border border-zinc-800 rounded-md px-2.5 py-1.5 text-zinc-200">
-            <Wallet className="w-3.5 h-3.5 text-red-500" />
-            <span className="font-mono tabular-nums font-semibold">
-              {formatSom(balance)}
-            </span>
+          <div className="hidden md:flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={onOpenTopUp}
+              title="Balansni to'ldirish"
+              className="flex items-center gap-1.5 text-xs bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 rounded-md px-2.5 py-1.5 text-zinc-200 transition-colors"
+            >
+              <Wallet className="w-3.5 h-3.5 text-red-500" />
+              <span className="font-mono tabular-nums font-semibold">
+                {formatSom(balance)}
+              </span>
+            </button>
+            {onOpenProfile && (
+              <button
+                type="button"
+                onClick={onOpenProfile}
+                title="Profil va sozlamalar"
+                className="flex items-center gap-1.5 text-xs bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 rounded-md px-2.5 py-1.5 text-zinc-300 hover:text-white transition-colors"
+              >
+                <User className="w-3.5 h-3.5" />
+                <span>Profil</span>
+              </button>
+            )}
           </div>
         ) : (
           <>

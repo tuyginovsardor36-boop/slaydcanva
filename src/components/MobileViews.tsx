@@ -20,6 +20,7 @@ import {
   AiServiceId,
   BalanceTransaction,
   MobileTab,
+  TolovgoPaymentMode,
   UserProfile,
   WorkspaceMode,
 } from '../types/editor';
@@ -205,6 +206,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
 
 interface TopUpViewProps {
   balance: number;
+  tolovgoMode?: TolovgoPaymentMode;
   onTopUp: (amount: number, method: string, externalOrderId?: string) => void;
   onNotify?: (type: 'ok' | 'err', text: string) => void;
 }
@@ -221,12 +223,21 @@ interface PendingTolovgoOrder {
 const PRESET_AMOUNTS = [25000, 50000, 100000, 250000];
 const PAYMENT_METHODS = ['Click', 'Payme', 'Uzum / Karta'];
 
-export const TopUpView: React.FC<TopUpViewProps> = ({ balance, onTopUp, onNotify }) => {
+export const TopUpView: React.FC<TopUpViewProps> = ({
+  balance,
+  tolovgoMode = 'live',
+  onTopUp,
+  onNotify,
+}) => {
   const [amountText, setAmountText] = useState('50000');
   const [method, setMethod] = useState('Click');
   const [creating, setCreating] = useState(false);
   const [checking, setChecking] = useState(false);
-  const [isTestMode, setIsTestMode] = useState(false);
+  const [serverConfig, setServerConfig] = useState<{
+    isTestMode: boolean;
+    hasLiveKey: boolean;
+    hasTestKey: boolean;
+  } | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [pendingOrder, setPendingOrder] = useState<PendingTolovgoOrder | null>(null);
 
@@ -242,22 +253,46 @@ export const TopUpView: React.FC<TopUpViewProps> = ({ balance, onTopUp, onNotify
     let active = true;
     fetch('/api/payments/tolovgo/config')
       .then((r) => (r.ok ? r.json() : null))
-      .then((cfg: { isTestMode?: boolean } | null) => {
-        if (active && cfg && typeof cfg.isTestMode === 'boolean') {
-          setIsTestMode(cfg.isTestMode);
+      .then(
+        (
+          cfg: {
+            isTestMode?: boolean;
+            hasLiveKey?: boolean;
+            hasTestKey?: boolean;
+          } | null
+        ) => {
+          if (active && cfg) {
+            setServerConfig({
+              isTestMode: Boolean(cfg.isTestMode),
+              hasLiveKey: Boolean(cfg.hasLiveKey),
+              hasTestKey: Boolean(cfg.hasTestKey),
+            });
+          }
         }
-      })
+      )
       .catch(() => {});
     return () => {
       active = false;
     };
   }, []);
 
+  const effectiveMode: TolovgoPaymentMode =
+    tolovgoMode === 'test' && (serverConfig ? serverConfig.hasTestKey : true)
+      ? 'test'
+      : tolovgoMode === 'live' && (serverConfig ? serverConfig.hasLiveKey : true)
+        ? 'live'
+        : serverConfig?.isTestMode
+          ? 'test'
+          : 'live';
+
   const checkOrderStatus = useCallback(async (order: PendingTolovgoOrder, silent = false) => {
     if (!order?.orderId) return;
     if (!silent) setChecking(true);
     try {
-      const res = await fetch(`/api/payments/tolovgo/status/${encodeURIComponent(order.orderId)}`);
+      const modeParam = order.isTest ? 'test' : 'live';
+      const res = await fetch(
+        `/api/payments/tolovgo/status/${encodeURIComponent(order.orderId)}?mode=${modeParam}`
+      );
       const data = (await res.json().catch(() => ({}))) as {
         status?: PendingTolovgoOrder['status'];
         paid?: boolean;
@@ -335,6 +370,7 @@ export const TopUpView: React.FC<TopUpViewProps> = ({ balance, onTopUp, onNotify
         body: JSON.stringify({
           amount: parsedAmount,
           providerHint: method,
+          mode: effectiveMode,
         }),
       });
 
@@ -367,7 +403,9 @@ export const TopUpView: React.FC<TopUpViewProps> = ({ balance, onTopUp, onNotify
     }
   };
 
-  const showTestBadge = Boolean(pendingOrder?.isTest || isTestMode);
+  const showTestBadge = Boolean(
+    pendingOrder ? pendingOrder.isTest : effectiveMode === 'test'
+  );
 
   return (
     <main className="flex-1 overflow-y-auto bg-[#F4F5F7] px-4 py-5">
@@ -627,6 +665,8 @@ interface ProfileViewProps {
   balance: number;
   pptxCount: number;
   pdfCount: number;
+  tolovgoMode: TolovgoPaymentMode;
+  onChangeTolovgoMode: (mode: TolovgoPaymentMode) => void;
   onSaveProfile: (profile: UserProfile) => void;
   onOpenTab: (tab: MobileTab) => void;
 }
@@ -636,12 +676,36 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
   balance,
   pptxCount,
   pdfCount,
+  tolovgoMode,
+  onChangeTolovgoMode,
   onSaveProfile,
   onOpenTab,
 }) => {
   const [fullName, setFullName] = useState(profile.fullName);
   const [contact, setContact] = useState(profile.contact);
   const [saved, setSaved] = useState(false);
+  const [tolovgoKeys, setTolovgoKeys] = useState<{
+    hasLiveKey: boolean;
+    hasTestKey: boolean;
+  } | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    fetch('/api/payments/tolovgo/config')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((cfg: { hasLiveKey?: boolean; hasTestKey?: boolean } | null) => {
+        if (active && cfg) {
+          setTolovgoKeys({
+            hasLiveKey: Boolean(cfg.hasLiveKey),
+            hasTestKey: Boolean(cfg.hasTestKey),
+          });
+        }
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const initials = (fullName || 'F')
     .trim()
@@ -699,6 +763,65 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
           </div>
           <div className="text-[11px] text-zinc-500 mt-0.5">Balans (so'm)</div>
         </button>
+      </section>
+
+      {/* Vaqtinchalik TolovGo rejimi sozlamasi */}
+      <section className="max-w-md mx-auto bg-white border border-zinc-200 rounded-2xl p-5 space-y-3">
+        <div className="flex items-center justify-between gap-2">
+          <div>
+            <h2 className="text-sm font-semibold text-zinc-900">
+              TolovGo rejimi
+            </h2>
+            <p className="text-[11px] text-zinc-500 mt-0.5">
+              Vaqtinchalik sozlama: real va sinov kalitlari orasida almashish
+            </p>
+          </div>
+          <span
+            className={`px-2 py-0.5 rounded-md text-[11px] font-semibold border ${
+              tolovgoMode === 'test'
+                ? 'bg-amber-50 border-amber-200 text-amber-700'
+                : 'bg-emerald-50 border-emerald-200 text-emerald-700'
+            }`}
+          >
+            {tolovgoMode === 'test' ? 'Sinov' : 'Haqiqiy'}
+          </span>
+        </div>
+
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            disabled={tolovgoKeys !== null && !tolovgoKeys.hasLiveKey}
+            onClick={() => onChangeTolovgoMode('live')}
+            className={`p-3 rounded-xl border text-left transition-colors disabled:opacity-45 ${
+              tolovgoMode === 'live'
+                ? 'bg-emerald-50 border-emerald-600 text-emerald-900'
+                : 'bg-white border-zinc-200 text-zinc-700 hover:bg-zinc-50'
+            }`}
+          >
+            <div className="text-xs font-semibold">Haqiqiy to'lov</div>
+            <div className="text-[11px] opacity-75 mt-0.5">TOLOVGO_API_KEY</div>
+          </button>
+
+          <button
+            type="button"
+            disabled={tolovgoKeys !== null && !tolovgoKeys.hasTestKey}
+            onClick={() => onChangeTolovgoMode('test')}
+            className={`p-3 rounded-xl border text-left transition-colors disabled:opacity-45 ${
+              tolovgoMode === 'test'
+                ? 'bg-amber-50 border-amber-600 text-amber-900'
+                : 'bg-white border-zinc-200 text-zinc-700 hover:bg-zinc-50'
+            }`}
+          >
+            <div className="text-xs font-semibold">Sinov rejimi</div>
+            <div className="text-[11px] opacity-75 mt-0.5">TOLOVGO_TEST_API</div>
+          </button>
+        </div>
+
+        {tolovgoKeys && !tolovgoKeys.hasTestKey && !tolovgoKeys.hasLiveKey && (
+          <p className="text-[11px] text-red-600">
+            Serverda TOLOVGO_API_KEY yoki TOLOVGO_TEST_API topilmadi.
+          </p>
+        )}
       </section>
 
       <form

@@ -21,6 +21,7 @@ import {
   MobileTab,
   PdfOrientation,
   SlaydCanvaState,
+  TolovgoPaymentMode,
   UserProfile,
   WorkspaceMode,
 } from './types/editor';
@@ -97,6 +98,7 @@ function loadSavedState(): SlaydCanvaState {
         ? parsed.transactions
         : fallback.transactions,
       profile: parsed.profile?.fullName ? parsed.profile : fallback.profile,
+      tolovgoMode: parsed.tolovgoMode === 'test' ? 'test' : 'live',
     };
   } catch {
     return createInitialState();
@@ -113,6 +115,7 @@ export default function App() {
   const [mobileTab, setMobileTab] = useState<MobileTab>('home');
   const [mobileServiceOpen, setMobileServiceOpen] = useState(false);
   const [desktopTopUpOpen, setDesktopTopUpOpen] = useState(false);
+  const [desktopProfileOpen, setDesktopProfileOpen] = useState(false);
   const [mobileSheetOpen, setMobileSheetOpen] = useState(false);
   const [notice, setNotice] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
 
@@ -403,6 +406,16 @@ export default function App() {
     showNotice('ok', "Profil ma'lumotlari saqlandi.");
   };
 
+  const handleChangeTolovgoMode = (tolovgoMode: TolovgoPaymentMode) => {
+    setState((prev) => ({ ...prev, tolovgoMode }));
+    showNotice(
+      'ok',
+      tolovgoMode === 'test'
+        ? "TolovGo sinov rejimi (TOLOVGO_TEST_API) yoqildi."
+        : "TolovGo haqiqiy to'lov rejimi (TOLOVGO_API_KEY) yoqildi."
+    );
+  };
+
   const handleAiGenerated = (result: AiGeneratedPayload) => {
     const now = new Date();
     const dateStr = `${String(now.getDate()).padStart(2, '0')}.${String(now.getMonth() + 1).padStart(2, '0')}.${now.getFullYear()}`;
@@ -465,6 +478,8 @@ export default function App() {
         onExportSecondaryPdf={handleExportSecondaryPdf}
         onExportPng={handleExportPng}
         onResetCurrent={handleResetCurrent}
+        onOpenTopUp={() => setDesktopTopUpOpen(true)}
+        onOpenProfile={() => setDesktopProfileOpen(true)}
         isExporting={isExporting}
       />
 
@@ -508,7 +523,12 @@ export default function App() {
             </div>
           )}
           {mobileTab === 'topup' && (
-            <TopUpView balance={state.balance} onTopUp={handleTopUp} onNotify={showNotice} />
+            <TopUpView
+              balance={state.balance}
+              tolovgoMode={state.tolovgoMode || 'live'}
+              onTopUp={handleTopUp}
+              onNotify={showNotice}
+            />
           )}
           {mobileTab === 'balance' && (
             <BalanceView
@@ -523,6 +543,8 @@ export default function App() {
               balance={state.balance}
               pptxCount={state.pptxPages.length}
               pdfCount={state.pdfPages.length}
+              tolovgoMode={state.tolovgoMode || 'live'}
+              onChangeTolovgoMode={handleChangeTolovgoMode}
               onSaveProfile={handleSaveProfile}
               onOpenTab={handleSelectMobileTab}
             />
@@ -635,7 +657,49 @@ export default function App() {
                 <X className="w-4 h-4" />
               </button>
             </div>
-            <TopUpView balance={state.balance} onTopUp={handleTopUp} onNotify={showNotice} />
+            <TopUpView
+              balance={state.balance}
+              tolovgoMode={state.tolovgoMode || 'live'}
+              onTopUp={handleTopUp}
+              onNotify={showNotice}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Desktop Quick Profile & Temporary Settings Modal */}
+      {desktopProfileOpen && (
+        <div
+          className="hidden md:flex fixed inset-0 z-50 bg-black/40 backdrop-blur-[2px] items-center justify-center p-4"
+          onClick={() => setDesktopProfileOpen(false)}
+        >
+          <div
+            className="w-full max-w-md max-h-[85vh] bg-white rounded-2xl shadow-xl overflow-hidden flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-5 py-3.5 border-b border-slate-200 flex items-center justify-between shrink-0">
+              <span className="text-sm font-semibold text-slate-900">Profil va sozlamalar</span>
+              <button
+                type="button"
+                onClick={() => setDesktopProfileOpen(false)}
+                className="p-1 text-slate-500 hover:text-slate-900 rounded-md"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <ProfileView
+              profile={state.profile}
+              balance={state.balance}
+              pptxCount={state.pptxPages.length}
+              pdfCount={state.pdfPages.length}
+              tolovgoMode={state.tolovgoMode || 'live'}
+              onChangeTolovgoMode={handleChangeTolovgoMode}
+              onSaveProfile={handleSaveProfile}
+              onOpenTab={() => {
+                setDesktopProfileOpen(false);
+                setDesktopTopUpOpen(true);
+              }}
+            />
           </div>
         </div>
       )}
