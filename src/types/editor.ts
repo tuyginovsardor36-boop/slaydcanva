@@ -121,6 +121,7 @@ export interface TelegramUser {
   firstName: string;
   lastName?: string;
   username?: string;
+  photoUrl?: string;
   autoSendFiles?: boolean;
   notifyOnActivity?: boolean;
   referralCount?: number;
@@ -136,6 +137,7 @@ export interface ServicePricingConfig {
   basePrice: number;
   baseLimit: number;
   extraStepPrice: number;
+  enabled?: boolean;
 }
 
 export interface AppPricingSettings {
@@ -147,7 +149,7 @@ export interface AppPricingSettings {
     course_work_word: ServicePricingConfig;
     essay_article_word: ServicePricingConfig;
     stitched_notebook_pdf: ServicePricingConfig;
-    five_block_infographic: { basePrice: number };
+    five_block_infographic: { basePrice: number; enabled?: boolean };
   };
   welcomeBonus: number;
   referralInviterBonus: number;
@@ -165,6 +167,7 @@ export interface SiteConfigSettings {
   telegramOnlyMode: boolean;
   supportUsername: string;
   botWelcomeTitle?: string;
+  strictWebhookSignature?: boolean;
 }
 
 export interface AdminOverviewStats {

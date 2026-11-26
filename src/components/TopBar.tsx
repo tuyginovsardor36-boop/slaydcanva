@@ -8,6 +8,7 @@ import {
   Loader2,
   Presentation,
   RotateCcw,
+  Search,
   Shield,
   Sparkles,
   User,
@@ -179,7 +180,11 @@ export const TopBar: React.FC<TopBarProps> = ({
               >
                 {telegramUser ? (
                   <>
-                    <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
+                    {telegramUser.photoUrl ? (
+                      <img src={telegramUser.photoUrl} alt="" className="w-4 h-4 rounded-full object-cover shrink-0" />
+                    ) : (
+                      <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
+                    )}
                     <span className="max-w-[110px] truncate">
                       {telegramUser.username ? `@${telegramUser.username}` : telegramUser.firstName}
                     </span>
@@ -192,6 +197,20 @@ export const TopBar: React.FC<TopBarProps> = ({
                 )}
               </button>
             )}
+            <button
+              type="button"
+              onClick={() => {
+                const q = prompt("Aqlli qidiruv (Xizmatlar, loyihalar va mavzular bo'yicha qidirish):");
+                if (q) {
+                  onDesktopViewChange('services');
+                }
+              }}
+              title="Aqlli qidiruv"
+              className="hidden sm:flex items-center gap-1.5 text-xs bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 rounded-md px-2.5 py-1.5 text-zinc-400 hover:text-white transition-colors"
+            >
+              <Search className="w-3.5 h-3.5 text-red-500" />
+              <span>Qidirish...</span>
+            </button>
             {onOpenSupport && (
               <button
                 type="button"
