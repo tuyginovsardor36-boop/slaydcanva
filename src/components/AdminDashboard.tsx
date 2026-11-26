@@ -244,6 +244,58 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [crmEvents, setCrmEvents] = useState<CrmEventRow[]>([]);
   const [crmFilter, setCrmFilter] = useState<'all' | 'new_user' | 'payment_paid' | 'unread'>('all');
 
+  // Google-like Global Search & Suggestions
+  const [globalSearchQuery, setGlobalSearchQuery] = useState('');
+  const [showSearchDropdown, setShowSearchDropdown] = useState(false);
+  const [selectedAdminTx, setSelectedAdminTx] = useState<BalanceTransaction | null>(null);
+
+  const searchSuggestions = useMemo(() => {
+    const q = globalSearchQuery.trim().toLowerCase();
+    if (!q || q.length < 2) return [];
+    const results: Array<{ id: string; type: 'user' | 'order' | 'promo'; title: string; subtitle: string; tab: AdminTabId }> = [];
+
+    users.forEach((u) => {
+      if (results.length >= 6) return;
+      if (u.telegramId.toLowerCase().includes(q) || u.firstName.toLowerCase().includes(q) || (u.username && u.username.toLowerCase().includes(q))) {
+        results.push({
+          id: `u_${u.telegramId}`,
+          type: 'user',
+          title: u.fullName || [u.firstName, u.lastName].filter(Boolean).join(' ') || u.telegramId,
+          subtitle: `Foydalanuvchi · ID: ${u.telegramId} · Balans: ${formatSom(u.balance)}`,
+          tab: 'users',
+        });
+      }
+    });
+
+    orders.forEach((o) => {
+      if (results.length >= 10) return;
+      if (o.orderId.toLowerCase().includes(q) || (o.telegramId && o.telegramId.toLowerCase().includes(q))) {
+        results.push({
+          id: `o_${o.orderId}`,
+          type: 'order',
+          title: `Buyurtma #${o.orderId}`,
+          subtitle: `TolovGo · ${formatSom(o.amount)} · ${o.status.toUpperCase()}`,
+          tab: 'orders',
+        });
+      }
+    });
+
+    promos.forEach((p) => {
+      if (results.length >= 12) return;
+      if (p.code.toLowerCase().includes(q)) {
+        results.push({
+          id: `p_${p.code}`,
+          type: 'promo',
+          title: `Promokod: ${p.code}`,
+          subtitle: `Bonus: ${formatSom(p.bonusAmount)} · Foydalanish: ${p.usedCount}/${p.maxUses}`,
+          tab: 'promos',
+        });
+      }
+    });
+
+    return results;
+  }, [globalSearchQuery, users, orders, promos]);
+
   // Users & CRM
   const [users, setUsers] = useState<AdminUserRow[]>([]);
   const [userSearch, setUserSearch] = useState('');
@@ -1590,6 +1642,64 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               TolovGo: {tolovgoMode === 'test' ? 'Sinov' : 'Haqiqiy'} · Imzo:{' '}
               {hasWebhookSecret ? 'Yoqilgan' : 'Kutilmoqda'}
             </span>
+          </div>
+
+          {/* Google-like Global Search & Suggestions */}
+          <div className="relative flex-1 max-w-xs sm:max-w-sm mx-2">
+            <div className="relative flex items-center">
+              <Search className="w-3.5 h-3.5 text-zinc-400 absolute left-3 pointer-events-none" />
+              <input
+                type="text"
+                value={globalSearchQuery}
+                onChange={(e) => {
+                  setGlobalSearchQuery(e.target.value);
+                  setShowSearchDropdown(true);
+                }}
+                onFocus={() => setShowSearchDropdown(true)}
+                placeholder="Google kabi qidirish (Foydalanuvchi, buyurtma, promo)..."
+                className="w-full pl-9 pr-8 py-1.5 bg-zinc-100 hover:bg-zinc-200/60 focus:bg-white border border-zinc-200 focus:border-red-500 rounded-xl text-xs text-zinc-900 placeholder:text-zinc-400 outline-none transition-all shadow-2xs"
+              />
+              {globalSearchQuery && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setGlobalSearchQuery('');
+                    setShowSearchDropdown(false);
+                  }}
+                  className="absolute right-2.5 text-zinc-400 hover:text-zinc-700 text-xs font-bold"
+                >
+                  ×
+                </button>
+              )}
+            </div>
+
+            {showSearchDropdown && searchSuggestions.length > 0 && (
+              <div className="absolute top-full left-0 right-0 mt-1.5 bg-white border border-zinc-200 rounded-2xl shadow-xl overflow-hidden z-50 divide-y divide-zinc-100 max-h-72 overflow-y-auto">
+                <div className="px-3 py-1.5 bg-zinc-50 text-[10px] font-semibold text-zinc-400 uppercase tracking-wider">
+                  Tezkor qidiruv natijalari ({searchSuggestions.length})
+                </div>
+                {searchSuggestions.map((item) => (
+                  <button
+                    type="button"
+                    key={item.id}
+                    onClick={() => {
+                      setActiveTab(item.tab);
+                      setGlobalSearchQuery('');
+                      setShowSearchDropdown(false);
+                    }}
+                    className="w-full px-3.5 py-2.5 text-left hover:bg-zinc-50 flex items-start gap-2.5 transition-colors"
+                  >
+                    <span className="w-6 h-6 rounded-lg bg-red-50 text-red-600 flex items-center justify-center text-xs shrink-0 mt-0.5 font-bold">
+                      {item.type === 'user' ? 'U' : item.type === 'order' ? 'O' : 'P'}
+                    </span>
+                    <div className="min-w-0">
+                      <div className="text-xs font-semibold text-zinc-900 truncate">{item.title}</div>
+                      <div className="text-[11px] text-zinc-500 truncate">{item.subtitle}</div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
@@ -4272,17 +4382,23 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   </div>
 
                   <div className="border border-zinc-200 rounded-xl overflow-hidden">
-                    <div className="px-3.5 py-2.5 bg-zinc-50 border-b border-zinc-200 font-semibold text-zinc-900">
-                      Amaliyotlar ({selectedUserDetail.transactions.length})
+                    <div className="px-3.5 py-2.5 bg-zinc-50 border-b border-zinc-200 font-semibold text-zinc-900 flex items-center justify-between">
+                      <span>Amaliyotlar ({selectedUserDetail.transactions.length})</span>
+                      <span className="text-[10px] text-zinc-400">Batafsil uchun bosing</span>
                     </div>
                     <div className="divide-y divide-zinc-100 max-h-44 overflow-y-auto">
                       {selectedUserDetail.transactions.length === 0 ? (
                         <div className="p-4 text-center text-zinc-400">Amaliyotlar yo‘q</div>
                       ) : (
                         selectedUserDetail.transactions.map((t) => (
-                          <div key={t.id} className="px-3.5 py-2 flex justify-between gap-2">
+                          <button
+                            type="button"
+                            key={t.id}
+                            onClick={() => setSelectedAdminTx(t)}
+                            className="w-full px-3.5 py-2.5 flex justify-between gap-2 text-left hover:bg-zinc-50 transition-colors"
+                          >
                             <div className="min-w-0">
-                              <div className="text-zinc-900 truncate">{t.title}</div>
+                              <div className="text-zinc-900 font-medium truncate">{t.title}</div>
                               <div className="text-[11px] text-zinc-500">
                                 {t.method} · {t.date}
                               </div>
@@ -4294,7 +4410,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                             >
                               {t.amount >= 0 ? `+${formatSom(t.amount)}` : formatSom(t.amount)}
                             </span>
-                          </div>
+                          </button>
                         ))
                       )}
                     </div>
@@ -4424,6 +4540,63 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 <span>Tasdiqlash</span>
               </button>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Admin Transaction Detail & PDF Receipt Modal */}
+      {selectedAdminTx && (
+        <div className="fixed inset-0 z-55 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-sm w-full p-6 space-y-5 shadow-2xl border border-zinc-200">
+            <div className="text-center space-y-1">
+              <div className="w-12 h-12 rounded-full bg-emerald-50 text-emerald-600 flex items-center justify-center mx-auto text-xl font-bold">
+                ✓
+              </div>
+              <h3 className="text-base font-bold text-zinc-900">Tranzaksiya Tafsiloti & PDF Chek</h3>
+              <p className="text-xs text-zinc-500 font-mono">ID: #{selectedAdminTx.id}</p>
+            </div>
+
+            <div className="bg-zinc-50 rounded-2xl p-4 space-y-3 text-xs border border-zinc-200/80">
+              <div className="flex justify-between">
+                <span className="text-zinc-500">Mijoz / Foydalanuvchi</span>
+                <span className="font-semibold text-zinc-900">{selectedUserDetail?.user.firstName} ({selectedUserDetail?.user.telegramId})</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-zinc-500">Amaliyot sarlavhasi</span>
+                <span className="font-semibold text-zinc-900 text-right">{selectedAdminTx.title}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-zinc-500">To'lov / Amal usuli</span>
+                <span className="font-medium text-zinc-800">{selectedAdminTx.method}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-zinc-500">Sana va Vaqt</span>
+                <span className="font-mono text-zinc-800">{selectedAdminTx.date}</span>
+              </div>
+              <div className="pt-2 border-t border-zinc-200 flex justify-between items-center">
+                <span className="text-zinc-700 font-medium">Summa</span>
+                <span className={`text-base font-bold font-mono tabular-nums ${selectedAdminTx.amount < 0 ? 'text-zinc-900' : 'text-emerald-600'}`}>
+                  {selectedAdminTx.amount < 0 ? `-${formatSom(Math.abs(selectedAdminTx.amount))}` : `+${formatSom(selectedAdminTx.amount)}`}
+                </span>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <button
+                type="button"
+                onClick={() => window.print()}
+                className="w-full py-3 rounded-2xl bg-red-600 hover:bg-red-700 text-white text-xs font-semibold shadow-md transition-colors flex items-center justify-center gap-2"
+              >
+                <span>PDF Chek / Chop Etish</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setSelectedAdminTx(null)}
+                className="w-full py-2.5 rounded-2xl bg-zinc-100 hover:bg-zinc-200 text-zinc-700 text-xs font-semibold transition-colors"
+              >
+                Yopish
+              </button>
+            </div>
           </div>
         </div>
       )}
