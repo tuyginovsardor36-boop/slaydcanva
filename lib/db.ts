@@ -355,6 +355,8 @@ export async function ensureDbSchema(): Promise<boolean> {
       await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by TEXT`;
       await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_count INTEGER NOT NULL DEFAULT 0`;
       await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN NOT NULL DEFAULT FALSE`;
+      await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS photo_url TEXT`;
+      await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS ban_until TIMESTAMPTZ`;
       await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS crm_tag TEXT`;
       await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS crm_note TEXT`;
       await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ DEFAULT NOW()`;
@@ -1243,25 +1245,38 @@ export async function dbAdminAdjustBalance(params: {
 export async function dbSetUserBanned(
   adminId: string,
   targetTelegramId: string,
-  isBanned: boolean
+  isBanned: boolean,
+  banDurationDays?: number
 ): Promise<boolean> {
   const sql = getSql();
   if (!sql || !(await ensureDbSchema())) return false;
   try {
+    let banUntilVal: Date | null = null;
+    if (isBanned && banDurationDays && banDurationDays > 0) {
+      banUntilVal = new Date(Date.now() + banDurationDays * 24 * 60 * 60 * 1000);
+    }
     const rows = (await sql`
       UPDATE users
-      SET is_banned = ${isBanned}, updated_at = NOW()
+      SET is_banned = ${isBanned},
+          ban_until = ${banUntilVal},
+          updated_at = NOW()
       WHERE telegram_id = ${targetTelegramId}
       RETURNING telegram_id
     `) as Array<Record<string, unknown>>;
     if (!rows[0]) return false;
+
+    const detailsText = isBanned
+      ? banDurationDays && banDurationDays > 0
+        ? `Foydalanuvchi ${banDurationDays} kunga bloklandi`
+        : 'Foydalanuvchi doimiy bloklandi'
+      : 'Foydalanuvchi blokdan chiqarildi';
 
     await dbAppendAuditLog({
       id: `aud_ban_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 5)}`,
       actorId: adminId,
       action: isBanned ? 'admin_ban_user' : 'admin_unban_user',
       targetId: targetTelegramId,
-      details: isBanned ? 'Foydalanuvchi bloklandi' : 'Foydalanuvchi blokdan chiqarildi',
+      details: detailsText,
     });
     return true;
   } catch (err) {
@@ -1557,6 +1572,7 @@ export async function dbListUsersAdmin(search = '', limit = 150): Promise<AdminU
       firstName: String(r.first_name),
       lastName: r.last_name ? String(r.last_name) : undefined,
       username: r.username ? String(r.username) : undefined,
+      photoUrl: r.photo_url ? String(r.photo_url) : undefined,
       fullName: r.full_name ? String(r.full_name) : undefined,
       contact: r.contact ? String(r.contact) : undefined,
       balance: Number(r.balance) || 0,
@@ -2345,7 +2361,8 @@ export async function dbGetAdminAnalytics(days = 14): Promise<{
         SELECT
           u.telegram_id, u.chat_id, u.first_name, u.last_name, u.username,
           u.full_name, u.contact, u.balance, u.referral_count, u.referred_by,
-          u.is_banned, u.crm_tag, u.crm_note,
+          u.is_banned,
+         u.photo_url, u.crm_tag, u.crm_note,
           EXTRACT(EPOCH FROM u.created_at) * 1000 AS created_ms,
           EXTRACT(EPOCH FROM u.updated_at) * 1000 AS updated_ms,
           COALESCE((SELECT SUM(t.amount)::bigint FROM transactions t WHERE t.telegram_id = u.telegram_id AND t.amount > 0 AND t.external_order_id IS NOT NULL), 0) AS total_deposited,

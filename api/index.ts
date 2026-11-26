@@ -5695,7 +5695,8 @@ app.post('/api/admin/users/:id/ban', async (req, res) => {
     return;
   }
   const isBanned = Boolean(req.body?.isBanned);
-  const ok = await dbSetUserBanned(admin.telegramId, targetId, isBanned);
+  const banDurationDays = Number(req.body?.banDurationDays) || 0;
+  const ok = await dbSetUserBanned(admin.telegramId, targetId, isBanned, banDurationDays);
   if (!ok) {
     const kvKey = `tg_user:${targetId}`;
     const existing = await kvGet<TgUserAccount>(kvKey);
@@ -5708,7 +5709,7 @@ app.post('/api/admin/users/:id/ban', async (req, res) => {
   }
   await recordCrmEventSafe({
     eventType: 'user_banned',
-    title: isBanned ? `Foydalanuvchi bloklandi` : `Foydalanuvchi blokdan chiqarildi`,
+    title: isBanned ? (banDurationDays > 0 ? `Foydalanuvchi ${banDurationDays} kunga bloklandi` : `Foydalanuvchi doimiy bloklandi`) : `Foydalanuvchi blokdan chiqarildi`,
     message: `ID ${targetId} · Bajaruvchi: ${admin.telegramId}`,
     userId: targetId,
   });

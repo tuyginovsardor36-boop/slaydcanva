@@ -785,7 +785,8 @@ export async function adminSetUserBanned(
   sessionToken: string,
   adminToken: string,
   targetTelegramId: string,
-  isBanned: boolean
+  isBanned: boolean,
+  banDurationDays?: number
 ): Promise<{ ok: boolean; error?: string }> {
   const res = await fetch(`/api/admin/users/${encodeURIComponent(targetTelegramId)}/ban`, {
     method: 'POST',
@@ -794,7 +795,7 @@ export async function adminSetUserBanned(
       'Content-Type': 'application/json',
       ...getAdminHeaders(sessionToken, adminToken),
     },
-    body: JSON.stringify({ isBanned }),
+    body: JSON.stringify({ isBanned, banDurationDays }),
   });
   const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
   if (!res.ok) return { ok: false, error: data.error || "Foydalanuvchi holatini o'zgartirib bo'lmadi." };

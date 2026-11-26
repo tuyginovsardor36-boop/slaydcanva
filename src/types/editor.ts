@@ -193,6 +193,7 @@ export interface AdminUserRow {
   firstName: string;
   lastName?: string;
   username?: string;
+  photoUrl?: string;
   fullName?: string;
   contact?: string;
   balance: number;

@@ -758,12 +758,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       return;
     }
     const nextBanned = !u.isBanned;
-    const res = await adminSetUserBanned(telegramSessionToken, adminToken, u.telegramId, nextBanned);
+    let days = 0;
+    if (nextBanned) {
+      const input = prompt(
+        `Foydalanuvchi (${u.firstName}) ni bloklash muddati (kunlarda):\n0 = Doimiy blok\n1, 3, 7, 30 = Belgilangan kunlar soni`,
+        '0'
+      );
+      if (input === null) return;
+      days = Math.max(0, parseInt(input, 10) || 0);
+    }
+    const res = await adminSetUserBanned(telegramSessionToken, adminToken, u.telegramId, nextBanned, days);
     if (!res.ok) {
       onNotify('err', res.error || 'Xatolik yuz berdi.');
       return;
     }
-    onNotify('ok', nextBanned ? `${u.firstName} bloklandi.` : `${u.firstName} blokdan chiqarildi.`);
+    onNotify('ok', nextBanned ? `${u.firstName} ${days > 0 ? `${days} kunga` : 'doimiy'} bloklandi.` : `${u.firstName} blokdan chiqarildi.`);
     setUsers((prev) =>
       prev.map((row) => (row.telegramId === u.telegramId ? { ...row, isBanned: nextBanned } : row))
     );
@@ -2228,13 +2237,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                               {u.telegramId}
                             </td>
                             <td className="py-3 px-4">
-                              <div className="font-medium text-zinc-900">
-                                {u.fullName || [u.firstName, u.lastName].filter(Boolean).join(' ')}
-                              </div>
-                              <div className="text-[11px] text-zinc-500">
-                                {u.username ? `@${u.username}` : 'usernamesiz'}
-                                {' · '}
-                                {u.referralCount} ta referal
+                              <div className="flex items-center gap-2.5">
+                                {u.photoUrl ? (
+                                  <img src={u.photoUrl} alt="" className="w-8 h-8 rounded-full object-cover shrink-0" />
+                                ) : (
+                                  <div className="w-8 h-8 rounded-full bg-zinc-200 text-zinc-700 font-semibold text-xs flex items-center justify-center shrink-0">
+                                    {(u.firstName || 'U')[0].toUpperCase()}
+                                  </div>
+                                )}
+                                <div>
+                                  <div className="font-medium text-zinc-900">
+                                    {u.fullName || [u.firstName, u.lastName].filter(Boolean).join(' ')}
+                                  </div>
+                                  <div className="text-[11px] text-zinc-500">
+                                    {u.username ? `@${u.username}` : 'usernamesiz'}
+                                    {' · '}
+                                    {u.referralCount} ta referal
+                                  </div>
+                                </div>
                               </div>
                             </td>
                             <td className="py-3 px-4 font-mono tabular-nums">
