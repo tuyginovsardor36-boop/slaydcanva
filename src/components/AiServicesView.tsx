@@ -11,8 +11,16 @@ import {
   Wallet,
 } from 'lucide-react';
 import { AI_SERVICES, getAiServiceById } from '../data/aiServices';
-import { formatSom } from '../data/defaults';
-import { AiServiceId, CanvasPage, PdfOrientation, UserProfile, WorkspaceMode } from '../types/editor';
+import { computeServicePrice, DEFAULT_PRICING_SETTINGS, formatSom } from '../data/defaults';
+import {
+  AiServiceId,
+  AppPricingSettings,
+  CanvasPage,
+  PdfOrientation,
+  UserProfile,
+  WorkspaceMode,
+} from '../types/editor';
+import { getTelegramAuthHeaders } from '../utils/telegramClient';
 import {
   buildAcademicWaveDeck,
   buildFiveBlockInfographic,
@@ -121,6 +129,8 @@ export interface AiGeneratedPayload {
   targetMode: WorkspaceMode;
   pdfOrientation?: PdfOrientation;
   price: number;
+  serverCharged?: boolean;
+  newBalance?: number;
 }
 
 interface AiServicesViewProps {
@@ -128,6 +138,8 @@ interface AiServicesViewProps {
   onSelectService: (id: AiServiceId) => void;
   balance: number;
   profile: UserProfile;
+  pricingSettings?: AppPricingSettings;
+  telegramSessionToken?: string | null;
   onRequestTopUp: () => void;
   onGenerated: (result: AiGeneratedPayload) => void;
 }
@@ -252,9 +264,12 @@ export const AiServicesView: React.FC<AiServicesViewProps> = ({
   onSelectService,
   balance,
   profile,
+  pricingSettings,
+  telegramSessionToken,
   onRequestTopUp,
   onGenerated,
 }) => {
+  const effectivePricing = pricingSettings || DEFAULT_PRICING_SETTINGS;
   const service = getAiServiceById(selectedService);
 
   const [topic, setTopic] = useState('');
@@ -295,18 +310,22 @@ export const AiServicesView: React.FC<AiServicesViewProps> = ({
   const effectiveSlideCount = Math.min(30, Math.max(5, slideCount || 7));
   const effectiveCanvasCount = Math.min(20, Math.max(1, canvasSlideCount || 3));
   const currentPrice = isPptxService
-    ? calculateSlideDeckPrice(effectiveSlideCount)
+    ? computeServicePrice(selectedService, effectiveSlideCount, effectivePricing)
     : isAiCanvasService
-      ? calculateAiCanvasPrice(effectiveCanvasCount)
+      ? computeServicePrice('ai_canvas_design', effectiveCanvasCount, effectivePricing)
       : isNotebookService
-        ? calculateNotebookPrice(taskCount)
-        : service.price;
+        ? computeServicePrice('stitched_notebook_pdf', taskCount, effectivePricing)
+        : computeServicePrice('five_block_infographic', 1, effectivePricing);
+
+  const pptxCfg = effectivePricing.services[selectedService === 'white_card_pptx' ? 'white_card_pptx' : 'academic_wave_pptx'];
+  const canvasCfg = effectivePricing.services.ai_canvas_design;
+  const nbCfg = effectivePricing.services.stitched_notebook_pdf;
   const priceRuleHint = isPptxService
-    ? "7 ta gacha 4 000 so'm, keyingi har bir slayd +500 so'm"
+    ? `${pptxCfg.baseLimit} ta gacha ${formatSom(pptxCfg.basePrice)}, keyingi har bir slayd +${formatSom(pptxCfg.extraStepPrice)}`
     : isAiCanvasService
-      ? "3 ta gacha 3 000 so'm, keyingi har bir slayd +500 so'm"
+      ? `${canvasCfg.baseLimit} ta gacha ${formatSom(canvasCfg.basePrice)}, keyingi har bir slayd +${formatSom(canvasCfg.extraStepPrice)}`
       : isNotebookService
-        ? "4 blok (3 sahifa) gacha 3 000 so'm, keyingi har bir blok +500 so'm"
+        ? `${nbCfg.baseLimit} blok (${1 + Math.ceil(nbCfg.baseLimit / 2)} sahifa) gacha ${formatSom(nbCfg.basePrice)}, keyingi har bir blok +${formatSom(nbCfg.extraStepPrice)}`
         : null;
   const hasEnoughBalance = balance >= currentPrice;
 
@@ -353,7 +372,10 @@ export const AiServicesView: React.FC<AiServicesViewProps> = ({
     const postGenerate = async (bodyPayload: Record<string, unknown>) => {
       const response = await fetch('/api/ai/generate', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...getTelegramAuthHeaders(telegramSessionToken),
+        },
         signal: controller.signal,
         body: JSON.stringify(bodyPayload),
       });
@@ -361,7 +383,7 @@ export const AiServicesView: React.FC<AiServicesViewProps> = ({
       if (!response.ok) {
         throw new Error(payload?.error || "Serverdan xatolik qaytdi.");
       }
-      return payload;
+      return payload as Record<string, unknown>;
     };
 
     try {
@@ -396,6 +418,9 @@ export const AiServicesView: React.FC<AiServicesViewProps> = ({
 
       let builtPages: CanvasPage[] = [];
       let docTitle = cleanTopic;
+      let serverCharged = false;
+      let newBalance: number | undefined;
+      let chargedPrice = currentPrice;
 
       if (isSplitPptx) {
         const totalContentCount = Math.max(2, effectiveSlideCount - 3);
@@ -409,6 +434,13 @@ export const AiServicesView: React.FC<AiServicesViewProps> = ({
           splitMode: 'part1',
           part1Count,
         });
+        if (part1Res.serverCharged) {
+          serverCharged = true;
+          if (typeof part1Res.newBalance === 'number') newBalance = part1Res.newBalance;
+          if (typeof part1Res.chargedPrice === 'number' && part1Res.chargedPrice > 0) {
+            chargedPrice = part1Res.chargedPrice;
+          }
+        }
         const part1Data = part1Res.data as GeneratedSlideDeckData;
 
         setPipelineStep(2);
@@ -470,6 +502,13 @@ export const AiServicesView: React.FC<AiServicesViewProps> = ({
           splitMode: 'part1',
           part1Count,
         });
+        if (part1Res.serverCharged) {
+          serverCharged = true;
+          if (typeof part1Res.newBalance === 'number') newBalance = part1Res.newBalance;
+          if (typeof part1Res.chargedPrice === 'number' && part1Res.chargedPrice > 0) {
+            chargedPrice = part1Res.chargedPrice;
+          }
+        }
         const part1Data = part1Res.data as {
           deckTitle?: string;
           pages?: CanvasPage[];
@@ -526,6 +565,13 @@ export const AiServicesView: React.FC<AiServicesViewProps> = ({
               ? effectiveCanvasCount
               : undefined,
         });
+        if (payload.serverCharged) {
+          serverCharged = true;
+          if (typeof payload.newBalance === 'number') newBalance = payload.newBalance;
+          if (typeof payload.chargedPrice === 'number' && payload.chargedPrice > 0) {
+            chargedPrice = payload.chargedPrice;
+          }
+        }
 
         setPipelineStep(3);
 
@@ -563,7 +609,9 @@ export const AiServicesView: React.FC<AiServicesViewProps> = ({
         pages: builtPages,
         targetMode: service.targetMode,
         pdfOrientation: isNotebookService ? 'portrait' : undefined,
-        price: currentPrice,
+        price: chargedPrice,
+        serverCharged,
+        newBalance,
       });
     } catch (err) {
       if (err instanceof Error && err.name === 'AbortError') {
@@ -657,7 +705,9 @@ export const AiServicesView: React.FC<AiServicesViewProps> = ({
 
                 <div className="pt-2 border-t border-zinc-100 flex items-center justify-between">
                   <span className="text-xs font-mono tabular-nums font-semibold text-zinc-900">
-                    {active ? formatSom(currentPrice) : `${formatSom(item.price)}${item.id !== 'five_block_infographic' ? '+' : ''}`}
+                    {active
+                      ? formatSom(currentPrice)
+                      : `${formatSom(effectivePricing.services[item.id].basePrice)}${item.id !== 'five_block_infographic' ? '+' : ''}`}
                   </span>
                   {active && (
                     <span className="inline-flex items-center gap-1 text-[11px] font-medium text-red-600">

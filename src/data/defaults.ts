@@ -1,4 +1,10 @@
-import { CanvasPage, PdfOrientation, SlaydCanvaState } from '../types/editor';
+import {
+  AiServiceId,
+  AppPricingSettings,
+  CanvasPage,
+  PdfOrientation,
+  SlaydCanvaState,
+} from '../types/editor';
 
 export const PPTX_CANVAS = {
   width: 960,
@@ -244,6 +250,47 @@ export const INITIAL_WORD_HTML = `<h1>Hujjat sarlavhasi</h1>
   <li>Jadvallar va rasmlar joylashtirish</li>
 </ul>`;
 
+export const DEFAULT_PRICING_SETTINGS: AppPricingSettings = {
+  services: {
+    academic_wave_pptx: { basePrice: 4000, baseLimit: 7, extraStepPrice: 500 },
+    white_card_pptx: { basePrice: 4000, baseLimit: 7, extraStepPrice: 500 },
+    stitched_notebook_pdf: { basePrice: 3000, baseLimit: 4, extraStepPrice: 500 },
+    five_block_infographic: { basePrice: 4000 },
+    ai_canvas_design: { basePrice: 3000, baseLimit: 3, extraStepPrice: 500 },
+  },
+  welcomeBonus: 1000,
+  referralInviterBonus: 1000,
+  referralInviteeBonus: 1000,
+  dailyReferralLimit: 25,
+};
+
+export function computeServicePrice(
+  serviceId: AiServiceId,
+  count: number,
+  pricing: AppPricingSettings = DEFAULT_PRICING_SETTINGS
+): number {
+  const s = pricing.services;
+  if (serviceId === 'academic_wave_pptx' || serviceId === 'white_card_pptx') {
+    const cfg = s[serviceId];
+    const safe = Math.min(30, Math.max(5, Math.round(count || cfg.baseLimit)));
+    if (safe <= cfg.baseLimit) return cfg.basePrice;
+    return cfg.basePrice + (safe - cfg.baseLimit) * cfg.extraStepPrice;
+  }
+  if (serviceId === 'ai_canvas_design') {
+    const cfg = s.ai_canvas_design;
+    const safe = Math.min(20, Math.max(1, Math.round(count || cfg.baseLimit)));
+    if (safe <= cfg.baseLimit) return cfg.basePrice;
+    return cfg.basePrice + (safe - cfg.baseLimit) * cfg.extraStepPrice;
+  }
+  if (serviceId === 'stitched_notebook_pdf') {
+    const cfg = s.stitched_notebook_pdf;
+    const safe = Math.min(8, Math.max(2, Math.round(count || cfg.baseLimit)));
+    if (safe <= cfg.baseLimit) return cfg.basePrice;
+    return cfg.basePrice + (safe - cfg.baseLimit) * cfg.extraStepPrice;
+  }
+  return s.five_block_infographic.basePrice;
+}
+
 export function formatSom(amount: number): string {
   return `${amount.toLocaleString('uz-UZ').replace(/,/g, ' ')} so'm`;
 }
@@ -265,19 +312,11 @@ export function createInitialState(): SlaydCanvaState {
       fontSize: 15,
       marginPreset: 'normal',
     },
-    balance: 50000,
-    transactions: [
-      {
-        id: 'tx_init_1',
-        title: "Boshlang'ich hisob",
-        method: 'Tizim',
-        amount: 50000,
-        date: '25.11.2026',
-      },
-    ],
+    balance: 0,
+    transactions: [],
     profile: {
       fullName: 'Foydalanuvchi',
-      contact: 'tuyginovsardor4@gmail.com',
+      contact: '',
     },
   };
 }

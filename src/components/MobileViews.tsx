@@ -4,10 +4,12 @@ import {
   Bell,
   Check,
   CheckCircle2,
+  Copy,
   ExternalLink,
   FileText,
   FileType2,
   FolderOpen,
+  Gift,
   Loader2,
   LogOut,
   Plus,
@@ -15,15 +17,18 @@ import {
   RefreshCw,
   Save,
   Send,
+  Shield,
   ShieldCheck,
   Sparkles,
   Trash2,
+  Users,
   Wallet,
 } from 'lucide-react';
 import { AI_SERVICES } from '../data/aiServices';
-import { formatSom } from '../data/defaults';
+import { DEFAULT_PRICING_SETTINGS, formatSom } from '../data/defaults';
 import {
   AiServiceId,
+  AppPricingSettings,
   BalanceTransaction,
   MobileTab,
   ProjectSummary,
@@ -45,6 +50,7 @@ interface HomeViewProps {
   pptxCount: number;
   pdfCount: number;
   balance: number;
+  pricingSettings?: AppPricingSettings;
   onOpenEditor: (mode: WorkspaceMode) => void;
   onOpenAiService: (id: AiServiceId) => void;
   onOpenTab: (tab: MobileTab) => void;
@@ -55,10 +61,12 @@ export const HomeView: React.FC<HomeViewProps> = ({
   pptxCount,
   pdfCount,
   balance,
+  pricingSettings,
   onOpenEditor,
   onOpenAiService,
   onOpenTab,
 }) => {
+  const effectivePricing = pricingSettings || DEFAULT_PRICING_SETTINGS;
   return (
     <main className="flex-1 overflow-y-auto bg-[#F4F4F6] px-4 py-5 space-y-5">
       {/* Balance summary strip - Obsidian hero card matching brand logo */}
@@ -111,7 +119,8 @@ export const HomeView: React.FC<HomeViewProps> = ({
                 </p>
                 <div className="pt-0.5 flex items-center justify-between">
                   <span className="text-[11px] font-mono tabular-nums font-semibold text-red-600">
-                    {formatSom(svc.price)}
+                    {formatSom(effectivePricing.services[svc.id].basePrice)}
+                    {svc.id !== 'five_block_infographic' ? '+' : ''}
                   </span>
                   <span className="text-[11px] font-medium text-zinc-500 flex items-center gap-1">
                     Yaratish
@@ -292,80 +301,79 @@ export const TopUpView: React.FC<TopUpViewProps> = ({
     };
   }, []);
 
-  const effectiveMode: TolovgoPaymentMode =
-    tolovgoMode === 'test' && (serverConfig ? serverConfig.hasTestKey : true)
+  const effectiveMode: TolovgoPaymentMode = serverConfig?.isTestMode
+    ? 'test'
+    : tolovgoMode === 'test' && !serverConfig
       ? 'test'
-      : tolovgoMode === 'live' && (serverConfig ? serverConfig.hasLiveKey : true)
-        ? 'live'
-        : serverConfig?.isTestMode
-          ? 'test'
-          : 'live';
+      : 'live';
 
-  const checkOrderStatus = useCallback(async (order: PendingTolovgoOrder, silent = false) => {
-    if (!order?.orderId) return;
-    if (!silent) setChecking(true);
-    try {
-      const modeParam = order.isTest ? 'test' : 'live';
-      const res = await fetch(
-        `/api/payments/tolovgo/status/${encodeURIComponent(order.orderId)}?mode=${modeParam}`,
-        {
-          headers: getTelegramAuthHeaders(telegramSessionToken),
+  const checkOrderStatus = useCallback(
+    async (order: PendingTolovgoOrder, silent = false) => {
+      if (!order?.orderId) return;
+      if (!silent) setChecking(true);
+      try {
+        const res = await fetch(
+          `/api/payments/tolovgo/status/${encodeURIComponent(order.orderId)}`,
+          {
+            headers: getTelegramAuthHeaders(telegramSessionToken),
+          }
+        );
+        const data = (await res.json().catch(() => ({}))) as {
+          status?: PendingTolovgoOrder['status'];
+          paid?: boolean;
+          newlyCredited?: boolean;
+          amount?: number;
+          error?: string;
+        };
+
+        if (!res.ok) {
+          if (!silent) {
+            setErrorMsg(data.error || "To'lov holatini tekshirib bo'lmadi.");
+          }
+          return;
         }
-      );
-      const data = (await res.json().catch(() => ({}))) as {
-        status?: PendingTolovgoOrder['status'];
-        paid?: boolean;
-        newlyCredited?: boolean;
-        amount?: number;
-        error?: string;
-      };
 
-      if (!res.ok) {
+        const nextStatus = data.status || 'pending';
+        if (data.paid || nextStatus === 'paid') {
+          if (!creditedOrdersRef.current.has(order.orderId)) {
+            creditedOrdersRef.current.add(order.orderId);
+            const finalAmount =
+              typeof data.amount === 'number' && data.amount >= 1000 ? data.amount : order.amount;
+            setPendingOrder(null);
+            setErrorMsg(null);
+            onTopUpRef.current(
+              finalAmount,
+              order.isTest ? `TolovGo (Sinov) · ${order.method}` : `TolovGo · ${order.method}`,
+              order.orderId
+            );
+            onNotifyRef.current?.('ok', `TolovGo to'lovi tasdiqlandi: +${formatSom(finalAmount)}`);
+          }
+          return;
+        }
+
+        setPendingOrder((curr) => (curr && curr.orderId === order.orderId ? { ...curr, status: nextStatus } : curr));
+
+        if (nextStatus === 'expired' || nextStatus === 'cancelled' || nextStatus === 'refunded') {
+          const msg =
+            nextStatus === 'expired'
+              ? "To'lov havolasi muddati tugadi (1 soat). Qaytadan yarating."
+              : nextStatus === 'cancelled'
+                ? "To'lov bekor qilindi."
+                : "To'lov qaytarildi.";
+          setErrorMsg(msg);
+        } else if (!silent) {
+          onNotifyRef.current?.('ok', "To'lov hali kutilmoqda. TolovGo sahifasida tasdiqlang.");
+        }
+      } catch {
         if (!silent) {
-          setErrorMsg(data.error || "To'lov holatini tekshirib bo'lmadi.");
+          setErrorMsg("Server bilan bog'lanishda xatolik yuz berdi.");
         }
-        return;
+      } finally {
+        if (!silent) setChecking(false);
       }
-
-      const nextStatus = data.status || 'pending';
-      if (data.paid || nextStatus === 'paid') {
-        if (!creditedOrdersRef.current.has(order.orderId)) {
-          creditedOrdersRef.current.add(order.orderId);
-          const finalAmount =
-            typeof data.amount === 'number' && data.amount >= 1000 ? data.amount : order.amount;
-          setPendingOrder(null);
-          setErrorMsg(null);
-          onTopUpRef.current(
-            finalAmount,
-            order.isTest ? `TolovGo (Sinov) · ${order.method}` : `TolovGo · ${order.method}`,
-            order.orderId
-          );
-          onNotifyRef.current?.('ok', `TolovGo to'lovi tasdiqlandi: +${formatSom(finalAmount)}`);
-        }
-        return;
-      }
-
-      setPendingOrder((curr) => (curr && curr.orderId === order.orderId ? { ...curr, status: nextStatus } : curr));
-
-      if (nextStatus === 'expired' || nextStatus === 'cancelled' || nextStatus === 'refunded') {
-        const msg =
-          nextStatus === 'expired'
-            ? "To'lov havolasi muddati tugadi (1 soat). Qaytadan yarating."
-            : nextStatus === 'cancelled'
-              ? "To'lov bekor qilindi."
-              : "To'lov qaytarildi.";
-        setErrorMsg(msg);
-      } else if (!silent) {
-        onNotifyRef.current?.('ok', "To'lov hali kutilmoqda. TolovGo sahifasida tasdiqlang.");
-      }
-    } catch {
-      if (!silent) {
-        setErrorMsg("Server bilan bog'lanishda xatolik yuz berdi.");
-      }
-    } finally {
-      if (!silent) setChecking(false);
-    }
-  }, []);
+    },
+    [telegramSessionToken]
+  );
 
   useEffect(() => {
     if (!pendingOrder || pendingOrder.status !== 'pending') return;
@@ -392,7 +400,6 @@ export const TopUpView: React.FC<TopUpViewProps> = ({
         body: JSON.stringify({
           amount: parsedAmount,
           providerHint: method,
-          mode: effectiveMode,
         }),
       });
 
@@ -687,7 +694,9 @@ interface ProfileViewProps {
   balance: number;
   pptxCount: number;
   pdfCount: number;
-  tolovgoMode: TolovgoPaymentMode;
+  isAdmin?: boolean;
+  pricingSettings?: AppPricingSettings;
+  botUsername?: string | null;
   telegramUser?: TelegramUser | null;
   telegramSessionToken?: string | null;
   onTelegramAuthenticated?: (payload: {
@@ -695,10 +704,11 @@ interface ProfileViewProps {
     sessionToken: string;
     account?: TelegramAccountResponse;
     kvConfigured?: boolean;
+    isAdmin?: boolean;
   }) => void;
   onUpdateTelegramPrefs?: (prefs: { autoSendFiles?: boolean; notifyOnActivity?: boolean }) => void;
   onTelegramLogout?: () => void;
-  onChangeTolovgoMode: (mode: TolovgoPaymentMode) => void;
+  onOpenAdminPanel?: () => void;
   onSaveProfile: (profile: UserProfile) => void;
   onOpenTab: (tab: MobileTab) => void;
   savedProjects?: ProjectSummary[];
@@ -715,13 +725,15 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
   balance,
   pptxCount,
   pdfCount,
-  tolovgoMode,
+  isAdmin = false,
+  pricingSettings,
+  botUsername,
   telegramUser,
   telegramSessionToken,
   onTelegramAuthenticated,
   onUpdateTelegramPrefs,
   onTelegramLogout,
-  onChangeTolovgoMode,
+  onOpenAdminPanel,
   onSaveProfile,
   onOpenTab,
   savedProjects = [],
@@ -732,13 +744,11 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
   onCreateNewCloudProject,
   onDeleteCloudProject,
 }) => {
+  const effectivePricing = pricingSettings || DEFAULT_PRICING_SETTINGS;
   const [fullName, setFullName] = useState(profile.fullName);
   const [contact, setContact] = useState(profile.contact);
   const [saved, setSaved] = useState(false);
-  const [tolovgoKeys, setTolovgoKeys] = useState<{
-    hasLiveKey: boolean;
-    hasTestKey: boolean;
-  } | null>(null);
+  const [refCopied, setRefCopied] = useState(false);
   const [tgConfig, setTgConfig] = useState<TelegramConfigResponse | null>(null);
   const [loginNonce, setLoginNonce] = useState<string>('');
   const [waitingTelegramAuth, setWaitingTelegramAuth] = useState(false);
@@ -750,18 +760,6 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
 
   useEffect(() => {
     let active = true;
-    fetch('/api/payments/tolovgo/config')
-      .then((r) => (r.ok ? r.json() : null))
-      .then((cfg: { hasLiveKey?: boolean; hasTestKey?: boolean } | null) => {
-        if (active && cfg) {
-          setTolovgoKeys({
-            hasLiveKey: Boolean(cfg.hasLiveKey),
-            hasTestKey: Boolean(cfg.hasTestKey),
-          });
-        }
-      })
-      .catch(() => {});
-
     fetch('/api/telegram/config')
       .then((r) => (r.ok ? r.json() : null))
       .then((cfg: TelegramConfigResponse | null) => {
@@ -797,6 +795,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
           sessionToken?: string;
           account?: TelegramAccountResponse;
           kvConfigured?: boolean;
+          isAdmin?: boolean;
         };
         if (data.authenticated && data.user && data.sessionToken && active) {
           setWaitingTelegramAuth(false);
@@ -805,6 +804,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
             sessionToken: data.sessionToken,
             account: data.account,
             kvConfigured: data.kvConfigured,
+            isAdmin: data.isAdmin,
           });
         }
       } catch {
@@ -1111,64 +1111,85 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
         </section>
       )}
 
-      {/* Vaqtinchalik TolovGo rejimi sozlamasi */}
-      <section className="max-w-md mx-auto bg-white border border-zinc-200 rounded-2xl p-5 space-y-3">
-        <div className="flex items-center justify-between gap-2">
+      {/* Referal havolasi (har bir yangi do'st uchun 1 000 so'm) */}
+      {telegramUser && (
+        <section className="max-w-md mx-auto bg-white border border-zinc-200 rounded-2xl p-5 space-y-3">
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <h2 className="text-sm font-semibold text-zinc-900 flex items-center gap-1.5">
+                <Gift className="w-4 h-4 text-red-600" />
+                <span>Referal dasturi</span>
+              </h2>
+              <p className="text-[11px] text-zinc-500 mt-0.5 leading-snug">
+                Har bir taklif qilingan yangi foydalanuvchi uchun sizga{' '}
+                <strong className="text-zinc-900">
+                  +{formatSom(effectivePricing.referralInviterBonus)}
+                </strong>
+                , do&apos;stingizga{' '}
+                <strong className="text-zinc-900">
+                  +{formatSom(effectivePricing.welcomeBonus)}
+                </strong>{' '}
+                bonus beriladi.
+              </p>
+            </div>
+            <div className="flex items-center gap-1 text-xs font-mono tabular-nums font-semibold text-zinc-800 shrink-0">
+              <Users className="w-3.5 h-3.5 text-zinc-500" />
+              <span>{telegramUser.referralCount ?? 0} ta</span>
+            </div>
+          </div>
+
+          {(() => {
+            const activeBot = botUsername || tgConfig?.botUsername || 'SlaydCanvaBot';
+            const referralLink = `https://t.me/${activeBot}?start=ref_${telegramUser.telegramId}`;
+            return (
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  readOnly
+                  value={referralLink}
+                  aria-label="Referal havolangiz"
+                  className="flex-1 min-w-0 text-xs font-mono text-zinc-700 bg-zinc-50 border border-zinc-200 rounded-xl px-3 py-2 outline-none"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    void navigator.clipboard?.writeText(referralLink).then(() => {
+                      setRefCopied(true);
+                      window.setTimeout(() => setRefCopied(false), 2000);
+                    });
+                  }}
+                  className="px-3 py-2 rounded-xl bg-[#111113] hover:bg-zinc-800 text-white text-xs font-medium flex items-center gap-1.5 shrink-0 transition-colors"
+                >
+                  {refCopied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                  <span>{refCopied ? 'Nusxalandi' : 'Nusxalash'}</span>
+                </button>
+              </div>
+            );
+          })()}
+        </section>
+      )}
+
+      {/* Faqat ADMIN_TELEGRAM_ID foydalanuvchisi uchun Admin Panel kirish tugmasi */}
+      {isAdmin && onOpenAdminPanel && (
+        <section className="max-w-md mx-auto bg-[#111113] text-white border border-zinc-800 rounded-2xl p-5 flex items-center justify-between gap-3">
           <div>
-            <h2 className="text-sm font-semibold text-zinc-900">
-              TolovGo rejimi
-            </h2>
-            <p className="text-[11px] text-zinc-500 mt-0.5">
-              Vaqtinchalik sozlama: real va sinov kalitlari orasida almashish
+            <div className="flex items-center gap-1.5 text-sm font-semibold">
+              <Shield className="w-4 h-4 text-red-500" />
+              <span>Boshqaruv paneli (Admin)</span>
+            </div>
+            <p className="text-[11px] text-zinc-400 mt-0.5">
+              Narxlar, foydalanuvchilar, balanslar va TolovGo sozlamalari
             </p>
           </div>
-          <span
-            className={`px-2 py-0.5 rounded-md text-[11px] font-semibold border ${
-              tolovgoMode === 'test'
-                ? 'bg-amber-50 border-amber-200 text-amber-700'
-                : 'bg-emerald-50 border-emerald-200 text-emerald-700'
-            }`}
-          >
-            {tolovgoMode === 'test' ? 'Sinov' : 'Haqiqiy'}
-          </span>
-        </div>
-
-        <div className="grid grid-cols-2 gap-2">
           <button
             type="button"
-            disabled={tolovgoKeys !== null && !tolovgoKeys.hasLiveKey}
-            onClick={() => onChangeTolovgoMode('live')}
-            className={`p-3 rounded-xl border text-left transition-colors disabled:opacity-45 ${
-              tolovgoMode === 'live'
-                ? 'bg-emerald-50 border-emerald-600 text-emerald-900'
-                : 'bg-white border-zinc-200 text-zinc-700 hover:bg-zinc-50'
-            }`}
+            onClick={onOpenAdminPanel}
+            className="px-4 py-2 rounded-full bg-red-600 hover:bg-red-500 text-white text-xs font-semibold transition-colors shrink-0"
           >
-            <div className="text-xs font-semibold">Haqiqiy to'lov</div>
-            <div className="text-[11px] opacity-75 mt-0.5">TOLOVGO_API_KEY</div>
+            Admin Panel
           </button>
-
-          <button
-            type="button"
-            disabled={tolovgoKeys !== null && !tolovgoKeys.hasTestKey}
-            onClick={() => onChangeTolovgoMode('test')}
-            className={`p-3 rounded-xl border text-left transition-colors disabled:opacity-45 ${
-              tolovgoMode === 'test'
-                ? 'bg-amber-50 border-amber-600 text-amber-900'
-                : 'bg-white border-zinc-200 text-zinc-700 hover:bg-zinc-50'
-            }`}
-          >
-            <div className="text-xs font-semibold">Sinov rejimi</div>
-            <div className="text-[11px] opacity-75 mt-0.5">TOLOVGO_TEST_API</div>
-          </button>
-        </div>
-
-        {tolovgoKeys && !tolovgoKeys.hasTestKey && !tolovgoKeys.hasLiveKey && (
-          <p className="text-[11px] text-red-600">
-            Serverda TOLOVGO_API_KEY yoki TOLOVGO_TEST_API topilmadi.
-          </p>
-        )}
-      </section>
+        </section>
+      )}
 
       <form
         onSubmit={handleSave}

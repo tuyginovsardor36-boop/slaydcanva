@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, X } from 'lucide-react';
+import { AdminDashboard } from './components/AdminDashboard';
 import { AiGeneratedPayload, AiServicesView } from './components/AiServicesView';
 import { CanvasWorkspace } from './components/CanvasWorkspace';
 import { MobileBottomNav } from './components/MobileBottomNav';
@@ -10,12 +11,14 @@ import {
   createInitialPdfPages,
   createInitialPptxPages,
   createInitialState,
+  DEFAULT_PRICING_SETTINGS,
   formatSom,
   INITIAL_WORD_HTML,
   uid,
 } from './data/defaults';
 import {
   AiServiceId,
+  AppPricingSettings,
   CanvasPage,
   CloudProjectData,
   DesktopView,
@@ -24,7 +27,6 @@ import {
   ProjectSummary,
   SlaydCanvaState,
   TelegramUser,
-  TolovgoPaymentMode,
   UserProfile,
   WorkspaceMode,
 } from './types/editor';
@@ -37,6 +39,7 @@ import {
 import { exportToPptx } from './utils/exportPptx';
 import {
   deleteCloudProject,
+  fetchAppPricing,
   fetchCloudProjects,
   getTelegramAuthHeaders,
   loadCloudProject,
@@ -135,6 +138,11 @@ export default function App() {
   const [notice, setNotice] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
   const [telegramUser, setTelegramUser] = useState<TelegramUser | null>(null);
   const [tgSessionToken, setTgSessionToken] = useState<string | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [adminOpen, setAdminOpen] = useState(false);
+  const [adminToken, setAdminToken] = useState<string | null>(null);
+  const [pricingSettings, setPricingSettings] = useState<AppPricingSettings>(DEFAULT_PRICING_SETTINGS);
+  const [botUsername, setBotUsername] = useState<string | null>(null);
   const [activeProjectId, setActiveProjectId] = useState<string>('');
   const [savedProjects, setSavedProjects] = useState<ProjectSummary[]>([]);
   const [syncingProject, setSyncingProject] = useState(false);
@@ -142,6 +150,21 @@ export default function App() {
   const wordPaperRef = useRef<HTMLDivElement | null>(null);
   const hydratedCloudUserRef = useRef<string | null>(null);
   const skipNextAutoSyncRef = useRef(false);
+
+  useEffect(() => {
+    let active = true;
+    void fetchAppPricing().then((res) => {
+      if (!active || !res) return;
+      if (res.pricing) setPricingSettings(res.pricing);
+      if (res.botUsername) setBotUsername(res.botUsername);
+      if (res.tolovgoMode === 'test' || res.tolovgoMode === 'live') {
+        setState((prev) => ({ ...prev, tolovgoMode: res.tolovgoMode }));
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   // Persist workspace to localStorage (never persist session tokens)
   useEffect(() => {
@@ -166,13 +189,19 @@ export default function App() {
         sessionToken: string;
         account?: TelegramAccountResponse;
         kvConfigured?: boolean;
+        isAdmin?: boolean;
       },
       announce = true
     ) => {
+      const adminFlag = Boolean(payload.isAdmin || payload.user.isAdmin);
+      setIsAdmin(adminFlag);
       setTelegramUser({
         ...payload.user,
         autoSendFiles: payload.account?.autoSendFiles ?? payload.user.autoSendFiles ?? true,
         notifyOnActivity: payload.account?.notifyOnActivity ?? payload.user.notifyOnActivity ?? true,
+        referralCount: payload.account?.referralCount ?? payload.user.referralCount ?? 0,
+        isBanned: payload.account?.isBanned ?? payload.user.isBanned ?? false,
+        isAdmin: adminFlag,
       });
       setTgSessionToken(payload.sessionToken);
 
@@ -199,24 +228,13 @@ export default function App() {
         };
 
         let nextBalance = prev.balance;
-        let nextTransactions = prev.transactions;
+        let nextTransactions = prev.transactions.filter((t) => t.id !== 'tx_init_1');
 
         if (payload.account) {
-          const existingIds = new Set(prev.transactions.map((t) => t.id));
-          const unseenServerTxs = payload.account.transactions.filter(
-            (tx) => !existingIds.has(tx.id) && tx.id !== 'tx_init_1'
-          );
-          if (unseenServerTxs.length > 0) {
-            nextTransactions = [...unseenServerTxs, ...prev.transactions];
-          }
-          if (payload.kvConfigured) {
-            nextBalance = payload.account.balance;
-          } else if (unseenServerTxs.length > 0) {
-            const addedSum = unseenServerTxs
-              .filter((t) => t.id.startsWith('tolovgo_'))
-              .reduce((acc, t) => acc + Math.max(0, t.amount), 0);
-            nextBalance = prev.balance + addedSum;
-          }
+          nextBalance = payload.account.balance;
+          const serverIds = new Set(payload.account.transactions.map((t) => t.id));
+          const localOnly = nextTransactions.filter((t) => !serverIds.has(t.id));
+          nextTransactions = [...payload.account.transactions, ...localOnly].slice(0, 60);
         }
 
         return {
@@ -256,6 +274,7 @@ export default function App() {
             sessionToken?: string;
             account?: TelegramAccountResponse;
             kvConfigured?: boolean;
+            isAdmin?: boolean;
           };
           if (active && res.ok && data.user && data.sessionToken) {
             applyTelegramAuth(
@@ -264,6 +283,7 @@ export default function App() {
                 sessionToken: data.sessionToken,
                 account: data.account,
                 kvConfigured: data.kvConfigured,
+                isAdmin: data.isAdmin,
               },
               true
             );
@@ -291,6 +311,7 @@ export default function App() {
               sessionToken?: string;
               account?: TelegramAccountResponse;
               kvConfigured?: boolean;
+              isAdmin?: boolean;
             };
             if (active && res.ok && data.user && data.sessionToken) {
               applyTelegramAuth(
@@ -299,6 +320,7 @@ export default function App() {
                   sessionToken: data.sessionToken,
                   account: data.account,
                   kvConfigured: data.kvConfigured,
+                  isAdmin: data.isAdmin,
                 },
                 false
               );
@@ -319,6 +341,7 @@ export default function App() {
           sessionToken?: string;
           account?: TelegramAccountResponse;
           kvConfigured?: boolean;
+          isAdmin?: boolean;
         };
         if (active && data.user && data.sessionToken) {
           applyTelegramAuth(
@@ -327,6 +350,7 @@ export default function App() {
               sessionToken: data.sessionToken,
               account: data.account,
               kvConfigured: data.kvConfigured,
+              isAdmin: data.isAdmin,
             },
             false
           );
@@ -641,16 +665,6 @@ export default function App() {
     showNotice('ok', "Profil ma'lumotlari saqlandi.");
   };
 
-  const handleChangeTolovgoMode = (tolovgoMode: TolovgoPaymentMode) => {
-    setState((prev) => ({ ...prev, tolovgoMode }));
-    showNotice(
-      'ok',
-      tolovgoMode === 'test'
-        ? "TolovGo sinov rejimi (TOLOVGO_TEST_API) yoqildi."
-        : "TolovGo haqiqiy to'lov rejimi (TOLOVGO_API_KEY) yoqildi."
-    );
-  };
-
   const handleUpdateTelegramPrefs = async (prefs: {
     autoSendFiles?: boolean;
     notifyOnActivity?: boolean;
@@ -683,8 +697,16 @@ export default function App() {
     hydratedCloudUserRef.current = null;
     setSavedProjects([]);
     setActiveProjectId('');
+    setIsAdmin(false);
+    setAdminOpen(false);
+    setAdminToken(null);
     setTelegramUser(null);
     setTgSessionToken(null);
+    setState((prev) => ({
+      ...prev,
+      balance: 0,
+      transactions: [],
+    }));
     showNotice('ok', 'Telegram hisobidan chiqildi.');
   };
 
@@ -907,7 +929,10 @@ export default function App() {
       activePdfId:
         result.targetMode === 'pdf' ? result.pages[0]?.id || prev.activePdfId : prev.activePdfId,
       pdfOrientation: result.pdfOrientation || prev.pdfOrientation,
-      balance: Math.max(0, prev.balance - result.price),
+      balance:
+        result.serverCharged && typeof result.newBalance === 'number'
+          ? result.newBalance
+          : Math.max(0, prev.balance - result.price),
       transactions: [
         {
           id: uid('tx'),
@@ -932,7 +957,7 @@ export default function App() {
         await logTelegramActivity(
           `${result.serviceTitle}: ${result.docTitle}`,
           'AI Xizmat',
-          -result.price,
+          result.serverCharged ? 0 : -result.price,
           tokenSnapshot
         );
         if (!shouldSendFile) return;
@@ -987,6 +1012,8 @@ export default function App() {
         onResetCurrent={handleResetCurrent}
         onOpenTopUp={() => setDesktopTopUpOpen(true)}
         onOpenProfile={() => setDesktopProfileOpen(true)}
+        isAdmin={isAdmin}
+        onOpenAdminPanel={() => setAdminOpen(true)}
         telegramUser={telegramUser}
         isExporting={isExporting}
       />
@@ -1000,6 +1027,7 @@ export default function App() {
               pptxCount={state.pptxPages.length}
               pdfCount={state.pdfPages.length}
               balance={state.balance}
+              pricingSettings={pricingSettings}
               onOpenEditor={handleOpenEditorMode}
               onOpenAiService={handleOpenAiServiceMobile}
               onOpenTab={handleSelectMobileTab}
@@ -1022,6 +1050,8 @@ export default function App() {
                 onSelectService={setSelectedAiService}
                 balance={state.balance}
                 profile={state.profile}
+                pricingSettings={pricingSettings}
+                telegramSessionToken={tgSessionToken}
                 onRequestTopUp={() => {
                   setMobileServiceOpen(false);
                   setMobileTab('topup');
@@ -1052,13 +1082,15 @@ export default function App() {
               balance={state.balance}
               pptxCount={state.pptxPages.length}
               pdfCount={state.pdfPages.length}
-              tolovgoMode={state.tolovgoMode || 'live'}
+              isAdmin={isAdmin}
+              pricingSettings={pricingSettings}
+              botUsername={botUsername}
               telegramUser={telegramUser}
               telegramSessionToken={tgSessionToken}
               onTelegramAuthenticated={(p) => applyTelegramAuth(p, true)}
               onUpdateTelegramPrefs={handleUpdateTelegramPrefs}
               onTelegramLogout={handleTelegramLogout}
-              onChangeTolovgoMode={handleChangeTolovgoMode}
+              onOpenAdminPanel={() => setAdminOpen(true)}
               onSaveProfile={handleSaveProfile}
               onOpenTab={handleSelectMobileTab}
               savedProjects={savedProjects}
@@ -1081,6 +1113,8 @@ export default function App() {
             onSelectService={setSelectedAiService}
             balance={state.balance}
             profile={state.profile}
+            pricingSettings={pricingSettings}
+            telegramSessionToken={tgSessionToken}
             onRequestTopUp={() => setDesktopTopUpOpen(true)}
             onGenerated={handleAiGenerated}
           />
@@ -1214,13 +1248,18 @@ export default function App() {
               balance={state.balance}
               pptxCount={state.pptxPages.length}
               pdfCount={state.pdfPages.length}
-              tolovgoMode={state.tolovgoMode || 'live'}
+              isAdmin={isAdmin}
+              pricingSettings={pricingSettings}
+              botUsername={botUsername}
               telegramUser={telegramUser}
               telegramSessionToken={tgSessionToken}
               onTelegramAuthenticated={(p) => applyTelegramAuth(p, true)}
               onUpdateTelegramPrefs={handleUpdateTelegramPrefs}
               onTelegramLogout={handleTelegramLogout}
-              onChangeTolovgoMode={handleChangeTolovgoMode}
+              onOpenAdminPanel={() => {
+                setDesktopProfileOpen(false);
+                setAdminOpen(true);
+              }}
               onSaveProfile={handleSaveProfile}
               onOpenTab={() => {
                 setDesktopProfileOpen(false);
@@ -1236,6 +1275,21 @@ export default function App() {
             />
           </div>
         </div>
+      )}
+
+      {adminOpen && isAdmin && telegramUser && tgSessionToken && (
+        <AdminDashboard
+          telegramUser={telegramUser}
+          telegramSessionToken={tgSessionToken}
+          adminToken={adminToken}
+          onAdminTokenChange={setAdminToken}
+          onPricingUpdated={(nextPricing) => setPricingSettings(nextPricing)}
+          onTolovgoModeUpdated={(nextMode) =>
+            setState((prev) => ({ ...prev, tolovgoMode: nextMode }))
+          }
+          onNotify={showNotice}
+          onClose={() => setAdminOpen(false)}
+        />
       )}
 
       {notice && (

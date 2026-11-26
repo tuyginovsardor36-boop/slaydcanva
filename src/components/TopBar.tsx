@@ -7,6 +7,7 @@ import {
   Loader2,
   Presentation,
   RotateCcw,
+  Shield,
   Sparkles,
   User,
   Wallet,
@@ -31,6 +32,8 @@ interface TopBarProps {
   onResetCurrent: () => void;
   onOpenTopUp?: () => void;
   onOpenProfile?: () => void;
+  isAdmin?: boolean;
+  onOpenAdminPanel?: () => void;
   telegramUser?: TelegramUser | null;
   isExporting: boolean;
 }
@@ -59,6 +62,8 @@ export const TopBar: React.FC<TopBarProps> = ({
   onResetCurrent,
   onOpenTopUp,
   onOpenProfile,
+  isAdmin = false,
+  onOpenAdminPanel,
   telegramUser,
   isExporting,
 }) => {
@@ -207,6 +212,17 @@ export const TopBar: React.FC<TopBarProps> = ({
                     <span>Telegram · Profil</span>
                   </>
                 )}
+              </button>
+            )}
+            {isAdmin && onOpenAdminPanel && (
+              <button
+                type="button"
+                onClick={onOpenAdminPanel}
+                title="Admin Boshqaruv Paneli"
+                className="flex items-center gap-1.5 text-xs bg-red-600 hover:bg-red-500 border border-red-500 rounded-md px-2.5 py-1.5 text-white font-medium transition-colors"
+              >
+                <Shield className="w-3.5 h-3.5" />
+                <span>Admin</span>
               </button>
             )}
           </div>
