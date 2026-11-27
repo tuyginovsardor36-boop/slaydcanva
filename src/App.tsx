@@ -201,6 +201,15 @@ export default function App() {
   const [syncingProject, setSyncingProject] = useState(false);
   const [missingSubChannels, setMissingSubChannels] = useState<MandatoryChannelPublic[]>([]);
   const [checkingSub, setCheckingSub] = useState(false);
+  const [impersonationRestore, setImpersonationRestore] = useState<{
+    user: TelegramUser;
+    sessionToken: string;
+    adminToken: string | null;
+    isAdmin: boolean;
+    isManager: boolean;
+    staffRole: StaffRole;
+    managerPermissions: ManagerPermission[];
+  } | null>(null);
 
   const wordPaperRef = useRef<HTMLDivElement | null>(null);
   const hydratedCloudUserRef = useRef<string | null>(null);
@@ -1066,6 +1075,7 @@ export default function App() {
       // Ignore
     }
     hydratedCloudUserRef.current = null;
+    setImpersonationRestore(null);
     setSavedProjects([]);
     setActiveProjectId('');
     setIsAdmin(false);
@@ -1083,6 +1093,109 @@ export default function App() {
     }));
     showNotice('ok', 'Telegram hisobidan chiqildi.');
   };
+
+  const handleImpersonateUser = useCallback(
+    (payload: {
+      user: TelegramUser;
+      sessionToken: string;
+      account?: TelegramAccountResponse;
+    }) => {
+      if (telegramUser && tgSessionToken && !impersonationRestore) {
+        setImpersonationRestore({
+          user: telegramUser,
+          sessionToken: tgSessionToken,
+          adminToken,
+          isAdmin,
+          isManager,
+          staffRole,
+          managerPermissions,
+        });
+      }
+      skipNextAutoSyncRef.current = true;
+      hydratedCloudUserRef.current = null;
+      setPptxHistory({ past: [], future: [] });
+      setPdfHistory({ past: [], future: [] });
+      setSavedProjects([]);
+      setActiveProjectId('');
+      setState(createInitialState());
+      setAdminOpen(false);
+      setDesktopProfileOpen(false);
+      setDesktopSupportOpen(false);
+      setDesktopTopUpOpen(false);
+      applyTelegramAuth(
+        {
+          user: payload.user,
+          sessionToken: payload.sessionToken,
+          account: payload.account,
+          isAdmin: false,
+          isManager: false,
+          isSupport: false,
+          staffRole: 'user',
+          managerPermissions: [],
+          missingChannels: [],
+        },
+        false
+      );
+      setFilesRefreshKey((k) => k + 1);
+      if (typeof window !== 'undefined' && window.innerWidth >= 768) {
+        setDesktopFilesOpen(true);
+      } else {
+        setMobileTab('files');
+      }
+      showNotice('ok', `Masofaviy kirish: ${payload.user.firstName} hisobiga kirildi.`);
+    },
+    [
+      telegramUser,
+      tgSessionToken,
+      impersonationRestore,
+      adminToken,
+      isAdmin,
+      isManager,
+      staffRole,
+      managerPermissions,
+      applyTelegramAuth,
+      showNotice,
+    ]
+  );
+
+  const handleExitImpersonation = useCallback(() => {
+    if (!impersonationRestore) return;
+    const restore = impersonationRestore;
+    setImpersonationRestore(null);
+    skipNextAutoSyncRef.current = true;
+    hydratedCloudUserRef.current = null;
+    setPptxHistory({ past: [], future: [] });
+    setPdfHistory({ past: [], future: [] });
+    setSavedProjects([]);
+    setActiveProjectId('');
+    setState(createInitialState());
+    setDesktopFilesOpen(false);
+    setDesktopProfileOpen(false);
+    applyTelegramAuth(
+      {
+        user: restore.user,
+        sessionToken: restore.sessionToken,
+        isAdmin: restore.isAdmin,
+        isManager: restore.isManager,
+        isSupport: restore.staffRole === 'support',
+        staffRole: restore.staffRole,
+        managerPermissions: restore.managerPermissions,
+      },
+      false
+    );
+    setAdminToken(restore.adminToken);
+    setAdminOpen(true);
+    void fetchTelegramAccountMe(restore.sessionToken).then((me) => {
+      if (me?.ok && me.account) {
+        setState((prev) => ({
+          ...prev,
+          balance: me.account!.balance,
+          transactions: me.account!.transactions.slice(0, 60),
+        }));
+      }
+    });
+    showNotice('ok', 'Admin hisobingizga qaytdingiz.');
+  }, [impersonationRestore, applyTelegramAuth, showNotice]);
 
   const applyCloudProjectToWorkspace = useCallback((project: CloudProjectData) => {
     skipNextAutoSyncRef.current = true;
@@ -1426,7 +1539,8 @@ export default function App() {
     telegramConfigured &&
     (siteConfig.telegramOnlyMode ?? true) &&
     !inTelegramWebApp &&
-    !isStaffMember;
+    !isStaffMember &&
+    !impersonationRestore;
 
   if (telegramOnlyBlocked) {
     const botHandle = botUsername || 'SlaydCanvaBot';
@@ -1527,6 +1641,46 @@ export default function App() {
 
   return (
     <div className="h-screen w-screen flex flex-col overflow-hidden bg-[#F4F4F6]">
+      {impersonationRestore && telegramUser && (
+        <div className="shrink-0 bg-[#111113] border-b border-red-600/60 text-white px-3 md:px-4 py-2 text-xs flex flex-wrap items-center justify-between gap-2 z-50">
+          <div className="flex items-center gap-2 min-w-0">
+            <Shield className="w-3.5 h-3.5 text-red-400 shrink-0" />
+            <span className="truncate">
+              Masofaviy boshqaruv:{' '}
+              <strong className="font-semibold text-white">{telegramUser.firstName}</strong>
+              {' · '}
+              <span className="font-mono text-zinc-300">ID {telegramUser.telegramId}</span>
+              {' · '}
+              <span className="font-mono text-emerald-400">{formatSom(state.balance)}</span>
+            </span>
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              onClick={() => {
+                if (typeof window !== 'undefined' && window.innerWidth >= 768) {
+                  setDesktopFilesOpen(true);
+                } else {
+                  setMobileTab('files');
+                }
+              }}
+              className="px-2.5 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-100 font-medium inline-flex items-center gap-1"
+            >
+              <FolderOpen className="w-3 h-3 text-red-400" />
+              <span>Fayllari</span>
+            </button>
+            <button
+              type="button"
+              onClick={handleExitImpersonation}
+              className="px-3 py-1 rounded-lg bg-red-600 hover:bg-red-700 text-white font-semibold inline-flex items-center gap-1"
+            >
+              <ArrowLeft className="w-3 h-3" />
+              <span>Admin hisobga qaytish</span>
+            </button>
+          </div>
+        </div>
+      )}
+
       <TopBar
         mode={state.mode}
         desktopView={desktopView}
@@ -1552,7 +1706,7 @@ export default function App() {
         isExporting={isExporting}
       />
 
-      {siteConfig.maintenanceMode && !isStaffMember && (
+      {siteConfig.maintenanceMode && !isStaffMember && !impersonationRestore && (
         <div className="shrink-0 bg-amber-50 border-b border-amber-200 px-4 py-2 text-xs text-amber-900 flex items-center justify-center gap-2">
           <AlertTriangle className="w-3.5 h-3.5 text-amber-700 shrink-0" />
           <span>
@@ -1952,7 +2106,7 @@ export default function App() {
         </div>
       )}
 
-      {telegramUser && !isStaffMember && missingSubChannels.length > 0 && (
+      {telegramUser && !isStaffMember && !impersonationRestore && missingSubChannels.length > 0 && (
         <div className="fixed inset-0 z-55 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="w-full max-w-md bg-white border border-zinc-200 rounded-2xl shadow-2xl overflow-hidden">
             <div className="bg-[#111113] text-white px-5 py-4 flex items-center gap-2.5">
@@ -2024,6 +2178,7 @@ export default function App() {
             setState((prev) => ({ ...prev, tolovgoMode: nextMode }))
           }
           onSiteConfigUpdated={(nextCfg) => setSiteConfig(nextCfg)}
+          onImpersonateUser={handleImpersonateUser}
           onNotify={showNotice}
           onClose={() => setAdminOpen(false)}
         />

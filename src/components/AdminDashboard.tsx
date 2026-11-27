@@ -23,6 +23,7 @@ import {
   LayoutDashboard,
   Loader2,
   Lock,
+  LogIn,
   Megaphone,
   MessageSquare,
   Plus,
@@ -95,6 +96,7 @@ import {
   adminGetSupportThread,
   adminGetUserDetail,
   adminGetUserProject,
+  adminImpersonateUser,
   adminListAiProviders,
   adminListAllFiles,
   adminListAllProjects,
@@ -121,7 +123,9 @@ import {
   adminSaveSystemApiKey,
   adminSendBroadcast,
   adminSendDirectMessage,
+  adminSendProjectBlobToUserTelegram,
   adminSendTestTelegramAlert,
+  adminSendUserFileToTelegram,
   adminSetupPassword,
   adminSetupTelegramWebhook,
   adminSetUserBanned,
@@ -135,6 +139,7 @@ import {
   adminUpsertPromo,
   adminVerifyOrder,
   adminFetchFileBlob,
+  TelegramAccountResponse,
 } from '../utils/telegramClient';
 import { exportToDocx } from '../utils/exportDocx';
 import { exportCanvasPagesToPdf } from '../utils/exportPdf';
@@ -164,6 +169,11 @@ interface AdminDashboardProps {
   onPricingUpdated: (pricing: AppPricingSettings) => void;
   onTolovgoModeUpdated: (mode: TolovgoPaymentMode) => void;
   onSiteConfigUpdated?: (cfg: SiteConfigSettings) => void;
+  onImpersonateUser?: (payload: {
+    user: TelegramUser;
+    sessionToken: string;
+    account?: TelegramAccountResponse;
+  }) => void;
   onNotify: (type: 'ok' | 'err', text: string) => void;
   onClose: () => void;
 }
@@ -238,6 +248,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onPricingUpdated,
   onTolovgoModeUpdated,
   onSiteConfigUpdated,
+  onImpersonateUser,
   onNotify,
   onClose,
 }) => {
@@ -294,10 +305,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [fileSearch, setFileSearch] = useState('');
   const [fileFormatFilter, setFileFormatFilter] = useState('');
   const [downloadingFileId, setDownloadingFileId] = useState<string | null>(null);
+  const [sendingBotFileId, setSendingBotFileId] = useState<string | null>(null);
   const [downloadingProjectId, setDownloadingProjectId] = useState<string | null>(null);
+  const [sendingBotProjectId, setSendingBotProjectId] = useState<string | null>(null);
   const [previewingProjectId, setPreviewingProjectId] = useState<string | null>(null);
   const [previewProjectData, setPreviewProjectData] = useState<CloudProjectData | null>(null);
   const [previewProjectOwnerId, setPreviewProjectOwnerId] = useState<string | null>(null);
+  const [impersonatingUserId, setImpersonatingUserId] = useState<string | null>(null);
 
   const loadAdminFiles = useCallback(async () => {
     if (!adminToken) return;
@@ -348,10 +362,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   };
 
-  const exportCloudProjectForAdmin = async (proj: CloudProjectData, fallbackTitle?: string) => {
+  const exportCloudProjectForAdmin = async (
+    proj: CloudProjectData,
+    fallbackTitle?: string,
+    download = true
+  ) => {
     const docName = proj.title || fallbackTitle || 'SlaydCanva';
     if (proj.mode === 'word') {
-      return exportToDocx(proj.wordDoc, docName, { download: true });
+      return exportToDocx(proj.wordDoc, docName, { download });
     }
     if (proj.mode === 'pdf') {
       return exportCanvasPagesToPdf(
@@ -359,10 +377,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         docName,
         'pdf',
         proj.pdfOrientation || 'portrait',
-        { download: true }
+        { download }
       );
     }
-    return exportToPptx(proj.pptxPages, docName, { download: true });
+    return exportToPptx(proj.pptxPages, docName, { download });
   };
 
   const handleAdminDownloadProject = async (
@@ -378,12 +396,122 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         onNotify('err', res.error || 'Loyihani yuklab bo‘lmadi.');
         return;
       }
-      const exported = await exportCloudProjectForAdmin(res.project, fallbackTitle);
+      const exported = await exportCloudProjectForAdmin(res.project, fallbackTitle, true);
       onNotify('ok', `"${exported.fileName}" yuklab olindi.`);
     } catch {
       onNotify('err', 'Loyihani eksport qilishda xatolik yuz berdi.');
     } finally {
       setDownloadingProjectId(null);
+    }
+  };
+
+  const handleAdminSendFileToBot = async (
+    telegramId: string,
+    fileId: string,
+    fileName: string
+  ) => {
+    if (!adminToken || sendingBotFileId) return;
+    setSendingBotFileId(fileId);
+    try {
+      const res = await adminSendUserFileToTelegram(
+        telegramId,
+        fileId,
+        telegramSessionToken,
+        adminToken
+      );
+      if (!res.ok) {
+        onNotify('err', res.error || 'Botga yuborib bo‘lmadi.');
+        return;
+      }
+      setAllFiles((prev) =>
+        prev.map((item) => (item.id === fileId ? { ...item, sentToTelegram: true } : item))
+      );
+      setSelectedUserDetail((prev) =>
+        prev && prev.user.telegramId === telegramId
+          ? {
+              ...prev,
+              files: (prev.files || []).map((item) =>
+                item.id === fileId ? { ...item, sentToTelegram: true } : item
+              ),
+            }
+          : prev
+      );
+      onNotify('ok', `"${fileName}" mijozning Telegram botiga yuborildi.`);
+    } finally {
+      setSendingBotFileId(null);
+    }
+  };
+
+  const handleAdminSendProjectToBot = async (
+    telegramId: string,
+    projectId: string,
+    fallbackTitle?: string,
+    preloadedProject?: CloudProjectData
+  ) => {
+    if (!adminToken || sendingBotProjectId) return;
+    setSendingBotProjectId(projectId);
+    try {
+      let project = preloadedProject;
+      if (!project) {
+        const res = await adminGetUserProject(telegramId, projectId, telegramSessionToken, adminToken);
+        if (!res.ok || !res.project) {
+          onNotify('err', res.error || 'Loyihani yuklab bo‘lmadi.');
+          return;
+        }
+        project = res.project;
+      }
+      const exported = await exportCloudProjectForAdmin(project, fallbackTitle, false);
+      const sendRes = await adminSendProjectBlobToUserTelegram({
+        telegramId,
+        blob: exported.blob,
+        fileName: exported.fileName,
+        caption: `✨ ${project.title || fallbackTitle || 'SlaydCanva'}`,
+        serviceTitle: 'Admin masofaviy yuborish',
+        sessionToken: telegramSessionToken,
+        adminToken,
+      });
+      if (!sendRes.ok) {
+        onNotify('err', sendRes.error || 'Faylni mijoz botiga yuborib bo‘lmadi.');
+        return;
+      }
+      const savedFile = sendRes.file;
+      if (savedFile) {
+        setSelectedUserDetail((prev) =>
+          prev && prev.user.telegramId === telegramId
+            ? { ...prev, files: [savedFile, ...(prev.files || [])] }
+            : prev
+        );
+      }
+      if (sendRes.sentToTelegram) {
+        onNotify('ok', `"${exported.fileName}" mijozning Telegram botiga yuborildi.`);
+      } else {
+        onNotify('err', sendRes.telegramError || 'Fayl saqlandi, lekin Telegram botga yuborilmadi.');
+      }
+    } catch {
+      onNotify('err', 'Loyihani eksport qilib botga yuborishda xatolik.');
+    } finally {
+      setSendingBotProjectId(null);
+    }
+  };
+
+  const handleAdminImpersonate = async (targetTelegramId: string) => {
+    if (!adminToken || impersonatingUserId || !onImpersonateUser) return;
+    setImpersonatingUserId(targetTelegramId);
+    try {
+      const res = await adminImpersonateUser(targetTelegramId, telegramSessionToken, adminToken);
+      if (!res.ok || !res.user || !res.sessionToken) {
+        onNotify('err', res.error || 'Mijoz hisobiga kirib bo‘lmadi.');
+        return;
+      }
+      setSelectedUserDetail(null);
+      setPreviewProjectData(null);
+      onImpersonateUser({
+        user: res.user,
+        sessionToken: res.sessionToken,
+        account: res.account,
+      });
+    } finally {
+      setImpersonatingUserId(null);
     }
   };
 
@@ -3149,7 +3277,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <section className="bg-white border border-zinc-200 rounded-2xl overflow-hidden">
                 {selectedUserDetail || detailLoading ? (
                   <div className="p-4 md:p-6 space-y-5">
-                    <div className="flex items-center justify-between border-b border-zinc-200 pb-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-200 pb-4">
                       <button
                         type="button"
                         onClick={() => setSelectedUserDetail(null)}
@@ -3159,9 +3287,26 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         <span>Foydalanuvchilar ro‘yxatiga qaytish</span>
                       </button>
                       {selectedUserDetail && (
-                        <span className="text-xs font-mono text-zinc-500">
-                          {selectedUserDetail.user.firstName} · ID {selectedUserDetail.user.telegramId}
-                        </span>
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-mono text-zinc-500">
+                            {selectedUserDetail.user.firstName} · ID {selectedUserDetail.user.telegramId}
+                          </span>
+                          {onImpersonateUser && (
+                            <button
+                              type="button"
+                              disabled={impersonatingUserId === selectedUserDetail.user.telegramId}
+                              onClick={() => void handleAdminImpersonate(selectedUserDetail.user.telegramId)}
+                              className="px-3 py-1.5 rounded-xl bg-[#111113] hover:bg-zinc-800 disabled:opacity-50 text-white text-xs font-semibold inline-flex items-center gap-1.5"
+                            >
+                              {impersonatingUserId === selectedUserDetail.user.telegramId ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              ) : (
+                                <LogIn className="w-3.5 h-3.5 text-red-400" />
+                              )}
+                              <span>Mijoz hisobiga kirish</span>
+                            </button>
+                          )}
+                        </div>
                       )}
                     </div>
 
@@ -3203,7 +3348,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         <div className="border border-zinc-200 rounded-xl overflow-hidden bg-white">
                           <div className="px-4 py-3 bg-zinc-50 border-b border-zinc-200 font-semibold text-zinc-900 flex items-center justify-between">
                             <span>Mijoz tomonidan yaratilgan fayllar va slaydlar ({selectedUserDetail.files?.length || 0})</span>
-                            <span className="text-[11px] text-zinc-500 font-normal">Haqiqatan bajarganini tekshirish uchun yuklab oling</span>
+                            <span className="text-[11px] text-zinc-500 font-normal">Yuklab olish yoki mijoz botiga yuborish</span>
                           </div>
                           <div className="divide-y divide-zinc-100 max-h-64 overflow-y-auto">
                             {(!selectedUserDetail.files || selectedUserDetail.files.length === 0) ? (
@@ -3222,19 +3367,34 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                       </div>
                                     </div>
                                   </div>
-                                  <button
-                                    type="button"
-                                    disabled={downloadingFileId === f.id}
-                                    onClick={() => void handleAdminDownloadFile(f.id, f.fileName)}
-                                    className="px-3 py-1.5 rounded-xl bg-red-600 hover:bg-red-700 text-white font-semibold inline-flex items-center gap-1.5 shrink-0"
-                                  >
-                                    {downloadingFileId === f.id ? (
-                                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                    ) : (
-                                      <Download className="w-3.5 h-3.5" />
-                                    )}
-                                    <span>Yuklab olish</span>
-                                  </button>
+                                  <div className="flex items-center gap-1.5 shrink-0">
+                                    <button
+                                      type="button"
+                                      disabled={sendingBotFileId === f.id}
+                                      onClick={() => void handleAdminSendFileToBot(selectedUserDetail.user.telegramId, f.id, f.fileName)}
+                                      className="px-2.5 py-1.5 rounded-xl bg-sky-50 hover:bg-sky-100 border border-sky-200 text-sky-700 font-semibold inline-flex items-center gap-1"
+                                    >
+                                      {sendingBotFileId === f.id ? (
+                                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                      ) : (
+                                        <Send className="w-3.5 h-3.5" />
+                                      )}
+                                      <span>Botga</span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={downloadingFileId === f.id}
+                                      onClick={() => void handleAdminDownloadFile(f.id, f.fileName)}
+                                      className="px-3 py-1.5 rounded-xl bg-red-600 hover:bg-red-700 text-white font-semibold inline-flex items-center gap-1.5"
+                                    >
+                                      {downloadingFileId === f.id ? (
+                                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                      ) : (
+                                        <Download className="w-3.5 h-3.5" />
+                                      )}
+                                      <span>Yuklab olish</span>
+                                    </button>
+                                  </div>
                                 </div>
                               ))
                             )}
@@ -3273,6 +3433,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                       </div>
                                     </div>
                                     <div className="flex items-center gap-1.5 shrink-0">
+                                      <button
+                                        type="button"
+                                        disabled={sendingBotProjectId === p.id}
+                                        onClick={() => void handleAdminSendProjectToBot(selectedUserDetail.user.telegramId, p.id, p.title)}
+                                        className="px-2.5 py-1.5 rounded-xl bg-sky-50 hover:bg-sky-100 border border-sky-200 text-sky-700 font-semibold inline-flex items-center gap-1"
+                                      >
+                                        {sendingBotProjectId === p.id ? (
+                                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                        ) : (
+                                          <Send className="w-3.5 h-3.5" />
+                                        )}
+                                        <span>Botga</span>
+                                      </button>
                                       <button
                                         type="button"
                                         disabled={previewingProjectId === p.id}
@@ -3590,6 +3763,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                     <Eye className="w-3 h-3" />
                                     <span>Profil & CRM</span>
                                   </button>
+                                  {onImpersonateUser && (
+                                    <button
+                                      type="button"
+                                      disabled={impersonatingUserId === u.telegramId}
+                                      onClick={() => void handleAdminImpersonate(u.telegramId)}
+                                      className="px-2.5 py-1.5 rounded-lg bg-[#111113] hover:bg-zinc-800 text-white font-medium inline-flex items-center gap-1 disabled:opacity-50"
+                                    >
+                                      {impersonatingUserId === u.telegramId ? (
+                                        <Loader2 className="w-3 h-3 animate-spin" />
+                                      ) : (
+                                        <LogIn className="w-3 h-3 text-red-400" />
+                                      )}
+                                      <span>Hisobiga kirish</span>
+                                    </button>
+                                  )}
                                   {hasPerm('balance') && (
                                     <button
                                       type="button"
@@ -3837,6 +4025,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                   {formatDateTime(p.updatedAt)}
                                 </td>
                                 <td className="py-3 px-4 text-right space-x-1.5 whitespace-nowrap">
+                                  <button
+                                    type="button"
+                                    disabled={sendingBotProjectId === p.id}
+                                    onClick={() => void handleAdminSendProjectToBot(p.telegramId, p.id, p.title)}
+                                    className="px-2.5 py-1.5 rounded-xl bg-sky-50 hover:bg-sky-100 border border-sky-200 text-sky-700 font-semibold inline-flex items-center gap-1"
+                                  >
+                                    {sendingBotProjectId === p.id ? (
+                                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                    ) : (
+                                      <Send className="w-3.5 h-3.5" />
+                                    )}
+                                    <span>Botga</span>
+                                  </button>
                                   <button
                                     type="button"
                                     disabled={previewingProjectId === p.id}
@@ -6384,7 +6585,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             className="w-full max-w-2xl max-h-[88vh] bg-white border border-zinc-200 rounded-2xl overflow-hidden flex flex-col shadow-xl"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="px-5 py-3.5 border-b border-zinc-200 flex items-center justify-between shrink-0">
+            <div className="px-5 py-3.5 border-b border-zinc-200 flex items-center justify-between gap-2 shrink-0">
               <div>
                 <h3 className="text-sm font-semibold text-zinc-900">
                   Mijoz CRM Profili va Tarixi
@@ -6395,13 +6596,30 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   </p>
                 )}
               </div>
-              <button
-                type="button"
-                onClick={() => setSelectedUserDetail(null)}
-                className="p-1 text-zinc-400 hover:text-zinc-900 rounded-md"
-              >
-                <X className="w-4 h-4" />
-              </button>
+              <div className="flex items-center gap-2">
+                {selectedUserDetail && onImpersonateUser && (
+                  <button
+                    type="button"
+                    disabled={impersonatingUserId === selectedUserDetail.user.telegramId}
+                    onClick={() => void handleAdminImpersonate(selectedUserDetail.user.telegramId)}
+                    className="px-3 py-1.5 rounded-xl bg-[#111113] hover:bg-zinc-800 disabled:opacity-50 text-white text-xs font-semibold inline-flex items-center gap-1.5"
+                  >
+                    {impersonatingUserId === selectedUserDetail.user.telegramId ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <LogIn className="w-3.5 h-3.5 text-red-400" />
+                    )}
+                    <span>Mijoz hisobiga kirish</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setSelectedUserDetail(null)}
+                  className="p-1 text-zinc-400 hover:text-zinc-900 rounded-md"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
             </div>
 
             {detailLoading || !selectedUserDetail ? (
@@ -6457,19 +6675,34 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                               {f.serviceTitle || 'AI Xizmat'} · {formatDateTime(f.createdAt)}
                             </div>
                           </div>
-                          <button
-                            type="button"
-                            disabled={downloadingFileId === f.id}
-                            onClick={() => void handleAdminDownloadFile(f.id, f.fileName)}
-                            className="px-2.5 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white font-semibold inline-flex items-center gap-1 shrink-0"
-                          >
-                            {downloadingFileId === f.id ? (
-                              <Loader2 className="w-3 h-3 animate-spin" />
-                            ) : (
-                              <Download className="w-3 h-3" />
-                            )}
-                            <span>Yuklab olish</span>
-                          </button>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <button
+                              type="button"
+                              disabled={sendingBotFileId === f.id}
+                              onClick={() => void handleAdminSendFileToBot(selectedUserDetail.user.telegramId, f.id, f.fileName)}
+                              className="px-2 py-1.5 rounded-lg bg-sky-50 hover:bg-sky-100 border border-sky-200 text-sky-700 font-semibold inline-flex items-center gap-1"
+                            >
+                              {sendingBotFileId === f.id ? (
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                              ) : (
+                                <Send className="w-3 h-3" />
+                              )}
+                              <span>Botga</span>
+                            </button>
+                            <button
+                              type="button"
+                              disabled={downloadingFileId === f.id}
+                              onClick={() => void handleAdminDownloadFile(f.id, f.fileName)}
+                              className="px-2.5 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white font-semibold inline-flex items-center gap-1"
+                            >
+                              {downloadingFileId === f.id ? (
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                              ) : (
+                                <Download className="w-3 h-3" />
+                              )}
+                              <span>Yuklab olish</span>
+                            </button>
+                          </div>
                         </div>
                       ))
                     )}
@@ -6504,6 +6737,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                               </div>
                             </div>
                             <div className="flex items-center gap-1.5 shrink-0">
+                              <button
+                                type="button"
+                                disabled={sendingBotProjectId === p.id}
+                                onClick={() => void handleAdminSendProjectToBot(selectedUserDetail.user.telegramId, p.id, p.title)}
+                                className="px-2 py-1.5 rounded-lg bg-sky-50 hover:bg-sky-100 border border-sky-200 text-sky-700 font-semibold inline-flex items-center gap-1"
+                              >
+                                {sendingBotProjectId === p.id ? (
+                                  <Loader2 className="w-3 h-3 animate-spin" />
+                                ) : (
+                                  <Send className="w-3 h-3" />
+                                )}
+                                <span>Botga</span>
+                              </button>
                               <button
                                 type="button"
                                 disabled={previewingProjectId === p.id}
@@ -6877,6 +7123,28 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </p>
               </div>
               <div className="flex items-center gap-2 shrink-0">
+                {previewProjectOwnerId && (
+                  <button
+                    type="button"
+                    disabled={sendingBotProjectId === previewProjectData.id}
+                    onClick={() =>
+                      void handleAdminSendProjectToBot(
+                        previewProjectOwnerId,
+                        previewProjectData.id,
+                        previewProjectData.title,
+                        previewProjectData
+                      )
+                    }
+                    className="px-3 py-1.5 rounded-xl bg-sky-50 hover:bg-sky-100 border border-sky-200 text-sky-700 text-xs font-semibold inline-flex items-center gap-1.5"
+                  >
+                    {sendingBotProjectId === previewProjectData.id ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Send className="w-3.5 h-3.5" />
+                    )}
+                    <span>Botga yuborish</span>
+                  </button>
+                )}
                 <button
                   type="button"
                   disabled={downloadingProjectId === previewProjectData.id}
@@ -6885,7 +7153,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     try {
                       const exported = await exportCloudProjectForAdmin(
                         previewProjectData,
-                        previewProjectData.title
+                        previewProjectData.title,
+                        true
                       );
                       onNotify('ok', `"${exported.fileName}" yuklab olindi.`);
                     } catch {

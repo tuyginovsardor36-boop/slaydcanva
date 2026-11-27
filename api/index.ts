@@ -6640,6 +6640,186 @@ app.get('/api/admin/files/:id/download', async (req, res) => {
   sendBinaryFileResponse(res, resolved.fileName, resolved.mimeType, resolved.buffer);
 });
 
+app.post('/api/admin/users/:id/files/:fileId/send-telegram', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'users');
+  if (!ctx) return;
+  const tid = String(req.params.id || '').trim();
+  const fileId = String(req.params.fileId || '').trim();
+  if (!/^\d{3,20}$/.test(tid) || !/^[a-zA-Z0-9_-]{4,80}$/.test(fileId)) {
+    res.status(400).json({ error: "Noto'g'ri foydalanuvchi yoki fayl ID." });
+    return;
+  }
+  if (!getTelegramBotToken()) {
+    res.status(503).json({ error: 'TELEGRAM_BOT_TOKEN sozlanmagan.' });
+    return;
+  }
+  const resolved = await resolveSavedUserFile(fileId, tid);
+  if (!resolved || resolved.record.telegramId !== tid) {
+    res.status(404).json({ error: 'Fayl topilmadi.' });
+    return;
+  }
+  if (!resolved.buffer || resolved.buffer.length === 0) {
+    res.status(404).json({ error: 'Fayl tarkibi topilmadi, loyihadan qayta yuboring.' });
+    return;
+  }
+  const dbUser = (await dbGetUserDetailAdmin(tid))?.user || null;
+  const kvUser = dbUser ? null : await kvGet<TgUserAccount>(`tg_user:${tid}`);
+  const chatId = dbUser?.chatId || kvUser?.chatId || tid;
+  const sent = await telegramSendDocument(
+    chatId,
+    resolved.fileName,
+    resolved.mimeType,
+    resolved.buffer,
+    `📄 ${resolved.fileName} — SlaydCanva orqali yuborildi`
+  );
+  if (!sent.ok) {
+    res.status(502).json({ error: sent.description || 'Telegram botga yuborishda xatolik.' });
+    return;
+  }
+  await dbMarkUserFileSentTelegram(fileId, true);
+  const prevFiles = (await kvGet<DbUserFileRecord[]>(`user_files:${tid}`)) || [];
+  await kvSet(
+    `user_files:${tid}`,
+    prevFiles.map((f) => (f.id === fileId ? { ...f, sentToTelegram: true } : f))
+  );
+  await dbAppendAuditLog({
+    id: `aud_rf_${Date.now().toString(36)}`,
+    actorId: ctx.user.telegramId,
+    action: 'staff_remote_send_file',
+    targetId: tid,
+    details: `${resolved.fileName} mijoz botiga yuborildi`,
+  });
+  res.json({ ok: true });
+});
+
+app.post(
+  '/api/admin/users/:id/send-file',
+  express.raw({ type: 'application/octet-stream', limit: '15mb' }),
+  async (req, res) => {
+    const ctx = await requireStaffSession(req, res, 'users');
+    if (!ctx) return;
+    const tid = String(req.params.id || '').trim();
+    if (!/^\d{3,20}$/.test(tid)) {
+      res.status(400).json({ error: "Noto'g'ri foydalanuvchi ID." });
+      return;
+    }
+    if (!getTelegramBotToken()) {
+      res.status(503).json({ error: 'TELEGRAM_BOT_TOKEN sozlanmagan.' });
+      return;
+    }
+    const dbUser = (await dbGetUserDetailAdmin(tid))?.user || null;
+    const kvUser = dbUser ? null : await kvGet<TgUserAccount>(`tg_user:${tid}`);
+    if (!dbUser && !kvUser) {
+      res.status(404).json({ error: 'Foydalanuvchi topilmadi.' });
+      return;
+    }
+    const targetProfile: TgUserProfile = {
+      telegramId: tid,
+      chatId: dbUser?.chatId || kvUser?.chatId || tid,
+      firstName: dbUser?.firstName || kvUser?.firstName || 'Mijoz',
+      lastName: dbUser?.lastName || kvUser?.lastName,
+      username: dbUser?.username || kvUser?.username,
+    };
+    const decodeHeader = (h: string | string[] | undefined) => {
+      const val = Array.isArray(h) ? h[0] : h;
+      if (!val) return undefined;
+      try {
+        return decodeURIComponent(val).trim();
+      } catch {
+        return val.trim();
+      }
+    };
+    const rawFileName = decodeHeader(req.headers['x-file-name']) || '';
+    const fileBuffer = Buffer.isBuffer(req.body) ? (req.body as Buffer) : undefined;
+    const result = await saveAndMaybeSendUserFile({
+      user: targetProfile,
+      rawFileName,
+      fileBuffer,
+      caption: decodeHeader(req.headers['x-file-caption']),
+      serviceId: decodeHeader(req.headers['x-service-id']),
+      serviceTitle: decodeHeader(req.headers['x-service-title']),
+      sendToTelegram: true,
+      forceTelegram: true,
+    });
+    if (!result.ok) {
+      res.status(result.statusCode || 400).json({ error: result.error });
+      return;
+    }
+    await dbAppendAuditLog({
+      id: `aud_rp_${Date.now().toString(36)}`,
+      actorId: ctx.user.telegramId,
+      action: 'staff_remote_send_project',
+      targetId: tid,
+      details: `${result.file?.fileName || rawFileName} · bot=${result.sentToTelegram ? 'ok' : 'err'}`,
+    });
+    res.json({
+      ok: true,
+      file: result.file,
+      sentToTelegram: Boolean(result.sentToTelegram),
+      telegramError: result.telegramError,
+    });
+  }
+);
+
+app.post('/api/admin/users/:id/impersonate', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'users');
+  if (!ctx) return;
+  const tid = String(req.params.id || '').trim();
+  if (!/^\d{3,20}$/.test(tid)) {
+    res.status(400).json({ error: "Noto'g'ri foydalanuvchi ID." });
+    return;
+  }
+  if (isTelegramAdmin(tid) && ctx.staff.role !== 'super_admin') {
+    res.status(403).json({ error: 'Super Admin hisobiga kirish taqiqlangan.' });
+    return;
+  }
+  const dbUser = (await dbGetUserDetailAdmin(tid))?.user || null;
+  const kvUser = dbUser ? null : await kvGet<TgUserAccount>(`tg_user:${tid}`);
+  if (!dbUser && !kvUser) {
+    res.status(404).json({ error: 'Foydalanuvchi topilmadi.' });
+    return;
+  }
+  const targetProfile: TgUserProfile = {
+    telegramId: tid,
+    chatId: dbUser?.chatId || kvUser?.chatId || tid,
+    firstName: dbUser?.firstName || kvUser?.firstName || 'Foydalanuvchi',
+    lastName: dbUser?.lastName || kvUser?.lastName,
+    username: dbUser?.username || kvUser?.username,
+  };
+  const account = await getTgUserAccount(targetProfile);
+  const impersonationToken = signToken(
+    {
+      kind: 'session',
+      tid: targetProfile.telegramId,
+      cid: targetProfile.chatId,
+      fn: targetProfile.firstName,
+      ln: targetProfile.lastName || '',
+      un: targetProfile.username || '',
+      imp: ctx.user.telegramId,
+    },
+    2 * 60 * 60 * 1000
+  );
+  await dbAppendAuditLog({
+    id: `aud_imp_${Date.now().toString(36)}`,
+    actorId: ctx.user.telegramId,
+    action: 'staff_impersonate_user',
+    targetId: tid,
+    details: `Masofaviy boshqaruv: ${targetProfile.firstName} (${tid}) hisobiga kirildi`,
+  });
+  res.json({
+    ok: true,
+    sessionToken: impersonationToken,
+    user: {
+      ...targetProfile,
+      autoSendFiles: account.autoSendFiles,
+      notifyOnActivity: account.notifyOnActivity,
+      referralCount: account.referralCount,
+      isBanned: account.isBanned,
+    },
+    account,
+  });
+});
+
 app.post('/api/admin/users/:id/crm', async (req, res) => {
   const ctx = await requireStaffSession(req, res, 'users');
   if (!ctx) return;
@@ -8854,12 +9034,21 @@ app.get('/api/telegram/me', async (req, res) => {
     res.status(401).json({ error: 'Telegram autentifikatsiyasi talab qilinadi.' });
     return;
   }
+  const authHeader = req.get('authorization');
+  const rawBearer =
+    authHeader && authHeader.toLowerCase().startsWith('bearer ') ? authHeader.slice(7).trim() : '';
+  const bearerPayload = rawBearer ? verifySignedToken(rawBearer) : null;
+  const isImpersonated = Boolean(bearerPayload && typeof bearerPayload.imp === 'string');
+
   const account = await getTgUserAccount(user);
-  const staff = await resolveStaffAccess(user.telegramId);
-  const subStatus = staff.isStaff
-    ? { ok: true, missingChannels: [] }
-    : await checkUserMandatorySubscriptions(user.telegramId);
-  const sessionToken = issueSessionCookieAndToken(req, res, user);
+  const staff = isImpersonated
+    ? { role: 'user' as const, isStaff: false, permissions: [] as DbManagerPermission[] }
+    : await resolveStaffAccess(user.telegramId);
+  const subStatus =
+    isImpersonated || staff.isStaff
+      ? { ok: true, missingChannels: [] }
+      : await checkUserMandatorySubscriptions(user.telegramId);
+  const sessionToken = isImpersonated ? rawBearer : issueSessionCookieAndToken(req, res, user);
   res.json({
     ok: true,
     sessionToken,

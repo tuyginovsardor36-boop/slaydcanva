@@ -1415,6 +1415,118 @@ export async function adminGetUserProject(
   }
 }
 
+export async function adminSendUserFileToTelegram(
+  telegramId: string,
+  fileId: string,
+  sessionToken: string,
+  adminToken: string
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await fetch(
+      `/api/admin/users/${encodeURIComponent(telegramId)}/files/${encodeURIComponent(fileId)}/send-telegram`,
+      {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: getAdminHeaders(sessionToken, adminToken),
+      }
+    );
+    const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+    if (!res.ok) return { ok: false, error: data.error || 'Botga yuborib bo‘lmadi.' };
+    return { ok: true };
+  } catch {
+    return { ok: false, error: "Server bilan bog'lanishda xatolik." };
+  }
+}
+
+export async function adminSendProjectBlobToUserTelegram(params: {
+  telegramId: string;
+  blob: Blob;
+  fileName: string;
+  caption?: string;
+  serviceTitle?: string;
+  sessionToken: string;
+  adminToken: string;
+}): Promise<{ ok: boolean; file?: UserFileRecord; sentToTelegram?: boolean; telegramError?: string; error?: string }> {
+  if (params.blob.size > MAX_TELEGRAM_FILE_BYTES) {
+    return { ok: false, error: 'Fayl hajmi 15 MB dan oshib ketdi.' };
+  }
+  try {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/octet-stream',
+      'X-File-Name': encodeURIComponent(params.fileName),
+      ...getAdminHeaders(params.sessionToken, params.adminToken),
+    };
+    if (params.caption) headers['X-File-Caption'] = encodeURIComponent(params.caption);
+    if (params.serviceTitle) headers['X-Service-Title'] = encodeURIComponent(params.serviceTitle);
+    const res = await fetch(
+      `/api/admin/users/${encodeURIComponent(params.telegramId)}/send-file`,
+      {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers,
+        body: params.blob,
+      }
+    );
+    const data = (await res.json().catch(() => ({}))) as {
+      ok?: boolean;
+      file?: UserFileRecord;
+      sentToTelegram?: boolean;
+      telegramError?: string;
+      error?: string;
+    };
+    if (!res.ok) return { ok: false, error: data.error || 'Faylni botga yuborib bo‘lmadi.' };
+    return {
+      ok: true,
+      file: data.file,
+      sentToTelegram: Boolean(data.sentToTelegram),
+      telegramError: data.telegramError,
+    };
+  } catch {
+    return { ok: false, error: "Server bilan bog'lanishda xatolik." };
+  }
+}
+
+export async function adminImpersonateUser(
+  telegramId: string,
+  sessionToken: string,
+  adminToken: string
+): Promise<{
+  ok: boolean;
+  user?: TelegramUser;
+  sessionToken?: string;
+  account?: TelegramAccountResponse;
+  error?: string;
+}> {
+  try {
+    const res = await fetch(
+      `/api/admin/users/${encodeURIComponent(telegramId)}/impersonate`,
+      {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: getAdminHeaders(sessionToken, adminToken),
+      }
+    );
+    const data = (await res.json().catch(() => ({}))) as {
+      ok?: boolean;
+      user?: TelegramUser;
+      sessionToken?: string;
+      account?: TelegramAccountResponse;
+      error?: string;
+    };
+    if (!res.ok || !data.user || !data.sessionToken) {
+      return { ok: false, error: data.error || 'Mijoz hisobiga kirib bo‘lmadi.' };
+    }
+    return {
+      ok: true,
+      user: data.user,
+      sessionToken: data.sessionToken,
+      account: data.account,
+    };
+  } catch {
+    return { ok: false, error: "Server bilan bog'lanishda xatolik." };
+  }
+}
+
 export async function adminListSupportTickets(
   sessionToken: string,
   adminToken: string
