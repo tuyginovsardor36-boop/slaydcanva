@@ -2,6 +2,33 @@ import { toPng } from 'html-to-image';
 import { jsPDF } from 'jspdf';
 import { getPdfDimensions, PPTX_CANVAS } from '../data/defaults';
 import { CanvasPage, PdfOrientation } from '../types/editor';
+import { triggerSafeFileDownload } from './safeDownload';
+
+function getAdaptivePixelRatio(pageCount: number): number {
+  const isNarrow = typeof window !== 'undefined' && window.innerWidth < 768;
+  if (isNarrow || pageCount > 12) return 1.4;
+  return 2;
+}
+
+async function waitForNodeImages(node: HTMLElement): Promise<void> {
+  const imgs = Array.from(node.querySelectorAll('img'));
+  if (imgs.length === 0) return;
+  await Promise.all(
+    imgs.map(
+      (img) =>
+        new Promise<void>((resolve) => {
+          if (img.complete) {
+            resolve();
+            return;
+          }
+          const done = () => resolve();
+          img.addEventListener('load', done, { once: true });
+          img.addEventListener('error', done, { once: true });
+          window.setTimeout(done, 1500);
+        })
+    )
+  );
+}
 
 function buildOffscreenPageNode(page: CanvasPage, width: number, height: number): HTMLDivElement {
   const container = document.createElement('div');
@@ -123,15 +150,17 @@ export async function exportCanvasPagesToPdf(
       hotfixes: ['px_scaling'],
     });
 
+    const ratio = getAdaptivePixelRatio(pages.length);
     for (let i = 0; i < pages.length; i++) {
       const pageNode = buildOffscreenPageNode(pages[i], dims.width, dims.height);
       host.innerHTML = '';
       host.appendChild(pageNode);
+      await waitForNodeImages(pageNode);
 
       const dataUrl = await toPng(pageNode, {
         width: dims.width,
         height: dims.height,
-        pixelRatio: 2,
+        pixelRatio: ratio,
         cacheBust: true,
       });
 
@@ -139,13 +168,16 @@ export async function exportCanvasPagesToPdf(
         pdf.addPage([dims.width, dims.height], isLandscape ? 'landscape' : 'portrait');
       }
       pdf.addImage(dataUrl, 'PNG', 0, 0, dims.width, dims.height);
+      if (i > 0 && i % 4 === 0) {
+        await new Promise((r) => window.setTimeout(r, 16));
+      }
     }
 
     const safeName = (title || 'SlaydCanva').trim().replace(/[\\/:*?"<>|]/g, '_');
     const fileName = `${safeName}.pdf`;
     const blob = pdf.output('blob');
     if (options?.download !== false) {
-      pdf.save(fileName);
+      await triggerSafeFileDownload({ blob, fileName });
     }
     return { blob, fileName };
   } finally {
@@ -171,21 +203,19 @@ export async function exportCanvasPageToPng(
   try {
     const pageNode = buildOffscreenPageNode(page, dims.width, dims.height);
     host.appendChild(pageNode);
+    await waitForNodeImages(pageNode);
     const dataUrl = await toPng(pageNode, {
       width: dims.width,
       height: dims.height,
-      pixelRatio: 2,
+      pixelRatio: getAdaptivePixelRatio(1),
       cacheBust: true,
     });
     const safeName = (title || 'SlaydCanva').trim().replace(/[\\/:*?"<>|]/g, '_');
     const fileName = `${safeName}.png`;
-    if (options?.download !== false) {
-      const a = document.createElement('a');
-      a.href = dataUrl;
-      a.download = fileName;
-      a.click();
-    }
     const blob = await (await fetch(dataUrl)).blob();
+    if (options?.download !== false) {
+      await triggerSafeFileDownload({ blob, fileName });
+    }
     return { blob, fileName };
   } finally {
     document.body.removeChild(host);
@@ -265,6 +295,7 @@ export async function exportWordElementToPdf(
         };
 
         let pdfPageCount = 0;
+        const wordRatio = getAdaptivePixelRatio(nonEmptySections.length * 2);
 
         for (const secNodes of nonEmptySections) {
           let current = createA4PageShell();
@@ -278,16 +309,20 @@ export async function exportWordElementToPdf(
             // Check if adding this node overflows printable A4 height
             if (current.inner.scrollHeight > maxInnerHeight && current.inner.children.length > 1) {
               current.inner.removeChild(cloned);
+              await waitForNodeImages(current.shell);
               const pagePng = await toPng(current.shell, {
                 width: pageW,
                 height: pageH,
                 backgroundColor: '#FFFFFF',
-                pixelRatio: 2,
+                pixelRatio: wordRatio,
                 cacheBust: true,
               });
               if (pdfPageCount > 0) pdf.addPage([pageW, pageH], 'portrait');
               pdf.addImage(pagePng, 'PNG', 0, 0, pageW, pageH);
               pdfPageCount += 1;
+              if (pdfPageCount % 4 === 0) {
+                await new Promise((r) => window.setTimeout(r, 16));
+              }
 
               current = createA4PageShell();
               host.innerHTML = '';
@@ -297,11 +332,12 @@ export async function exportWordElementToPdf(
           }
 
           if (current.inner.children.length > 0) {
+            await waitForNodeImages(current.shell);
             const pagePng = await toPng(current.shell, {
               width: pageW,
               height: pageH,
               backgroundColor: '#FFFFFF',
-              pixelRatio: 2,
+              pixelRatio: wordRatio,
               cacheBust: true,
             });
             if (pdfPageCount > 0) pdf.addPage([pageW, pageH], 'portrait');
@@ -314,7 +350,7 @@ export async function exportWordElementToPdf(
         const fileName = `${safeName}.pdf`;
         const blob = pdf.output('blob');
         if (options?.download !== false) {
-          pdf.save(fileName);
+          await triggerSafeFileDownload({ blob, fileName });
         }
         return { blob, fileName };
       } finally {
@@ -326,7 +362,7 @@ export async function exportWordElementToPdf(
   // Fallback raw capture
   const dataUrl = await toPng(element, {
     backgroundColor: '#FFFFFF',
-    pixelRatio: 2,
+    pixelRatio: getAdaptivePixelRatio(4),
     cacheBust: true,
   });
 
@@ -357,7 +393,7 @@ export async function exportWordElementToPdf(
   const fileName = `${safeName}.pdf`;
   const blob = pdf.output('blob');
   if (options?.download !== false) {
-    pdf.save(fileName);
+    await triggerSafeFileDownload({ blob, fileName });
   }
   return { blob, fileName };
 }

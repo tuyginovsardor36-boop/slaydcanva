@@ -64,7 +64,7 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
               activeTab === 'files' ? 'text-white' : 'text-zinc-400'
             }`}
           >
-            Fayllar
+            Fayllarim
           </span>
         </button>
 

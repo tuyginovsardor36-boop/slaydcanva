@@ -486,12 +486,12 @@ export const AiServicesView: React.FC<AiServicesViewProps> = ({
     setPipelineStep(1);
     setSplitStatusText(null);
 
-    const isSplitPptx = isPptxService && effectiveSlideCount > 10;
-    const isFourPartPptx = isPptxService && effectiveSlideCount > 16;
-    const isSplitCanvas = isAiCanvasService && effectiveCanvasCount > 6;
+    const isSplitPptx = isPptxService && effectiveSlideCount > 8;
+    const isFourPartPptx = isPptxService && effectiveSlideCount > 13;
+    const isSplitCanvas = isAiCanvasService && effectiveCanvasCount > 4;
     const isSplitWord = isAcademicWordService;
     const isSplitRequest = isSplitPptx || isSplitCanvas || isSplitWord;
-    setIsFourStageJob(isSplitWord || isFourPartPptx);
+    setIsFourStageJob(isSplitWord || isFourPartPptx || (isAiCanvasService && effectiveCanvasCount > 8));
 
     const stepTimer1 = window.setTimeout(() => {
       if (!isSplitRequest) setPipelineStep(2);
@@ -503,14 +503,17 @@ export const AiServicesView: React.FC<AiServicesViewProps> = ({
     const activeControllerRef: { current: AbortController | null } = { current: null };
     let isCancelled = false;
 
-    const postGenerate = async (bodyPayload: Record<string, unknown>, allowRetry = false) => {
+    const postGenerate = async (
+      bodyPayload: Record<string, unknown>,
+      allowRetry: boolean | 'http-only' = false
+    ) => {
       let lastError: unknown;
       const maxAttempts = allowRetry ? 2 : 1;
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
         if (isCancelled) throw new Error("So'rov bekor qilindi.");
         const ctrl = new AbortController();
         activeControllerRef.current = ctrl;
-        const timer = window.setTimeout(() => ctrl.abort(), 52_000);
+        const timer = window.setTimeout(() => ctrl.abort(), 75_000);
         try {
           const response = await fetch('/api/ai/generate', {
             method: 'POST',
@@ -547,7 +550,7 @@ export const AiServicesView: React.FC<AiServicesViewProps> = ({
           return payload as Record<string, unknown>;
         } catch (err) {
           lastError = err;
-          if (attempt < maxAttempts) {
+          if (attempt < maxAttempts && allowRetry === true && !(err instanceof Error && err.name === 'AbortError' && isCancelled)) {
             await new Promise((r) => setTimeout(r, 1500));
             continue;
           }
@@ -755,31 +758,34 @@ export const AiServicesView: React.FC<AiServicesViewProps> = ({
         docTitle = built.docTitle;
       } else if (isSplitPptx) {
         const totalContentCount = Math.max(2, effectiveSlideCount - 3);
-        const chunkCounts = isFourPartPptx
-          ? (() => {
-              const base = Math.floor(totalContentCount / 4);
-              let rem = totalContentCount % 4;
-              return [0, 1, 2, 3].map(() => {
-                const extra = rem > 0 ? 1 : 0;
-                if (rem > 0) rem -= 1;
-                return base + extra;
-              }).filter((c) => c > 0);
-            })()
-          : [Math.ceil(totalContentCount / 2), totalContentCount - Math.ceil(totalContentCount / 2)];
+        const targetPartSize = totalContentCount <= 10 ? Math.ceil(totalContentCount / 2) : 5;
+        const numChunks = Math.min(6, Math.max(2, Math.ceil(totalContentCount / targetPartSize)));
+        const chunkCounts = (() => {
+          const base = Math.floor(totalContentCount / numChunks);
+          let rem = totalContentCount % numChunks;
+          return Array.from({ length: numChunks }, () => {
+            const extra = rem > 0 ? 1 : 0;
+            if (rem > 0) rem -= 1;
+            return base + extra;
+          }).filter((c) => c > 0);
+        })();
 
         const part1Count = chunkCounts[0];
         setPipelineStep(1);
         setSplitStatusText(
-          isFourPartPptx
+          chunkCounts.length > 2
             ? `1/${chunkCounts.length}-qism: Titul, reja va dastlabki slaydlar tuzilmoqda...`
             : '1-bosqich: Asosiy reja va birinchi qism tuzilmoqda...'
         );
-        const part1Res = await postGenerate({
-          ...baseBody,
-          slideCount: effectiveSlideCount,
-          splitMode: 'part1',
-          part1Count,
-        });
+        const part1Res = await postGenerate(
+          {
+            ...baseBody,
+            slideCount: effectiveSlideCount,
+            splitMode: 'part1',
+            part1Count,
+          },
+          'http-only'
+        );
         if (part1Res.serverCharged) {
           serverCharged = true;
           if (typeof part1Res.newBalance === 'number') newBalance = part1Res.newBalance;
@@ -798,8 +804,8 @@ export const AiServicesView: React.FC<AiServicesViewProps> = ({
         for (let idx = 1; idx < chunkCounts.length; idx += 1) {
           const need = chunkCounts[idx];
           const isFinal = idx === chunkCounts.length - 1;
-          const modeName = (`part${idx + 1}`) as 'part2' | 'part3' | 'part4';
-          setPipelineStep(Math.min(4, idx + 1));
+          const modeName = (`part${idx + 1}`) as 'part2' | 'part3' | 'part4' | 'part5' | 'part6';
+          setPipelineStep(Math.min(4, Math.max(2, Math.ceil(((idx + 1) / chunkCounts.length) * 4))));
           setSplitStatusText(
             `${idx + 1}/${chunkCounts.length}-qism: ${isFinal ? 'Yakuniy slaydlar va manbalar' : 'Davomiy slaydlar'} yaratilmoqda...`
           );
@@ -840,7 +846,7 @@ export const AiServicesView: React.FC<AiServicesViewProps> = ({
           }
         }
 
-        setPipelineStep(isFourPartPptx ? 4 : 3);
+        setPipelineStep(chunkCounts.length > 2 ? 4 : 3);
         setSplitStatusText('Dizayn va sahifalar jamlanmoqda...');
 
         const topicPhotos = Array.isArray(part1Data.topicImages) ? part1Data.topicImages : [];
@@ -856,16 +862,29 @@ export const AiServicesView: React.FC<AiServicesViewProps> = ({
             : buildWhiteCardDeck(mergedDeck, meta);
         docTitle = mergedDeck.deckTitle || cleanTopic;
       } else if (isSplitCanvas) {
-        const part1Count = Math.ceil(effectiveCanvasCount / 2);
-        const part2Count = effectiveCanvasCount - part1Count;
+        const numCanvasChunks = Math.min(6, Math.max(2, Math.ceil(effectiveCanvasCount / 4)));
+        const canvasChunkCounts = (() => {
+          const base = Math.floor(effectiveCanvasCount / numCanvasChunks);
+          let rem = effectiveCanvasCount % numCanvasChunks;
+          return Array.from({ length: numCanvasChunks }, () => {
+            const extra = rem > 0 ? 1 : 0;
+            if (rem > 0) rem -= 1;
+            return base + extra;
+          }).filter((c) => c > 0);
+        })();
+        const part1Count = canvasChunkCounts[0];
 
-        setSplitStatusText('1-bosqich: Vizual kompozitsiyalar chizilmoqda...');
-        const part1Res = await postGenerate({
-          ...baseBody,
-          slideCount: effectiveCanvasCount,
-          splitMode: 'part1',
-          part1Count,
-        });
+        setPipelineStep(1);
+        setSplitStatusText(`1/${canvasChunkCounts.length}-qism: Vizual kompozitsiyalar chizilmoqda...`);
+        const part1Res = await postGenerate(
+          {
+            ...baseBody,
+            slideCount: effectiveCanvasCount,
+            splitMode: 'part1',
+            part1Count,
+          },
+          'http-only'
+        );
         if (part1Res.serverCharged) {
           serverCharged = true;
           if (typeof part1Res.newBalance === 'number') newBalance = part1Res.newBalance;
@@ -880,53 +899,63 @@ export const AiServicesView: React.FC<AiServicesViewProps> = ({
           pages?: CanvasPage[];
           unusedTopicImages?: string[];
         };
-        const pages1 = Array.isArray(part1Data?.pages) ? part1Data.pages : [];
-        const unusedPhotos = Array.isArray(part1Data?.unusedTopicImages)
-          ? part1Data.unusedTopicImages
+        let accumulatedPages: CanvasPage[] = Array.isArray(part1Data?.pages)
+          ? [...part1Data.pages]
+          : [];
+        let unusedPhotos = Array.isArray(part1Data?.unusedTopicImages)
+          ? [...part1Data.unusedTopicImages]
           : [];
 
-        setPipelineStep(2);
-        setSplitStatusText('2-bosqich: Qolgan sahifalar dizayni yaratilmoqda...');
-        const part2Res = await postGenerate(
-          {
-            ...baseBody,
-            slideCount: effectiveCanvasCount,
-            splitMode: 'part2',
-            splitJobToken,
-            part1Count,
-            part2Count,
-            pendingPhotoSlots: unusedPhotos.length,
-            previousContext: {
-              deckTitle: part1Data?.deckTitle || cleanTopic,
-              previousSlides: pages1.map((p, idx) => ({
-                tag: String(idx + 1).padStart(2, '0'),
-                title: p.title || `Bo'lim ${idx + 1}`,
-              })),
+        for (let idx = 1; idx < canvasChunkCounts.length; idx += 1) {
+          const need = canvasChunkCounts[idx];
+          const modeName = (`part${idx + 1}`) as 'part2' | 'part3' | 'part4' | 'part5' | 'part6';
+          setPipelineStep(Math.min(4, Math.max(2, Math.ceil(((idx + 1) / canvasChunkCounts.length) * 4))));
+          setSplitStatusText(`${idx + 1}/${canvasChunkCounts.length}-qism: Qolgan sahifalar dizayni chizilmoqda...`);
+          const nextRes = await postGenerate(
+            {
+              ...baseBody,
+              slideCount: effectiveCanvasCount,
+              splitMode: modeName,
+              splitJobToken,
+              part1Count: accumulatedPages.length,
+              part2Count: need,
+              pendingPhotoSlots: unusedPhotos.length,
+              previousContext: {
+                deckTitle: part1Data?.deckTitle || cleanTopic,
+                previousSlides: accumulatedPages.map((p, sIdx) => ({
+                  tag: String(sIdx + 1).padStart(2, '0'),
+                  title: p.title || `Bo'lim ${sIdx + 1}`,
+                })),
+              },
             },
-          },
-          true
-        );
-        const part2Data = part2Res.data as { pages?: CanvasPage[] };
-        const rawPages2 = Array.isArray(part2Data?.pages) ? part2Data.pages : [];
+            true
+          );
+          const nextData = nextRes.data as { pages?: CanvasPage[] };
+          const rawNextPages = Array.isArray(nextData?.pages) ? nextData.pages : [];
+          let usedInChunk = 0;
+          const resolvedChunkPages = rawNextPages.map((p) => ({
+            ...p,
+            elements: p.elements
+              .map((el) => {
+                if (el.type === 'image' && typeof el.src === 'string' && el.src.startsWith('__PENDING_PHOTO_')) {
+                  const slotIdx = Number(el.src.replace('__PENDING_PHOTO_', '').replace('__', '')) || 0;
+                  const realSrc = unusedPhotos[slotIdx] || unusedPhotos[0];
+                  usedInChunk += 1;
+                  return realSrc ? { ...el, src: realSrc } : el;
+                }
+                return el;
+              })
+              .filter((el) => !(el.type === 'image' && typeof el.src === 'string' && el.src.startsWith('__PENDING_PHOTO_'))),
+          }));
+          if (usedInChunk > 0) {
+            unusedPhotos = unusedPhotos.slice(usedInChunk);
+          }
+          accumulatedPages = [...accumulatedPages, ...resolvedChunkPages];
+        }
 
-        setPipelineStep(3);
+        setPipelineStep(canvasChunkCounts.length > 2 ? 4 : 3);
         setSplitStatusText('Sahifalar yakuniy holatga keltirilmoqda...');
-
-        const resolvedPages2 = rawPages2.map((p) => ({
-          ...p,
-          elements: p.elements
-            .map((el) => {
-              if (el.type === 'image' && typeof el.src === 'string' && el.src.startsWith('__PENDING_PHOTO_')) {
-                const idx = Number(el.src.replace('__PENDING_PHOTO_', '').replace('__', '')) || 0;
-                const realSrc = unusedPhotos[idx] || unusedPhotos[0];
-                return realSrc ? { ...el, src: realSrc } : el;
-              }
-              return el;
-            })
-            .filter((el) => !(el.type === 'image' && typeof el.src === 'string' && el.src.startsWith('__PENDING_PHOTO_'))),
-        }));
-
-        builtPages = [...pages1, ...resolvedPages2].slice(0, effectiveCanvasCount);
+        builtPages = accumulatedPages.slice(0, effectiveCanvasCount);
         docTitle = part1Data?.deckTitle || cleanTopic;
       } else {
         const payload = await postGenerate({

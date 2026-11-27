@@ -3,12 +3,12 @@ import {
   Download,
   FileText,
   FileType2,
+  FolderOpen,
   Headphones,
   ImageDown,
   Loader2,
   Presentation,
   RotateCcw,
-  Search,
   Shield,
   Sparkles,
   User,
@@ -34,6 +34,7 @@ interface TopBarProps {
   onResetCurrent: () => void;
   onOpenTopUp?: () => void;
   onOpenProfile?: () => void;
+  onOpenFiles?: () => void;
   onOpenSupport?: () => void;
   isAdmin?: boolean;
   staffRole?: StaffRole;
@@ -44,7 +45,7 @@ interface TopBarProps {
 
 const MOBILE_TAB_TITLES: Record<MobileTab, string> = {
   home: 'Bosh sahifa',
-  files: 'Fayllar va Amaliyotlar',
+  files: 'Fayllarim',
   editor: 'Hujjat muharriri',
   topup: "Balans to'ldirish",
   balance: 'Balans',
@@ -67,6 +68,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   onResetCurrent,
   onOpenTopUp,
   onOpenProfile,
+  onOpenFiles,
   onOpenSupport,
   isAdmin = false,
   staffRole = 'user',
@@ -78,7 +80,7 @@ export const TopBar: React.FC<TopBarProps> = ({
     mode === 'pptx' ? 'PPTX yuklash' : mode === 'word' ? 'Word yuklash' : 'PDF yuklash';
 
   const mobileShortLabel =
-    mode === 'pptx' ? 'PPTX' : mode === 'word' ? 'Word' : 'PDF';
+    mode === 'pptx' ? 'PPTX yuklash' : mode === 'word' ? 'Word yuklash' : 'PDF yuklash';
 
   return (
     <header className="h-[48px] md:h-[54px] shrink-0 bg-[#111113] text-white border-b border-zinc-800 px-3 md:px-4 flex items-center justify-between gap-3 md:gap-5 z-20">
@@ -197,20 +199,17 @@ export const TopBar: React.FC<TopBarProps> = ({
                 )}
               </button>
             )}
-            <button
-              type="button"
-              onClick={() => {
-                const q = prompt("Aqlli qidiruv (Xizmatlar, loyihalar va mavzular bo'yicha qidirish):");
-                if (q) {
-                  onDesktopViewChange('services');
-                }
-              }}
-              title="Aqlli qidiruv"
-              className="hidden sm:flex items-center gap-1.5 text-xs bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 rounded-md px-2.5 py-1.5 text-zinc-400 hover:text-white transition-colors"
-            >
-              <Search className="w-3.5 h-3.5 text-red-500" />
-              <span>Qidirish...</span>
-            </button>
+            {onOpenFiles && (
+              <button
+                type="button"
+                onClick={onOpenFiles}
+                title="Saqlangan fayllarim"
+                className="flex items-center gap-1.5 text-xs bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 rounded-md px-2.5 py-1.5 text-zinc-200 hover:text-white transition-colors"
+              >
+                <FolderOpen className="w-3.5 h-3.5 text-red-500" />
+                <span>Fayllarim</span>
+              </button>
+            )}
             {onOpenSupport && (
               <button
                 type="button"
@@ -279,10 +278,25 @@ export const TopBar: React.FC<TopBarProps> = ({
                 type="button"
                 disabled={isExporting}
                 onClick={onExportSecondaryPdf}
-                className="hidden md:flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-zinc-200 bg-zinc-900 border border-zinc-700 hover:bg-zinc-800 rounded-md transition-colors disabled:opacity-50 whitespace-nowrap shrink-0"
+                title="PDF shaklida yuklab olish"
+                className={`${
+                  mobileTab === 'editor' ? 'flex' : 'hidden md:flex'
+                } items-center gap-1 px-2 md:px-2.5 py-1.5 text-xs font-medium text-zinc-100 bg-zinc-900 border border-zinc-700 hover:bg-zinc-800 rounded-md transition-colors disabled:opacity-50 whitespace-nowrap shrink-0`}
               >
                 <Download className="w-3.5 h-3.5" />
                 <span>PDF</span>
+              </button>
+            )}
+
+            {onOpenFiles && (
+              <button
+                type="button"
+                onClick={onOpenFiles}
+                title="Fayllarim"
+                className="hidden md:flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-zinc-200 bg-zinc-900 border border-zinc-700 hover:bg-zinc-800 rounded-md transition-colors whitespace-nowrap shrink-0"
+              >
+                <FolderOpen className="w-3.5 h-3.5 text-red-400" />
+                <span>Fayllarim</span>
               </button>
             )}
 
@@ -292,7 +306,7 @@ export const TopBar: React.FC<TopBarProps> = ({
               onClick={onExportPrimary}
               className={`${
                 mobileTab === 'editor' ? 'flex' : 'hidden md:flex'
-              } items-center gap-1.5 px-3 md:px-3.5 py-1.5 text-xs font-medium text-white bg-red-600 hover:bg-red-500 rounded-md transition-colors disabled:opacity-60 whitespace-nowrap shrink-0`}
+              } items-center gap-1.5 px-3 md:px-3.5 py-1.5 text-xs font-semibold text-white bg-red-600 hover:bg-red-500 rounded-md shadow-xs transition-colors disabled:opacity-60 whitespace-nowrap shrink-0`}
             >
               {isExporting ? (
                 <Loader2 className="w-3.5 h-3.5 animate-spin" />

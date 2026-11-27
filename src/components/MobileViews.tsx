@@ -5,6 +5,7 @@ import {
   Check,
   CheckCircle2,
   Copy,
+  Download,
   ExternalLink,
   FileText,
   FileType2,
@@ -44,12 +45,16 @@ import {
   UserProfile,
   WorkspaceMode,
 } from '../types/editor';
+import { triggerSafeFileDownload } from '../utils/safeDownload';
 import {
+  deleteUserSavedFile,
   fetchSupportInfo,
   fetchUserSavedFiles,
   formatTelegramDisplayName,
+  getFileDownloadLink,
   getTelegramAuthHeaders,
   redeemPromoCode,
+  resendUserFileToTelegram,
   resetUserSupportChat,
   sendUserSupportMessage,
   TelegramAccountResponse,
@@ -1119,6 +1124,8 @@ interface FilesAndOpsViewProps {
   activeProjectId?: string;
   transactions: BalanceTransaction[];
   syncingProject?: boolean;
+  refreshKey?: number;
+  onNotify?: (type: 'ok' | 'err', text: string) => void;
   onSaveProjectNow?: () => void;
   onLoadCloudProject?: (id: string) => void;
   onDeleteCloudProject?: (id: string) => void;
@@ -1135,6 +1142,8 @@ export const FilesAndOpsView: React.FC<FilesAndOpsViewProps> = ({
   activeProjectId,
   transactions,
   syncingProject = false,
+  refreshKey = 0,
+  onNotify,
   onSaveProjectNow,
   onLoadCloudProject,
   onDeleteCloudProject,
@@ -1144,6 +1153,9 @@ export const FilesAndOpsView: React.FC<FilesAndOpsViewProps> = ({
 }) => {
   const [files, setFiles] = useState<UserFileRecord[]>([]);
   const [loadingFiles, setLoadingFiles] = useState(false);
+  const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  const [sendingTgId, setSendingTgId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const refreshFiles = useCallback(async () => {
     if (!telegramSessionToken) return;
@@ -1160,7 +1172,64 @@ export const FilesAndOpsView: React.FC<FilesAndOpsViewProps> = ({
 
   useEffect(() => {
     void refreshFiles();
-  }, [refreshFiles]);
+  }, [refreshFiles, refreshKey]);
+
+  const handleDownloadSavedFile = async (f: UserFileRecord) => {
+    if (!telegramSessionToken || downloadingId) return;
+    setDownloadingId(f.id);
+    try {
+      const linkRes = await getFileDownloadLink(f.id, telegramSessionToken);
+      if (!linkRes.ok || !linkRes.downloadPath) {
+        onNotify?.('err', linkRes.error || 'Faylni yuklab olish havolasi olinmadi.');
+        return;
+      }
+      const dlMode = await triggerSafeFileDownload({
+        fileName: f.fileName,
+        serverDownloadPath: linkRes.downloadPath,
+      });
+      if (dlMode === 'browser_url' || dlMode === 'browser_blob') {
+        onNotify?.('ok', `${f.fileName} yuklab olinmoqda.`);
+      } else {
+        onNotify?.('ok', `${f.fileName} yuklab olish oynasi ochildi.`);
+      }
+    } catch {
+      onNotify?.('err', 'Faylni yuklab olishda xatolik yuz berdi.');
+    } finally {
+      setDownloadingId(null);
+    }
+  };
+
+  const handleResendTelegram = async (f: UserFileRecord) => {
+    if (!telegramSessionToken || sendingTgId) return;
+    setSendingTgId(f.id);
+    try {
+      const res = await resendUserFileToTelegram(f.id, telegramSessionToken);
+      if (!res.ok) {
+        onNotify?.('err', res.error || 'Telegram botga yuborib bo‘lmadi.');
+        return;
+      }
+      setFiles((prev) => prev.map((item) => (item.id === f.id ? { ...item, sentToTelegram: true } : item)));
+      onNotify?.('ok', `${f.fileName} Telegram botga yuborildi.`);
+    } finally {
+      setSendingTgId(null);
+    }
+  };
+
+  const handleDeleteFile = async (f: UserFileRecord) => {
+    if (!telegramSessionToken || deletingId) return;
+    setDeletingId(f.id);
+    try {
+      const res = await deleteUserSavedFile(f.id, telegramSessionToken);
+      if (!res.ok) {
+        onNotify?.('err', res.error || "Faylni o'chirib bo'lmadi.");
+        return;
+      }
+      setFiles((prev) => prev.filter((item) => item.id !== f.id));
+      onNotify?.('ok', "Fayl o'chirildi.");
+    } finally {
+      setDeletingId(null);
+    }
+  };
 
   const formatFileSize = (bytes: number) => {
     if (!bytes) return '—';
@@ -1175,11 +1244,11 @@ export const FilesAndOpsView: React.FC<FilesAndOpsViewProps> = ({
         <div className="flex items-start justify-between gap-2">
           <div>
             <div className="flex items-center gap-1.5 text-sm font-semibold">
-              <Send className="w-4 h-4 text-sky-400" />
-              <span>Telegramda saqlangan fayllar</span>
+              <FolderOpen className="w-4 h-4 text-red-400" />
+              <span>Fayllarim va Bot yetkazib berish</span>
             </div>
             <p className="text-[11px] text-zinc-400 mt-0.5 leading-snug">
-              Tayyorlangan PPTX, PDF, Word va PNG fayllar avtomatik ravishda Telegram bot chatiga yuboriladi va shu yerda qayd etiladi.
+              AI orqali tayyorlangan Slayd, Mustaqil ish, Kurs ishi, Esse va eksport qilingan fayllar shu yerda saqlanadi va Telegram bot chatiga ham yuboriladi.
             </p>
           </div>
           {botUsername && (
@@ -1202,8 +1271,8 @@ export const FilesAndOpsView: React.FC<FilesAndOpsViewProps> = ({
               onClick={onSendCurrentToTelegram}
               className="py-2 px-3 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors"
             >
-              <Send className="w-3.5 h-3.5" />
-              <span>Joriy faylni TG ga</span>
+              <Download className="w-3.5 h-3.5" />
+              <span>Joriy faylni yuklash</span>
             </button>
           )}
           <button
@@ -1217,13 +1286,13 @@ export const FilesAndOpsView: React.FC<FilesAndOpsViewProps> = ({
         </div>
       </section>
 
-      {/* Telegram-exported files list */}
+      {/* Saved & Telegram-exported files list */}
       <section className="max-w-md mx-auto bg-white border border-zinc-200 rounded-2xl overflow-hidden">
         <div className="px-4 py-3 border-b border-zinc-200 flex items-center justify-between gap-2">
           <div className="flex items-center gap-1.5">
             <FolderOpen className="w-4 h-4 text-red-600" />
             <h2 className="text-sm font-semibold text-zinc-900">
-              Eksport qilingan fayllar ({files.length})
+              Saqlangan fayllar ({files.length})
             </h2>
           </div>
           <button
@@ -1243,38 +1312,94 @@ export const FilesAndOpsView: React.FC<FilesAndOpsViewProps> = ({
             </div>
           ) : files.length === 0 ? (
             <div className="p-5 text-center text-xs text-zinc-500">
-              Hali Telegramga yuborilgan fayllar yo‘q. AI xizmat yoki muharrirdan yuklab oling — shu yerda va Telegramda saqlanadi.
+              Hali saqlangan fayllar yo‘q. AI xizmat yoki muharrirdan hujjat yarating — shu yerda va Telegram botda avtomatik paydo bo‘ladi.
             </div>
           ) : (
-            files.map((f) => (
-              <div key={f.id} className="px-4 py-3 flex items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="text-xs font-semibold text-zinc-900 truncate">{f.fileName}</div>
-                  <div className="text-[11px] font-mono text-zinc-500 flex items-center gap-1.5 mt-0.5">
-                    <span className="uppercase font-semibold text-red-600">{f.format}</span>
-                    <span>·</span>
-                    <span>{formatFileSize(f.sizeBytes)}</span>
-                    <span>·</span>
-                    <span>{new Date(f.createdAt).toLocaleDateString('uz-UZ')}</span>
+            files.map((f) => {
+              const canDownload = f.hasFile !== false;
+              const isDl = downloadingId === f.id;
+              const isTg = sendingTgId === f.id;
+              const isDel = deletingId === f.id;
+              return (
+                <div key={f.id} className="px-4 py-3 space-y-2">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="text-xs font-semibold text-zinc-900 break-words">{f.fileName}</div>
+                      <div className="text-[11px] font-mono text-zinc-500 flex flex-wrap items-center gap-1.5 mt-0.5">
+                        <span className="uppercase font-bold text-red-600">{f.format}</span>
+                        <span>·</span>
+                        <span>{formatFileSize(f.sizeBytes)}</span>
+                        <span>·</span>
+                        <span>{new Date(f.createdAt).toLocaleDateString('uz-UZ')}</span>
+                        {f.serviceTitle && (
+                          <>
+                            <span>·</span>
+                            <span className="font-sans text-zinc-600">{f.serviceTitle}</span>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                    <span
+                      className={`px-2 py-0.5 rounded-full text-[10px] font-medium shrink-0 ${
+                        f.sentToTelegram
+                          ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                          : 'bg-amber-50 text-amber-700 border border-amber-200'
+                      }`}
+                    >
+                      {f.sentToTelegram ? 'Botda bor' : 'Saqlangan'}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-2 pt-0.5">
+                    {canDownload && (
+                      <button
+                        type="button"
+                        disabled={isDl}
+                        onClick={() => void handleDownloadSavedFile(f)}
+                        className="flex-1 py-1.5 px-3 rounded-lg bg-[#111113] hover:bg-zinc-800 disabled:opacity-50 text-white text-[11px] font-semibold flex items-center justify-center gap-1.5 transition-colors"
+                      >
+                        {isDl ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Download className="w-3.5 h-3.5 text-red-400" />
+                        )}
+                        <span>{isDl ? 'Tayyorlanmoqda...' : 'Yuklab olish'}</span>
+                      </button>
+                    )}
+
+                    {canDownload && (
+                      <button
+                        type="button"
+                        disabled={isTg}
+                        onClick={() => void handleResendTelegram(f)}
+                        className="py-1.5 px-3 rounded-lg bg-sky-50 hover:bg-sky-100 border border-sky-200 text-sky-700 text-[11px] font-semibold flex items-center justify-center gap-1 shrink-0 disabled:opacity-50"
+                      >
+                        {isTg ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Send className="w-3.5 h-3.5" />
+                        )}
+                        <span>Botga</span>
+                      </button>
+                    )}
+
+                    <button
+                      type="button"
+                      disabled={isDel}
+                      onClick={() => void handleDeleteFile(f)}
+                      className="p-1.5 rounded-lg border border-zinc-200 text-zinc-400 hover:text-red-600 hover:border-red-200 disabled:opacity-50"
+                      aria-label="Faylni o'chirish"
+                    >
+                      {isDel ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Trash2 className="w-3.5 h-3.5" />
+                      )}
+                    </button>
                   </div>
                 </div>
-                {botUsername ? (
-                  <a
-                    href={`https://t.me/${botUsername}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="px-2.5 py-1.5 rounded-lg bg-sky-50 border border-sky-200 text-sky-700 text-[11px] font-medium shrink-0 flex items-center gap-1"
-                  >
-                    <Send className="w-3 h-3" />
-                    <span>TG Chat</span>
-                  </a>
-                ) : (
-                  <span className="text-[11px] text-emerald-700 font-medium shrink-0">
-                    Saqlangan
-                  </span>
-                )}
-              </div>
-            ))
+              );
+            })
           )}
         </div>
       </section>

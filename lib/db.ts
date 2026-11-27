@@ -226,10 +226,17 @@ export interface DbSecurityLog {
 export interface DbUserFileRecord {
   id: string;
   telegramId: string;
+  userFirstName?: string;
+  userUsername?: string;
   fileName: string;
   format: 'pptx' | 'pdf' | 'docx' | 'png';
   sizeBytes: number;
   sentToTelegram: boolean;
+  serviceId?: string;
+  serviceTitle?: string;
+  mimeType?: string;
+  hasFile?: boolean;
+  fileBase64?: string;
   createdAt: number;
 }
 
@@ -577,9 +584,18 @@ export async function ensureDbSchema(): Promise<boolean> {
           format TEXT NOT NULL,
           size_bytes INTEGER NOT NULL DEFAULT 0,
           sent_to_telegram BOOLEAN NOT NULL DEFAULT TRUE,
+          service_id TEXT,
+          service_title TEXT,
+          mime_type TEXT,
+          file_base64 TEXT,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
       `;
+
+      await sql`ALTER TABLE user_files ADD COLUMN IF NOT EXISTS service_id TEXT`;
+      await sql`ALTER TABLE user_files ADD COLUMN IF NOT EXISTS service_title TEXT`;
+      await sql`ALTER TABLE user_files ADD COLUMN IF NOT EXISTS mime_type TEXT`;
+      await sql`ALTER TABLE user_files ADD COLUMN IF NOT EXISTS file_base64 TEXT`;
 
       await sql`
         CREATE INDEX IF NOT EXISTS idx_user_files_tg_created
@@ -2136,6 +2152,7 @@ export async function dbGetUserDetailAdmin(telegramId: string): Promise<{
   transactions: DbTransaction[];
   orders: DbPaymentOrder[];
   projects: DbProjectSummary[];
+  files: DbUserFileRecord[];
   referrals: Array<{ inviteeId: string; inviterBonus: number; createdAt: number }>;
 } | null> {
   const sql = getSql();
@@ -2159,7 +2176,7 @@ export async function dbGetUserDetailAdmin(telegramId: string): Promise<{
     const r = uRows[0];
     if (!r) return null;
 
-    const [transactions, oRows, projects, refRows] = await Promise.all([
+    const [transactions, oRows, projects, userFiles, refRows] = await Promise.all([
       dbListUserTransactions(telegramId, 50),
       sql`
         SELECT order_id, telegram_id, chat_id, amount, pay_url, method, status, is_test, credited,
@@ -2170,6 +2187,7 @@ export async function dbGetUserDetailAdmin(telegramId: string): Promise<{
         LIMIT 30
       ` as Promise<Array<Record<string, unknown>>>,
       dbListProjects(telegramId, 30),
+      dbListUserFiles(telegramId, 30),
       sql`
         SELECT invitee_id, inviter_bonus, EXTRACT(EPOCH FROM created_at) * 1000 AS created_ms
         FROM referrals
@@ -2214,6 +2232,7 @@ export async function dbGetUserDetailAdmin(telegramId: string): Promise<{
         createdAt: Number(o.created_ms) || Date.now(),
       })),
       projects: projects || [],
+      files: userFiles || [],
       referrals: refRows.map((rf) => ({
         inviteeId: String(rf.invitee_id),
         inviterBonus: Number(rf.inviter_bonus) || 0,
@@ -3207,19 +3226,47 @@ export async function dbRecordUserFile(entry: Omit<DbUserFileRecord, 'createdAt'
   if (!sql || !(await ensureDbSchema())) return false;
   try {
     await sql`
-      INSERT INTO user_files (id, telegram_id, file_name, format, size_bytes, sent_to_telegram)
+      INSERT INTO user_files (
+        id, telegram_id, file_name, format, size_bytes, sent_to_telegram,
+        service_id, service_title, mime_type, file_base64
+      )
       VALUES (
         ${entry.id},
         ${entry.telegramId},
         ${entry.fileName.slice(0, 140)},
         ${entry.format},
         ${Math.max(0, Math.round(entry.sizeBytes))},
-        ${entry.sentToTelegram}
+        ${entry.sentToTelegram},
+        ${entry.serviceId || null},
+        ${entry.serviceTitle ? entry.serviceTitle.slice(0, 120) : null},
+        ${entry.mimeType || null},
+        ${entry.fileBase64 || null}
       )
+      ON CONFLICT (id) DO UPDATE SET
+        file_name = EXCLUDED.file_name,
+        format = EXCLUDED.format,
+        size_bytes = EXCLUDED.size_bytes,
+        sent_to_telegram = EXCLUDED.sent_to_telegram,
+        service_id = COALESCE(EXCLUDED.service_id, user_files.service_id),
+        service_title = COALESCE(EXCLUDED.service_title, user_files.service_title),
+        mime_type = COALESCE(EXCLUDED.mime_type, user_files.mime_type),
+        file_base64 = COALESCE(EXCLUDED.file_base64, user_files.file_base64)
     `;
     return true;
   } catch (err) {
     console.error('[Neon dbRecordUserFile Error]', err);
+    return false;
+  }
+}
+
+export async function dbMarkUserFileSentTelegram(id: string, sentToTelegram: boolean): Promise<boolean> {
+  const sql = getSql();
+  if (!sql || !(await ensureDbSchema())) return false;
+  try {
+    await sql`UPDATE user_files SET sent_to_telegram = ${sentToTelegram} WHERE id = ${id}`;
+    return true;
+  } catch (err) {
+    console.error('[Neon dbMarkUserFileSentTelegram Error]', err);
     return false;
   }
 }
@@ -3230,6 +3277,8 @@ export async function dbListUserFiles(telegramId: string, limit = 50): Promise<D
   try {
     const rows = (await sql`
       SELECT id, telegram_id, file_name, format, size_bytes, sent_to_telegram,
+             service_id, service_title, mime_type,
+             (file_base64 IS NOT NULL AND file_base64 <> '') AS has_file,
              EXTRACT(EPOCH FROM created_at) * 1000 AS created_ms
       FROM user_files
       WHERE telegram_id = ${telegramId}
@@ -3243,10 +3292,117 @@ export async function dbListUserFiles(telegramId: string, limit = 50): Promise<D
       format: (r.format === 'pdf' || r.format === 'docx' || r.format === 'png' ? r.format : 'pptx') as DbUserFileRecord['format'],
       sizeBytes: Number(r.size_bytes) || 0,
       sentToTelegram: Boolean(r.sent_to_telegram),
+      serviceId: r.service_id ? String(r.service_id) : undefined,
+      serviceTitle: r.service_title ? String(r.service_title) : undefined,
+      mimeType: r.mime_type ? String(r.mime_type) : undefined,
+      hasFile: Boolean(r.has_file),
       createdAt: Number(r.created_ms) || Date.now(),
     }));
   } catch (err) {
     console.error('[Neon dbListUserFiles Error]', err);
+    return null;
+  }
+}
+
+export async function dbGetUserFileById(id: string): Promise<DbUserFileRecord | null> {
+  const sql = getSql();
+  if (!sql || !(await ensureDbSchema())) return null;
+  try {
+    const rows = (await sql`
+      SELECT id, telegram_id, file_name, format, size_bytes, sent_to_telegram,
+             service_id, service_title, mime_type, file_base64,
+             EXTRACT(EPOCH FROM created_at) * 1000 AS created_ms
+      FROM user_files
+      WHERE id = ${id}
+      LIMIT 1
+    `) as Array<Record<string, unknown>>;
+    const r = rows[0];
+    if (!r) return null;
+    const base64 = r.file_base64 ? String(r.file_base64) : undefined;
+    return {
+      id: String(r.id),
+      telegramId: String(r.telegram_id),
+      fileName: String(r.file_name),
+      format: (r.format === 'pdf' || r.format === 'docx' || r.format === 'png' ? r.format : 'pptx') as DbUserFileRecord['format'],
+      sizeBytes: Number(r.size_bytes) || 0,
+      sentToTelegram: Boolean(r.sent_to_telegram),
+      serviceId: r.service_id ? String(r.service_id) : undefined,
+      serviceTitle: r.service_title ? String(r.service_title) : undefined,
+      mimeType: r.mime_type ? String(r.mime_type) : undefined,
+      hasFile: Boolean(base64),
+      fileBase64: base64,
+      createdAt: Number(r.created_ms) || Date.now(),
+    };
+  } catch (err) {
+    console.error('[Neon dbGetUserFileById Error]', err);
+    return null;
+  }
+}
+
+export async function dbDeleteUserFile(id: string, telegramId?: string): Promise<boolean> {
+  const sql = getSql();
+  if (!sql || !(await ensureDbSchema())) return false;
+  try {
+    if (telegramId) {
+      await sql`DELETE FROM user_files WHERE id = ${id} AND telegram_id = ${telegramId}`;
+    } else {
+      await sql`DELETE FROM user_files WHERE id = ${id}`;
+    }
+    return true;
+  } catch (err) {
+    console.error('[Neon dbDeleteUserFile Error]', err);
+    return false;
+  }
+}
+
+export async function dbListAllUserFilesAdmin(
+  limit = 150,
+  query = '',
+  format = ''
+): Promise<DbUserFileRecord[] | null> {
+  const sql = getSql();
+  if (!sql || !(await ensureDbSchema())) return null;
+  try {
+    const q = query.trim().toLowerCase();
+    const fmt = format.trim().toLowerCase();
+    const rows = (await sql`
+      SELECT f.id, f.telegram_id, f.file_name, f.format, f.size_bytes, f.sent_to_telegram,
+             f.service_id, f.service_title, f.mime_type,
+             (f.file_base64 IS NOT NULL AND f.file_base64 <> '') AS has_file,
+             EXTRACT(EPOCH FROM f.created_at) * 1000 AS created_ms,
+             u.first_name AS user_first_name,
+             u.username AS user_username
+      FROM user_files f
+      LEFT JOIN users u ON u.telegram_id = f.telegram_id
+      WHERE (${fmt === ''} OR LOWER(f.format) = ${fmt})
+        AND (
+          ${q === ''}
+          OR LOWER(f.file_name) LIKE ${`%${q}%`}
+          OR LOWER(COALESCE(f.service_title, '')) LIKE ${`%${q}%`}
+          OR LOWER(COALESCE(u.first_name, '')) LIKE ${`%${q}%`}
+          OR LOWER(COALESCE(u.username, '')) LIKE ${`%${q}%`}
+          OR f.telegram_id LIKE ${`%${q}%`}
+        )
+      ORDER BY f.created_at DESC
+      LIMIT ${limit}
+    `) as Array<Record<string, unknown>>;
+    return rows.map((r) => ({
+      id: String(r.id),
+      telegramId: String(r.telegram_id),
+      userFirstName: r.user_first_name ? String(r.user_first_name) : undefined,
+      userUsername: r.user_username ? String(r.user_username) : undefined,
+      fileName: String(r.file_name),
+      format: (r.format === 'pdf' || r.format === 'docx' || r.format === 'png' ? r.format : 'pptx') as DbUserFileRecord['format'],
+      sizeBytes: Number(r.size_bytes) || 0,
+      sentToTelegram: Boolean(r.sent_to_telegram),
+      serviceId: r.service_id ? String(r.service_id) : undefined,
+      serviceTitle: r.service_title ? String(r.service_title) : undefined,
+      mimeType: r.mime_type ? String(r.mime_type) : undefined,
+      hasFile: Boolean(r.has_file),
+      createdAt: Number(r.created_ms) || Date.now(),
+    }));
+  } catch (err) {
+    console.error('[Neon dbListAllUserFilesAdmin Error]', err);
     return null;
   }
 }

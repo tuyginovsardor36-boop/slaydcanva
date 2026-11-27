@@ -15,6 +15,7 @@ import {
 } from 'docx';
 import { FONT_OPTIONS } from '../data/defaults';
 import { WordDocumentData } from '../types/editor';
+import { triggerSafeFileDownload } from './safeDownload';
 
 type TextStyle = {
   bold?: boolean;
@@ -439,12 +440,7 @@ export async function exportToDocx(
   const safeName = (title || 'SlaydCanva-hujjat').trim().replace(/[\\/:*?"<>|]/g, '_');
   const fileName = `${safeName}.docx`;
   if (options?.download !== false) {
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = fileName;
-    a.click();
-    URL.revokeObjectURL(url);
+    await triggerSafeFileDownload({ blob, fileName });
   }
   return { blob, fileName };
 }

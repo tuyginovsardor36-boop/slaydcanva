@@ -1,6 +1,7 @@
 import PptxGenJS from 'pptxgenjs';
 import { FONT_OPTIONS, PPTX_CANVAS } from '../data/defaults';
 import { CanvasPage } from '../types/editor';
+import { triggerSafeFileDownload } from './safeDownload';
 
 function cleanHex(color?: string, fallback = '0F172A'): string {
   if (!color || color === 'transparent') return fallback;
@@ -17,19 +18,28 @@ async function prepareImageForPptx(
   width: number,
   height: number,
   imageFit?: 'contain' | 'cover',
-  borderRadius?: number
+  borderRadius?: number,
+  renderScale = 1.6,
+  cache?: Map<string, string>,
+  preferJpeg = false
 ): Promise<string> {
   const needsCanvasProcessing =
     dataUrl.startsWith('data:image/svg+xml') || imageFit === 'cover' || (borderRadius && borderRadius > 0);
   if (!needsCanvasProcessing) {
     return dataUrl;
   }
+
+  const cacheKey = `${width}x${height}|${imageFit || ''}|${borderRadius || 0}|${renderScale}|${preferJpeg ? 'jpg' : 'png'}|${dataUrl}`;
+  if (cache?.has(cacheKey)) {
+    return cache.get(cacheKey)!;
+  }
+
   return new Promise((resolve) => {
     const img = new Image();
     img.crossOrigin = 'anonymous';
     img.onload = () => {
-      const targetW = Math.max(40, width * 2);
-      const targetH = Math.max(40, height * 2);
+      const targetW = Math.max(40, Math.round(width * renderScale));
+      const targetH = Math.max(40, Math.round(height * renderScale));
       const canvas = document.createElement('canvas');
       canvas.width = targetW;
       canvas.height = targetH;
@@ -39,8 +49,13 @@ async function prepareImageForPptx(
         return;
       }
 
+      if (preferJpeg && !(borderRadius && borderRadius > 0)) {
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillRect(0, 0, targetW, targetH);
+      }
+
       if (borderRadius && borderRadius > 0) {
-        const r = Math.min(borderRadius * 2, targetW / 2, targetH / 2);
+        const r = Math.min(borderRadius * renderScale, targetW / 2, targetH / 2);
         ctx.beginPath();
         ctx.moveTo(r, 0);
         ctx.lineTo(targetW - r, 0);
@@ -74,7 +89,14 @@ async function prepareImageForPptx(
         ctx.drawImage(img, 0, 0, targetW, targetH);
       }
 
-      resolve(canvas.toDataURL('image/png'));
+      const encoded =
+        preferJpeg && !(borderRadius && borderRadius > 0)
+          ? canvas.toDataURL('image/jpeg', 0.86)
+          : canvas.toDataURL('image/png');
+      if (cache) {
+        cache.set(cacheKey, encoded);
+      }
+      resolve(encoded);
     };
     img.onerror = () => resolve(dataUrl);
     img.src = dataUrl;
@@ -97,16 +119,27 @@ export async function exportToPptx(
 
   const scaleX = 10 / PPTX_CANVAS.width;
   const scaleY = 5.625 / PPTX_CANVAS.height;
+  const isLargeOrMobile =
+    pages.length > 10 || (typeof window !== 'undefined' && window.innerWidth < 768);
+  const bgRenderScale = isLargeOrMobile ? 1.35 : 1.75;
+  const imgRenderScale = isLargeOrMobile ? 1.4 : 1.8;
+  const imageCache = new Map<string, string>();
 
-  for (const page of pages) {
+  for (let pIdx = 0; pIdx < pages.length; pIdx++) {
+    const page = pages[pIdx];
     const slide = pptx.addSlide();
     if (page.backgroundImage) {
-      const pngBg = await prepareImageForPptx(
+      const bgData = await prepareImageForPptx(
         page.backgroundImage,
         PPTX_CANVAS.width,
-        PPTX_CANVAS.height
+        PPTX_CANVAS.height,
+        undefined,
+        undefined,
+        bgRenderScale,
+        imageCache,
+        true
       );
-      slide.background = { data: pngBg };
+      slide.background = { data: bgData };
     } else {
       slide.background = { color: cleanHex(page.background, 'FFFFFF') };
     }
@@ -163,15 +196,18 @@ export async function exportToPptx(
             : { color: cleanHex(el.fill, 'DBEAFE'), width: 0 },
         });
       } else if (el.type === 'image' && el.src) {
-        const pngData = await prepareImageForPptx(
+        const imgData = await prepareImageForPptx(
           el.src,
           Math.round(el.width),
           Math.round(el.height),
           el.imageFit,
-          el.borderRadius
+          el.borderRadius,
+          imgRenderScale,
+          imageCache,
+          el.imageFit === 'cover' && !(el.borderRadius && el.borderRadius > 0)
         );
         slide.addImage({
-          data: pngData,
+          data: imgData,
           x,
           y,
           w,
@@ -179,18 +215,17 @@ export async function exportToPptx(
         });
       }
     }
+
+    if (pIdx > 0 && pIdx % 6 === 0) {
+      await new Promise((r) => window.setTimeout(r, 10));
+    }
   }
 
   const safeName = (title || 'SlaydCanva-taqdimot').trim().replace(/[\\/:*?"<>|]/g, '_');
   const fileName = `${safeName}.pptx`;
   const rawBlob = (await pptx.write({ outputType: 'blob' })) as Blob;
   if (options?.download !== false) {
-    const url = URL.createObjectURL(rawBlob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = fileName;
-    a.click();
-    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    await triggerSafeFileDownload({ blob: rawBlob, fileName });
   }
   return { blob: rawBlob, fileName };
 }

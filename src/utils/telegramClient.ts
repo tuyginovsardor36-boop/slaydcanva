@@ -63,7 +63,7 @@ export interface TelegramAccountResponse {
   updatedAt: number;
 }
 
-export const MAX_TELEGRAM_FILE_BYTES = 3_200_000;
+export const MAX_TELEGRAM_FILE_BYTES = 15_000_000;
 
 export function getTelegramAuthHeaders(sessionToken?: string | null): Record<string, string> {
   const headers: Record<string, string> = {
@@ -88,51 +88,103 @@ function blobToBase64(blob: Blob): Promise<string> {
   });
 }
 
+export async function saveAndSendUserFile(params: {
+  blob: Blob;
+  fileName: string;
+  sessionToken?: string | null;
+  caption?: string;
+  serviceId?: string;
+  serviceTitle?: string;
+  sendToTelegram?: boolean;
+  forceTelegram?: boolean;
+}): Promise<{
+  ok: boolean;
+  skipped?: boolean;
+  tooLarge?: boolean;
+  file?: UserFileRecord;
+  downloadPath?: string;
+  sentToTelegram?: boolean;
+  telegramError?: string;
+  error?: string;
+}> {
+  if (!params.sessionToken) {
+    return { ok: false, skipped: true };
+  }
+  if (params.blob.size > MAX_TELEGRAM_FILE_BYTES) {
+    return {
+      ok: false,
+      tooLarge: true,
+      error: "Fayl hajmi 15 MB dan katta bo'lgani uchun serverga saqlanmadi.",
+    };
+  }
+  try {
+    const fileBase64 = await blobToBase64(params.blob);
+    const res = await fetch('/api/files/save', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {
+        'Content-Type': 'application/json',
+        ...getTelegramAuthHeaders(params.sessionToken),
+      },
+      body: JSON.stringify({
+        fileName: params.fileName,
+        fileBase64,
+        caption: params.caption,
+        serviceId: params.serviceId,
+        serviceTitle: params.serviceTitle,
+        sendToTelegram: params.sendToTelegram !== false,
+        force: params.forceTelegram === true,
+      }),
+    });
+    const data = (await res.json().catch(() => ({}))) as {
+      ok?: boolean;
+      file?: UserFileRecord;
+      downloadPath?: string;
+      sentToTelegram?: boolean;
+      telegramError?: string;
+      error?: string;
+    };
+    if (!res.ok) {
+      return { ok: false, error: data.error || "Faylni saqlashda xatolik." };
+    }
+    return {
+      ok: true,
+      file: data.file,
+      downloadPath: data.downloadPath,
+      sentToTelegram: Boolean(data.sentToTelegram),
+      telegramError: data.telegramError,
+    };
+  } catch {
+    return { ok: false, error: "Server bilan bog'lanib bo'lmadi." };
+  }
+}
+
 export async function sendBlobToTelegram(
   blob: Blob,
   fileName: string,
   sessionToken?: string | null,
   caption?: string,
-  force = false
-): Promise<{ ok: boolean; skipped?: boolean; tooLarge?: boolean; error?: string }> {
-  if (!sessionToken) {
-    return { ok: false, skipped: true };
-  }
-  if (blob.size > MAX_TELEGRAM_FILE_BYTES) {
-    return {
-      ok: false,
-      tooLarge: true,
-      error: "Fayl 3.2 MB dan katta bo'lgani uchun Telegramga yuborilmadi.",
-    };
-  }
-  try {
-    const fileBase64 = await blobToBase64(blob);
-    const res = await fetch('/api/telegram/send-document', {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: {
-        'Content-Type': 'application/json',
-        ...getTelegramAuthHeaders(sessionToken),
-      },
-      body: JSON.stringify({
-        fileName,
-        fileBase64,
-        caption,
-        force,
-      }),
-    });
-    const data = (await res.json().catch(() => ({}))) as {
-      ok?: boolean;
-      skipped?: boolean;
-      error?: string;
-    };
-    if (!res.ok) {
-      return { ok: false, error: data.error || "Telegramga yuborishda xatolik." };
-    }
-    return { ok: true, skipped: Boolean(data.skipped) };
-  } catch {
-    return { ok: false, error: "Telegram serveri bilan bog'lanib bo'lmadi." };
-  }
+  force = false,
+  serviceMeta?: { serviceId?: string; serviceTitle?: string }
+): Promise<{
+  ok: boolean;
+  skipped?: boolean;
+  tooLarge?: boolean;
+  file?: UserFileRecord;
+  downloadPath?: string;
+  sentToTelegram?: boolean;
+  error?: string;
+}> {
+  return saveAndSendUserFile({
+    blob,
+    fileName,
+    sessionToken,
+    caption,
+    serviceId: serviceMeta?.serviceId,
+    serviceTitle: serviceMeta?.serviceTitle,
+    sendToTelegram: true,
+    forceTelegram: force,
+  });
 }
 
 export async function logTelegramActivity(
@@ -187,8 +239,15 @@ export interface TelegramWebAppWindow extends Window {
   Telegram?: {
     WebApp?: {
       initData?: string;
+      platform?: string;
+      version?: string;
       ready?: () => void;
       expand?: () => void;
+      downloadFile?: (
+        params: { url: string; file_name: string },
+        cb?: (accepted: boolean) => void
+      ) => void;
+      openLink?: (url: string, options?: { try_instant_view?: boolean }) => void;
       initDataUnsafe?: {
         user?: {
           id?: number;
@@ -1196,6 +1255,117 @@ export async function fetchUserSavedFiles(sessionToken?: string | null): Promise
     };
   } catch {
     return null;
+  }
+}
+
+export async function getFileDownloadLink(
+  fileId: string,
+  sessionToken?: string | null
+): Promise<{ ok: boolean; fileName?: string; downloadPath?: string; error?: string }> {
+  if (!sessionToken) return { ok: false, error: 'Sessiya topilmadi.' };
+  try {
+    const res = await fetch(`/api/files/${encodeURIComponent(fileId)}/download-link`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: getTelegramAuthHeaders(sessionToken),
+    });
+    const data = (await res.json().catch(() => ({}))) as {
+      ok?: boolean;
+      fileName?: string;
+      downloadPath?: string;
+      error?: string;
+    };
+    if (!res.ok || !data.downloadPath) {
+      return { ok: false, error: data.error || 'Yuklab olish havolasi olinmadi.' };
+    }
+    return { ok: true, fileName: data.fileName, downloadPath: data.downloadPath };
+  } catch {
+    return { ok: false, error: "Server bilan bog'lanishda xatolik." };
+  }
+}
+
+export async function resendUserFileToTelegram(
+  fileId: string,
+  sessionToken?: string | null
+): Promise<{ ok: boolean; error?: string }> {
+  if (!sessionToken) return { ok: false, error: 'Sessiya topilmadi.' };
+  try {
+    const res = await fetch(`/api/files/${encodeURIComponent(fileId)}/send-telegram`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: getTelegramAuthHeaders(sessionToken),
+    });
+    const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+    if (!res.ok) return { ok: false, error: data.error || 'Botga yuborilmadi.' };
+    return { ok: true };
+  } catch {
+    return { ok: false, error: "Server bilan bog'lanishda xatolik." };
+  }
+}
+
+export async function deleteUserSavedFile(
+  fileId: string,
+  sessionToken?: string | null
+): Promise<{ ok: boolean; error?: string }> {
+  if (!sessionToken) return { ok: false, error: 'Sessiya topilmadi.' };
+  try {
+    const res = await fetch(`/api/files/${encodeURIComponent(fileId)}`, {
+      method: 'DELETE',
+      credentials: 'same-origin',
+      headers: getTelegramAuthHeaders(sessionToken),
+    });
+    const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+    if (!res.ok) return { ok: false, error: data.error || "O'chirib bo'lmadi." };
+    return { ok: true };
+  } catch {
+    return { ok: false, error: "Server bilan bog'lanishda xatolik." };
+  }
+}
+
+export async function adminListAllFiles(
+  sessionToken: string,
+  adminToken: string,
+  query = '',
+  format = 'all'
+): Promise<{ ok: boolean; files: UserFileRecord[]; error?: string }> {
+  try {
+    const qs = new URLSearchParams();
+    if (query.trim()) qs.set('q', query.trim());
+    if (format && format !== 'all') qs.set('format', format);
+    const res = await fetch(`/api/admin/files?${qs.toString()}`, {
+      credentials: 'same-origin',
+      headers: getAdminHeaders(sessionToken, adminToken),
+    });
+    const data = (await res.json().catch(() => ({}))) as {
+      ok?: boolean;
+      files?: UserFileRecord[];
+      error?: string;
+    };
+    if (!res.ok) return { ok: false, files: [], error: data.error || 'Fayllar yuklanmadi.' };
+    return { ok: true, files: Array.isArray(data.files) ? data.files : [] };
+  } catch {
+    return { ok: false, files: [], error: "Server bilan bog'lanishda xatolik." };
+  }
+}
+
+export async function adminFetchFileBlob(
+  fileId: string,
+  sessionToken: string,
+  adminToken: string
+): Promise<{ ok: boolean; blob?: Blob; error?: string }> {
+  try {
+    const res = await fetch(`/api/admin/files/${encodeURIComponent(fileId)}/download`, {
+      credentials: 'same-origin',
+      headers: getAdminHeaders(sessionToken, adminToken),
+    });
+    if (!res.ok) {
+      const errData = (await res.json().catch(() => ({}))) as { error?: string };
+      return { ok: false, error: errData.error || 'Fayl yuklab olinmadi.' };
+    }
+    const blob = await res.blob();
+    return { ok: true, blob };
+  } catch {
+    return { ok: false, error: "Server bilan bog'lanishda xatolik." };
   }
 }
 

@@ -355,6 +355,7 @@ export interface AdminUserDetailPayload {
   transactions: BalanceTransaction[];
   orders: AdminOrderRow[];
   projects: ProjectSummary[];
+  files?: UserFileRecord[];
   referrals: Array<{ inviteeId: string; inviterBonus: number; createdAt: number }>;
 }
 
@@ -433,10 +434,17 @@ export interface SecurityScanReport {
 
 export interface UserFileRecord {
   id: string;
+  telegramId?: string;
+  userFirstName?: string;
+  userUsername?: string;
   fileName: string;
   format: 'pptx' | 'pdf' | 'docx' | 'png';
   sizeBytes: number;
   sentToTelegram: boolean;
+  serviceId?: string;
+  serviceTitle?: string;
+  mimeType?: string;
+  hasFile?: boolean;
   createdAt: number;
 }
 

@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   CheckCircle2,
   ExternalLink,
+  FolderOpen,
   Headphones,
   Loader2,
   Megaphone,
@@ -60,6 +61,7 @@ import {
   exportWordElementToPdf,
 } from './utils/exportPdf';
 import { exportToPptx } from './utils/exportPptx';
+import { triggerSafeFileDownload } from './utils/safeDownload';
 import {
   adminGetStatus,
   adminLogout,
@@ -71,8 +73,8 @@ import {
   getTelegramAuthHeaders,
   loadCloudProject,
   logTelegramActivity,
+  saveAndSendUserFile,
   saveCloudProfile,
-  sendBlobToTelegram,
   syncCloudProject,
   TelegramAccountResponse,
   TelegramWebAppWindow,
@@ -161,7 +163,9 @@ export default function App() {
   const [mobileServiceOpen, setMobileServiceOpen] = useState(false);
   const [desktopTopUpOpen, setDesktopTopUpOpen] = useState(false);
   const [desktopProfileOpen, setDesktopProfileOpen] = useState(false);
+  const [desktopFilesOpen, setDesktopFilesOpen] = useState(false);
   const [desktopSupportOpen, setDesktopSupportOpen] = useState(false);
+  const [filesRefreshKey, setFilesRefreshKey] = useState(0);
   const [mobileSheetOpen, setMobileSheetOpen] = useState(false);
   const [notice, setNotice] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
   const [telegramUser, setTelegramUser] = useState<TelegramUser | null>(null);
@@ -754,21 +758,49 @@ export default function App() {
   );
 
   const deliverExportToTelegram = useCallback(
-    async (blob: Blob, fileName: string, baseMessage: string) => {
-      if (!tgSessionToken || telegramUser?.autoSendFiles === false) {
-        showNotice('ok', baseMessage);
-        return;
+    async (
+      blob: Blob,
+      fileName: string,
+      baseMessage: string,
+      meta?: { serviceId?: string; serviceTitle?: string; triggerDownload?: boolean }
+    ) => {
+      let serverDownloadPath: string | undefined;
+      let sentTg = false;
+      let tooLarge = false;
+
+      if (tgSessionToken) {
+        const res = await saveAndSendUserFile({
+          blob,
+          fileName,
+          sessionToken: tgSessionToken,
+          caption: `📄 ${fileName} — SlaydCanva`,
+          serviceId: meta?.serviceId,
+          serviceTitle: meta?.serviceTitle,
+          sendToTelegram: telegramUser?.autoSendFiles !== false,
+        });
+        if (res.ok) {
+          serverDownloadPath = res.downloadPath;
+          sentTg = Boolean(res.sentToTelegram);
+          setFilesRefreshKey((k) => k + 1);
+        } else if (res.tooLarge) {
+          tooLarge = true;
+        }
       }
-      const res = await sendBlobToTelegram(
-        blob,
-        fileName,
-        tgSessionToken,
-        `📄 ${fileName} — SlaydCanva`
-      );
-      if (res.ok && !res.skipped) {
-        showNotice('ok', `${baseMessage} Telegramga ham yuborildi.`);
-      } else if (res.tooLarge) {
-        showNotice('ok', `${baseMessage} (3.2 MB dan katta — Telegramga yuborilmadi).`);
+
+      if (meta?.triggerDownload !== false) {
+        await triggerSafeFileDownload({
+          fileName,
+          blob,
+          serverDownloadPath,
+        });
+      }
+
+      if (sentTg) {
+        showNotice('ok', `${baseMessage} Fayllarim va Telegramga saqlandi.`);
+      } else if (tooLarge) {
+        showNotice('ok', `${baseMessage} (15 MB dan katta — serverga yuklanmadi).`);
+      } else if (serverDownloadPath) {
+        showNotice('ok', `${baseMessage} Fayllarim bo'limiga saqlandi.`);
       } else {
         showNotice('ok', baseMessage);
       }
@@ -781,19 +813,29 @@ export default function App() {
     setIsExporting(true);
     try {
       if (state.mode === 'pptx') {
-        const res = await exportToPptx(state.pptxPages, state.docTitle);
-        await deliverExportToTelegram(res.blob, res.fileName, 'PPTX fayli yuklab olindi.');
+        const res = await exportToPptx(state.pptxPages, state.docTitle, { download: false });
+        await deliverExportToTelegram(res.blob, res.fileName, 'PPTX fayli tayyor.', {
+          serviceTitle: 'Taqdimot (PPTX)',
+          triggerDownload: true,
+        });
       } else if (state.mode === 'word') {
-        const res = await exportToDocx(state.wordDoc, state.docTitle);
-        await deliverExportToTelegram(res.blob, res.fileName, 'Word (.docx) fayli yuklab olindi.');
+        const res = await exportToDocx(state.wordDoc, state.docTitle, { download: false });
+        await deliverExportToTelegram(res.blob, res.fileName, 'Word (.docx) fayli tayyor.', {
+          serviceTitle: 'Hujjat (Word)',
+          triggerDownload: true,
+        });
       } else {
         const res = await exportCanvasPagesToPdf(
           state.pdfPages,
           state.docTitle,
           'pdf',
-          state.pdfOrientation
+          state.pdfOrientation,
+          { download: false }
         );
-        await deliverExportToTelegram(res.blob, res.fileName, 'PDF fayli yuklab olindi.');
+        await deliverExportToTelegram(res.blob, res.fileName, 'PDF fayli tayyor.', {
+          serviceTitle: 'PDF hujjat',
+          triggerDownload: true,
+        });
       }
     } catch {
       showNotice('err', "Eksport qilishda xatolik yuz berdi. Qaytadan urinib ko'ring.");
@@ -807,13 +849,23 @@ export default function App() {
     setIsExporting(true);
     try {
       if (state.mode === 'pptx') {
-        const res = await exportCanvasPagesToPdf(state.pptxPages, state.docTitle, 'pptx');
-        await deliverExportToTelegram(res.blob, res.fileName, 'PDF fayli yuklab olindi.');
+        const res = await exportCanvasPagesToPdf(state.pptxPages, state.docTitle, 'pptx', 'landscape', {
+          download: false,
+        });
+        await deliverExportToTelegram(res.blob, res.fileName, 'PDF fayli tayyor.', {
+          serviceTitle: 'Taqdimot (PDF)',
+          triggerDownload: true,
+        });
       } else if (state.mode === 'word' && wordPaperRef.current) {
-        const res = await exportWordElementToPdf(wordPaperRef.current, state.docTitle);
-        await deliverExportToTelegram(res.blob, res.fileName, 'PDF fayli yuklab olindi.');
+        const res = await exportWordElementToPdf(wordPaperRef.current, state.docTitle, {
+          download: false,
+        });
+        await deliverExportToTelegram(res.blob, res.fileName, 'PDF fayli tayyor.', {
+          serviceTitle: 'Akademik ish (PDF)',
+          triggerDownload: true,
+        });
       } else {
-        showNotice('ok', 'PDF fayli yuklab olindi.');
+        showNotice('ok', 'PDF fayli tayyor.');
       }
     } catch {
       showNotice('err', 'PDF yaratishda xatolik yuz berdi.');
@@ -830,15 +882,25 @@ export default function App() {
         const active =
           state.pptxPages.find((p) => p.id === state.activePptxId) || state.pptxPages[0];
         if (active) {
-          const res = await exportCanvasPageToPng(active, state.docTitle, 'pptx');
-          await deliverExportToTelegram(res.blob, res.fileName, 'PNG rasm yuklab olindi.');
+          const res = await exportCanvasPageToPng(active, state.docTitle, 'pptx', 'landscape', {
+            download: false,
+          });
+          await deliverExportToTelegram(res.blob, res.fileName, 'PNG rasm tayyor.', {
+            serviceTitle: 'Slayd rasmi (PNG)',
+            triggerDownload: true,
+          });
         }
       } else {
         const active =
           state.pdfPages.find((p) => p.id === state.activePdfId) || state.pdfPages[0];
         if (active) {
-          const res = await exportCanvasPageToPng(active, state.docTitle, 'pdf', state.pdfOrientation);
-          await deliverExportToTelegram(res.blob, res.fileName, 'PNG rasm yuklab olindi.');
+          const res = await exportCanvasPageToPng(active, state.docTitle, 'pdf', state.pdfOrientation, {
+            download: false,
+          });
+          await deliverExportToTelegram(res.blob, res.fileName, 'PNG rasm tayyor.', {
+            serviceTitle: 'Sahifa rasmi (PNG)',
+            triggerDownload: true,
+          });
         }
       }
     } catch {
@@ -1265,7 +1327,7 @@ export default function App() {
 
     if (tgSessionToken) {
       const tokenSnapshot = tgSessionToken;
-      const shouldSendFile = telegramUser?.autoSendFiles !== false;
+      const shouldSendToTg = telegramUser?.autoSendFiles !== false;
       void (async () => {
         await logTelegramActivity(
           `${result.serviceTitle}: ${result.docTitle}`,
@@ -1273,45 +1335,47 @@ export default function App() {
           result.serverCharged ? 0 : -result.price,
           tokenSnapshot
         );
-        if (!shouldSendFile) return;
         try {
+          let exported: { blob: Blob; fileName: string } | null = null;
           if (result.targetMode === 'pptx') {
-            const exported = await exportToPptx(result.pages, result.docTitle, {
+            exported = await exportToPptx(result.pages, result.docTitle, {
               download: false,
             });
-            await sendBlobToTelegram(
-              exported.blob,
-              exported.fileName,
-              tokenSnapshot,
-              `✨ ${result.serviceTitle}: ${result.docTitle}`
-            );
           } else if (result.targetMode === 'word' && result.wordDoc) {
-            const exported = await exportToDocx(result.wordDoc, result.docTitle, {
+            exported = await exportToDocx(result.wordDoc, result.docTitle, {
               download: false,
             });
-            await sendBlobToTelegram(
-              exported.blob,
-              exported.fileName,
-              tokenSnapshot,
-              `📄 ${result.serviceTitle}: ${result.docTitle}`
-            );
           } else if (result.targetMode === 'pdf') {
-            const exported = await exportCanvasPagesToPdf(
+            exported = await exportCanvasPagesToPdf(
               result.pages,
               result.docTitle,
               'pdf',
               result.pdfOrientation || stateRef.current.pdfOrientation,
               { download: false }
             );
-            await sendBlobToTelegram(
-              exported.blob,
-              exported.fileName,
-              tokenSnapshot,
-              `✨ ${result.serviceTitle}: ${result.docTitle}`
-            );
+          }
+
+          if (exported) {
+            const savedRes = await saveAndSendUserFile({
+              blob: exported.blob,
+              fileName: exported.fileName,
+              sessionToken: tokenSnapshot,
+              caption: `✨ ${result.serviceTitle}: ${result.docTitle}`,
+              serviceId: result.serviceId,
+              serviceTitle: result.serviceTitle,
+              sendToTelegram: shouldSendToTg,
+            });
+            if (savedRes.ok) {
+              setFilesRefreshKey((k) => k + 1);
+              if (savedRes.sentToTelegram) {
+                showNotice('ok', `${result.serviceTitle} Fayllarim va Telegram botga yuborildi.`);
+              } else {
+                showNotice('ok', `${result.serviceTitle} Fayllarim bo'limiga saqlandi.`);
+              }
+            }
           }
         } catch {
-          // Non-blocking Telegram background export
+          // Non-blocking background save & Telegram delivery
         }
       })();
     }
@@ -1440,6 +1504,7 @@ export default function App() {
         onResetCurrent={handleResetCurrent}
         onOpenTopUp={() => setDesktopTopUpOpen(true)}
         onOpenProfile={() => setDesktopProfileOpen(true)}
+        onOpenFiles={() => setDesktopFilesOpen(true)}
         onOpenSupport={() => setDesktopSupportOpen(true)}
         isAdmin={isStaffMember}
         staffRole={staffRole}
@@ -1516,6 +1581,8 @@ export default function App() {
               activeProjectId={activeProjectId}
               transactions={state.transactions}
               syncingProject={syncingProject}
+              refreshKey={filesRefreshKey}
+              onNotify={showNotice}
               onSaveProjectNow={() => void syncCurrentProjectNow(undefined, false)}
               onLoadCloudProject={(id) => void handleLoadCloudProject(id)}
               onDeleteCloudProject={(id) => void handleDeleteCloudProject(id)}
@@ -1749,6 +1816,62 @@ export default function App() {
               onCreateNewCloudProject={handleCreateNewCloudProject}
               onDeleteCloudProject={(id) => void handleDeleteCloudProject(id)}
             />
+          </div>
+        </div>
+      )}
+
+      {/* Desktop Fayllarim Modal */}
+      {desktopFilesOpen && (
+        <div
+          className="hidden md:flex fixed inset-0 z-50 bg-black/40 backdrop-blur-[2px] items-center justify-center p-4"
+          onClick={() => setDesktopFilesOpen(false)}
+        >
+          <div
+            className="w-full max-w-lg max-h-[85vh] bg-white rounded-2xl shadow-xl overflow-hidden flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-5 py-3.5 border-b border-slate-200 flex items-center justify-between shrink-0">
+              <span className="text-sm font-semibold text-slate-900 flex items-center gap-1.5">
+                <FolderOpen className="w-4 h-4 text-red-600" />
+                <span>Fayllarim (Saqlangan ishlar)</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => setDesktopFilesOpen(false)}
+                className="p-1 text-slate-500 hover:text-slate-900 rounded-md"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="flex-1 min-h-0 overflow-y-auto">
+              <FilesAndOpsView
+                telegramSessionToken={tgSessionToken}
+                telegramUser={telegramUser}
+                botUsername={botUsername}
+                savedProjects={savedProjects}
+                activeProjectId={activeProjectId}
+                transactions={state.transactions}
+                syncingProject={syncingProject}
+                refreshKey={filesRefreshKey}
+                onNotify={showNotice}
+                onSaveProjectNow={() => void syncCurrentProjectNow(undefined, false)}
+                onLoadCloudProject={(id) => {
+                  void handleLoadCloudProject(id);
+                  setDesktopFilesOpen(false);
+                }}
+                onDeleteCloudProject={(id) => void handleDeleteCloudProject(id)}
+                onSendCurrentToTelegram={() => void handleExportPrimary()}
+                onOpenEditor={(m) => {
+                  handleOpenEditorMode(m);
+                  setDesktopFilesOpen(false);
+                }}
+                onOpenTab={(t) => {
+                  setDesktopFilesOpen(false);
+                  if (t === 'topup') setDesktopTopUpOpen(true);
+                  else if (t === 'profile' || t === 'balance') setDesktopProfileOpen(true);
+                }}
+              />
+            </div>
           </div>
         </div>
       )}

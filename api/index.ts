@@ -29,6 +29,7 @@ import {
   dbDeleteManager,
   dbDeletePromoCode,
   dbDeleteProject,
+  dbDeleteUserFile,
   dbGetAdminAnalytics,
   dbGetAdminOverview,
   dbGetAuthNonce,
@@ -39,6 +40,8 @@ import {
   dbGetProjectById,
   dbGetSetting,
   dbGetUserDetailAdmin,
+  dbGetUserFileById,
+  dbListAllUserFilesAdmin,
   dbListAuditLogs,
   dbListBroadcastLogs,
   dbListBroadcastTargets,
@@ -56,6 +59,7 @@ import {
   dbLogBroadcast,
   dbMarkCrmEventsRead,
   dbMarkThreadRead,
+  dbMarkUserFileSentTelegram,
   dbRecordUserFile,
   dbRedeemPromoCode,
   dbRefundAiCharge,
@@ -149,7 +153,7 @@ interface GenerateRequestBody {
   designTheme?: SlideDesignTheme;
   aiTone?: AiTone;
   includeTopicImages?: boolean;
-  splitMode?: 'single' | 'part1' | 'part2' | 'part3' | 'part4';
+  splitMode?: 'single' | 'part1' | 'part2' | 'part3' | 'part4' | 'part5' | 'part6';
   splitJobToken?: string;
   part1Count?: number;
   part2Count?: number;
@@ -440,7 +444,7 @@ async function generateViaOpenRouter(
         models: primaryModels,
         messages: jsonPromptMessages,
         temperature: 0.4,
-        max_tokens: 4500,
+        max_tokens: 6500,
         provider: { sort: 'throughput' },
         response_format: { type: 'json_object' },
       },
@@ -465,7 +469,7 @@ async function generateViaOpenRouter(
         model: 'openrouter/free',
         messages: jsonPromptMessages,
         temperature: 0.4,
-        max_tokens: 4500,
+        max_tokens: 6500,
         provider: { sort: 'throughput' },
       },
       22_000,
@@ -947,7 +951,7 @@ async function runSingleBackupAiProvider(
       model: provider.model,
       messages,
       temperature: 0.4,
-      max_tokens: 4500,
+      max_tokens: 6500,
       response_format: { type: 'json_object' },
     },
     28_000,
@@ -2258,7 +2262,7 @@ interface RawBodyRequest extends express.Request {
 const app = express();
 app.use(
   express.json({
-    limit: '5mb',
+    limit: '25mb',
     verify: (req, _res, buf) => {
       (req as RawBodyRequest).rawBody = buf.toString('utf8');
     },
@@ -2625,6 +2629,8 @@ app.post('/api/ai/generate', async (req, res) => {
       body.splitMode === 'part2' ||
       body.splitMode === 'part3' ||
       body.splitMode === 'part4' ||
+      body.splitMode === 'part5' ||
+      body.splitMode === 'part6' ||
       (typeof body.wordChunk === 'number' && body.wordChunk > 1);
 
     const fullJobPrice = calculateServerServicePrice(
@@ -2764,7 +2770,12 @@ Qoidalar:
         const aiQueries = Array.isArray(rawData.topicImageQueries)
           ? (rawData.topicImageQueries as unknown[]).map((x) => String(x || '').trim()).filter(Boolean)
           : [];
-        const realPhotos = includePhotos ? await searchRealTopicImages(topic, aiQueries, 3) : [];
+        const realPhotos = includePhotos
+          ? await Promise.race([
+              searchRealTopicImages(topic, aiQueries, 3),
+              new Promise<string[]>((resolve) => setTimeout(() => resolve([]), 6000)),
+            ])
+          : [];
         const part1PhotoBudget = realPhotos.length > 2 ? realPhotos.slice(0, 2) : realPhotos;
         const unusedTopicImages = realPhotos.slice(part1PhotoBudget.length);
         const pages = normalizeAiCanvasPages(rawData, part1PhotoBudget, includePhotos);
@@ -2782,7 +2793,13 @@ Qoidalar:
         return;
       }
 
-      if (splitMode === 'part2') {
+      if (
+        splitMode === 'part2' ||
+        splitMode === 'part3' ||
+        splitMode === 'part4' ||
+        splitMode === 'part5' ||
+        splitMode === 'part6'
+      ) {
         const part2Count = Math.min(12, Math.max(1, Number(body.part2Count) || Math.floor(requestedSlides / 2)));
         const prev = body.previousContext || {};
         const prevSlides = Array.isArray(prev.previousSlides) ? prev.previousSlides : [];
@@ -2792,7 +2809,7 @@ Qoidalar:
 
         sendAiJson({
           serviceId: body.serviceId,
-          splitMode: 'part2',
+          splitMode,
           data: { pages },
         });
         return;
@@ -2977,7 +2994,10 @@ ${isFinalPart ? `- Faqat oxirgi (${part1DoneCount + part2NeedCount}-bo'lim) slay
           .map((s) => (typeof s.imageKeyword === 'string' ? s.imageKeyword.trim() : ''))
           .filter(Boolean);
 
-        const realPhotos = await searchRealTopicImages(topic, [...topicQueries, ...slideKeywords], 3);
+        const realPhotos = await Promise.race([
+          searchRealTopicImages(topic, [...topicQueries, ...slideKeywords], 3),
+          new Promise<string[]>((resolve) => setTimeout(() => resolve([]), 6000)),
+        ]);
         data.slides = sanitizeSlideItems(rawSlides);
         data.references = normalizeReferenceList(data.references);
         data.topicImages = realPhotos;
@@ -2986,7 +3006,13 @@ ${isFinalPart ? `- Faqat oxirgi (${part1DoneCount + part2NeedCount}-bo'lim) slay
         return;
       }
 
-      if (splitMode === 'part2' || splitMode === 'part3' || splitMode === 'part4') {
+      if (
+        splitMode === 'part2' ||
+        splitMode === 'part3' ||
+        splitMode === 'part4' ||
+        splitMode === 'part5' ||
+        splitMode === 'part6'
+      ) {
         const prev = body.previousContext || {};
         const doneSoFar = Math.max(1, Number(body.part1Count) || prev.previousSlides?.length || Math.ceil(totalContentCount / 2));
         const needCount = Math.min(18, Math.max(1, Number(body.part2Count) || (totalContentCount - doneSoFar)));
@@ -3099,7 +3125,10 @@ ${isFinalPart ? `- Faqat oxirgi (${part1DoneCount + part2NeedCount}-bo'lim) slay
         .map((s) => (typeof s.imageKeyword === 'string' ? s.imageKeyword.trim() : ''))
         .filter(Boolean);
 
-      const realPhotos = await searchRealTopicImages(topic, [...topicQueries, ...slideKeywords], 3);
+      const realPhotos = await Promise.race([
+        searchRealTopicImages(topic, [...topicQueries, ...slideKeywords], 3),
+        new Promise<string[]>((resolve) => setTimeout(() => resolve([]), 6000)),
+      ]);
       data.slides = applyTopicPhotosToDeck(sanitizeSlideItems(rawSlides), realPhotos);
       data.references = normalizeReferenceList(data.references);
       data.topicImages = realPhotos;
@@ -3270,13 +3299,19 @@ ${isEssay ? '- abstract: 70-100 so‘zlik annotatsiya; keywords: 5-7 ta ilmiy ka
           const aiImgQueries = Array.isArray(chunk1Data.imageQueries)
             ? (chunk1Data.imageQueries as unknown[]).map((q) => String(q || '').trim()).filter(Boolean)
             : [];
-          let realPhotos = await searchRealTopicImages(topic, aiImgQueries, 3);
-          if (realPhotos.length === 0) {
-            const fallbackQueries = await translateTopicToEnglishQueries(topic);
-            if (fallbackQueries.length > 0) {
-              realPhotos = await searchRealTopicImages(topic, fallbackQueries, 3);
-            }
-          }
+          const realPhotos = await Promise.race([
+            (async () => {
+              let imgs = await searchRealTopicImages(topic, aiImgQueries, 3);
+              if (imgs.length === 0) {
+                const fallbackQueries = await translateTopicToEnglishQueries(topic);
+                if (fallbackQueries.length > 0) {
+                  imgs = await searchRealTopicImages(topic, fallbackQueries, 3);
+                }
+              }
+              return imgs;
+            })(),
+            new Promise<string[]>((resolve) => setTimeout(() => resolve([]), 6000)),
+          ]);
           chunk1Data.topicImages = realPhotos;
           sendAiJson({ serviceId: body.serviceId, wordChunk: 1, data: chunk1Data });
           return;
@@ -3588,7 +3623,8 @@ const SESSION_COOKIE_NAME = 'slaydcanva_session';
 const ADMIN_COOKIE_NAME = 'slaydcanva_admin_session';
 const FIFTEEN_DAYS_SEC = 15 * 24 * 60 * 60;
 const FIFTEEN_DAYS_MS = FIFTEEN_DAYS_SEC * 1000;
-const MAX_TG_DOCUMENT_BYTES = 3_200_000; // Fits safely under Vercel 4.5MB request limit after base64
+const MAX_TG_DOCUMENT_BYTES = 15_000_000;
+const FILES_CACHE_DIR = path.resolve('/tmp', 'slaydcanva-files');
 const MODULE_EPHEMERAL_SECRET = crypto.randomBytes(32);
 
 interface TgUserProfile {
@@ -3712,6 +3748,22 @@ async function kvSet(key: string, value: unknown, ttlSeconds?: number): Promise<
       });
     } catch {
       // Ignore transient KV write failures; memory fallback still holds it
+    }
+  }
+}
+
+async function kvDel(key: string): Promise<void> {
+  memoryKvStore.delete(key);
+  const creds = getKvCredentials();
+  if (creds) {
+    try {
+      await fetch(`${creds.url}/del/${encodeURIComponent(key)}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${creds.token}` },
+        signal: AbortSignal.timeout(5000),
+      });
+    } catch {
+      // Ignore
     }
   }
 }
@@ -6399,7 +6451,64 @@ app.get('/api/admin/users/:id/detail', async (req, res) => {
     res.status(404).json({ error: "Foydalanuvchi ma'lumotlari topilmadi." });
     return;
   }
+  if (!detail.files || detail.files.length === 0) {
+    const kvFiles = (await kvGet<DbUserFileRecord[]>(`user_files:${tid}`)) || [];
+    detail.files = kvFiles;
+  }
   res.json({ ok: true, detail });
+});
+
+app.get('/api/admin/files', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'users');
+  if (!ctx) return;
+  const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+  const format = typeof req.query.format === 'string' ? req.query.format.trim().toLowerCase() : '';
+  const dbFiles = await dbListAllUserFilesAdmin(250, q, format);
+  if (dbFiles !== null) {
+    res.json({ ok: true, files: dbFiles });
+    return;
+  }
+  // KV fallback aggregation when Neon DB is not configured
+  const users = (await dbListUsersAdmin('', 180)) || [];
+  const allKvLists = await Promise.all(
+    users.map(async (u) => {
+      const items = (await kvGet<DbUserFileRecord[]>(`user_files:${u.telegramId}`)) || [];
+      return items.map((item) => ({
+        ...item,
+        userFirstName: item.userFirstName || u.firstName,
+        userUsername: item.userUsername || u.username,
+      }));
+    })
+  );
+  const queryLower = q.toLowerCase();
+  const merged = allKvLists
+    .flat()
+    .filter((f) => {
+      if (format && format !== 'all' && f.format !== format) return false;
+      if (!queryLower) return true;
+      return (
+        f.fileName.toLowerCase().includes(queryLower) ||
+        f.telegramId.toLowerCase().includes(queryLower) ||
+        (f.userFirstName || '').toLowerCase().includes(queryLower) ||
+        (f.userUsername || '').toLowerCase().includes(queryLower) ||
+        (f.serviceTitle || '').toLowerCase().includes(queryLower)
+      );
+    })
+    .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0))
+    .slice(0, 250);
+  res.json({ ok: true, files: merged });
+});
+
+app.get('/api/admin/files/:id/download', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'users');
+  if (!ctx) return;
+  const fileId = String(req.params.id || '').trim();
+  const resolved = await resolveSavedUserFile(fileId);
+  if (!resolved || !resolved.buffer || resolved.buffer.length === 0) {
+    res.status(404).json({ error: "Fayl tarkibi serverda topilmadi (faqat eski metadata saqlangan bo'lishi mumkin)." });
+    return;
+  }
+  sendBinaryFileResponse(res, resolved.fileName, resolved.mimeType, resolved.buffer);
 });
 
 app.post('/api/admin/users/:id/crm', async (req, res) => {
@@ -7530,6 +7639,200 @@ app.post('/api/support/messages', async (req, res) => {
   res.json({ ok: true, ticket, message: savedMsg });
 });
 
+function getSafeFileCachePath(fileId: string): string | null {
+  if (!/^[a-zA-Z0-9_-]{4,80}$/.test(fileId)) return null;
+  const target = path.resolve(FILES_CACHE_DIR, `${fileId}.bin`);
+  if (!target.startsWith(FILES_CACHE_DIR + path.sep)) return null;
+  return target;
+}
+
+function getMimeTypeForFileName(fileName: string): string {
+  const ext = fileName.split('.').pop()?.toLowerCase();
+  if (ext === 'pptx') return 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+  if (ext === 'docx') return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  if (ext === 'pdf') return 'application/pdf';
+  return 'image/png';
+}
+
+function sendBinaryFileResponse(
+  res: express.Response,
+  fileName: string,
+  mimeType: string,
+  buffer: Buffer
+): void {
+  const asciiSafe = fileName.replace(/[^a-zA-Z0-9._\-\s]/g, '_').replace(/"/g, '') || 'slaydcanva_file';
+  const encoded = encodeURIComponent(fileName);
+  res.setHeader('Content-Type', mimeType || getMimeTypeForFileName(fileName));
+  res.setHeader('Content-Length', String(buffer.length));
+  res.setHeader('Content-Disposition', `attachment; filename="${asciiSafe}"; filename*=UTF-8''${encoded}`);
+  res.setHeader('Cache-Control', 'private, max-age=300');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.send(buffer);
+}
+
+async function resolveSavedUserFile(
+  fileId: string,
+  ownerTelegramId?: string
+): Promise<{
+  record: DbUserFileRecord;
+  fileName: string;
+  mimeType: string;
+  buffer: Buffer | null;
+} | null> {
+  if (!/^[a-zA-Z0-9_-]{4,80}$/.test(fileId)) return null;
+  const dbRow = await dbGetUserFileById(fileId);
+  let record: (DbUserFileRecord & { fileBase64?: string }) | null = dbRow;
+  if (!record && ownerTelegramId) {
+    const kvList = (await kvGet<DbUserFileRecord[]>(`user_files:${ownerTelegramId}`)) || [];
+    record = kvList.find((item) => item.id === fileId) || null;
+  }
+  if (!record) return null;
+
+  let buffer: Buffer | null = null;
+  if (record.fileBase64) {
+    buffer = Buffer.from(record.fileBase64, 'base64');
+  } else {
+    const diskPath = getSafeFileCachePath(fileId);
+    if (diskPath) {
+      try {
+        buffer = await fs.readFile(diskPath);
+      } catch {
+        buffer = null;
+      }
+    }
+    if (!buffer) {
+      const kvB64 = await kvGet<string>(`user_file_bin:${fileId}`);
+      if (kvB64) buffer = Buffer.from(kvB64, 'base64');
+    }
+  }
+
+  const mimeType = record.mimeType || getMimeTypeForFileName(record.fileName);
+  return {
+    record: { ...record, fileBase64: undefined, hasFile: Boolean(buffer && buffer.length > 0) },
+    fileName: record.fileName,
+    mimeType,
+    buffer,
+  };
+}
+
+async function saveAndMaybeSendUserFile(params: {
+  user: TgUserProfile;
+  rawFileName: string;
+  fileBase64: string;
+  caption?: string;
+  serviceId?: string;
+  serviceTitle?: string;
+  sendToTelegram: boolean;
+  forceTelegram?: boolean;
+}): Promise<{
+  ok: boolean;
+  statusCode?: number;
+  error?: string;
+  file?: DbUserFileRecord;
+  downloadPath?: string;
+  sentToTelegram?: boolean;
+  telegramError?: string;
+}> {
+  const safeFileName = params.rawFileName.replace(/[^a-zA-Z0-9._\-\s]/g, '_').slice(0, 120);
+  if (!safeFileName || !/\.(pptx|pdf|docx|png)$/i.test(safeFileName)) {
+    return {
+      ok: false,
+      statusCode: 400,
+      error: "Faqat .pptx, .pdf, .docx yoki .png fayllari qo'llab-quvvatlanadi.",
+    };
+  }
+
+  const cleanBase64 = params.fileBase64.includes(',')
+    ? params.fileBase64.split(',').pop() || ''
+    : params.fileBase64;
+  if (!cleanBase64) {
+    return { ok: false, statusCode: 400, error: "Fayl ma'lumoti bo'sh." };
+  }
+
+  const approxBytes = Math.floor((cleanBase64.length * 3) / 4);
+  if (approxBytes <= 0 || approxBytes > MAX_TG_DOCUMENT_BYTES) {
+    return {
+      ok: false,
+      statusCode: 413,
+      error: 'Fayl hajmi ruxsat etilgan 15 MB chegaradan oshdi.',
+    };
+  }
+
+  const buf = Buffer.from(cleanBase64, 'base64');
+  if (buf.length === 0 || buf.length > MAX_TG_DOCUMENT_BYTES) {
+    return { ok: false, statusCode: 413, error: 'Fayl hajmi ruxsat etilgan chegaradan oshdi.' };
+  }
+
+  const ext = safeFileName.split('.').pop()?.toLowerCase();
+  const format = (ext === 'pdf' || ext === 'docx' || ext === 'png' ? ext : 'pptx') as DbUserFileRecord['format'];
+  const mimeType = getMimeTypeForFileName(safeFileName);
+  const fileId = `file_${Date.now().toString(36)}_${crypto.randomBytes(3).toString('hex')}`;
+  const storedBase64 = buf.length <= 10_000_000 ? buf.toString('base64') : undefined;
+
+  // Always cache binary to local disk for instant zero-white-screen downloads
+  const diskPath = getSafeFileCachePath(fileId);
+  if (diskPath) {
+    await fs.mkdir(FILES_CACHE_DIR, { recursive: true }).catch(() => {});
+    await fs.writeFile(diskPath, buf).catch(() => {});
+  }
+  if (!isNeonConfigured() && storedBase64 && buf.length <= 2_500_000) {
+    await kvSet(`user_file_bin:${fileId}`, storedBase64, 60 * 60 * 24 * 7);
+  }
+
+  let sentToTelegram = false;
+  let telegramError: string | undefined;
+
+  const account = await getTgUserAccount(params.user);
+  const shouldAttemptTg =
+    params.sendToTelegram && (params.forceTelegram === true || account.autoSendFiles !== false);
+
+  if (shouldAttemptTg) {
+    const caption =
+      params.caption && params.caption.trim()
+        ? params.caption.trim().slice(0, 400)
+        : `📄 ${safeFileName} — SlaydCanva orqali tayyorlandi`;
+    const sent = await telegramSendDocument(account.chatId, safeFileName, mimeType, buf, caption);
+    sentToTelegram = sent.ok;
+    if (!sent.ok) {
+      telegramError = sent.description || 'Telegram botga yuborilmadi';
+    }
+  }
+
+  const fileRecord: DbUserFileRecord = {
+    id: fileId,
+    telegramId: params.user.telegramId,
+    userFirstName: params.user.firstName,
+    userUsername: params.user.username,
+    fileName: safeFileName,
+    format,
+    sizeBytes: buf.length,
+    serviceId: params.serviceId ? String(params.serviceId).slice(0, 64) : undefined,
+    serviceTitle: params.serviceTitle ? String(params.serviceTitle).slice(0, 120) : undefined,
+    mimeType,
+    hasFile: true,
+    sentToTelegram,
+    createdAt: Date.now(),
+  };
+
+  await dbRecordUserFile({ ...fileRecord, fileBase64: storedBase64 });
+  const prevFiles = (await kvGet<DbUserFileRecord[]>(`user_files:${params.user.telegramId}`)) || [];
+  await kvSet(`user_files:${params.user.telegramId}`, [fileRecord, ...prevFiles].slice(0, 50));
+
+  const dlToken = signToken(
+    { kind: 'file_dl', fid: fileId, tid: params.user.telegramId },
+    15 * 60 * 1000
+  );
+  const downloadPath = `/api/files/${encodeURIComponent(fileId)}/download?dl=${encodeURIComponent(dlToken)}`;
+
+  return {
+    ok: true,
+    file: fileRecord,
+    downloadPath,
+    sentToTelegram,
+    telegramError,
+  };
+}
+
 app.get('/api/files', async (req, res) => {
   const user = getAuthenticatedTelegramUser(req);
   if (!user) {
@@ -7543,6 +7846,180 @@ app.get('/api/files', async (req, res) => {
   const files = dbFiles || (await kvGet<DbUserFileRecord[]>(`user_files:${user.telegramId}`)) || [];
   const projects = dbProjects || [];
   res.json({ ok: true, files, projects });
+});
+
+app.post('/api/files/save', async (req, res) => {
+  const user = getAuthenticatedTelegramUser(req);
+  if (!user) {
+    res.status(401).json({ error: 'Telegram autentifikatsiyasi talab qilinadi.' });
+    return;
+  }
+  const result = await saveAndMaybeSendUserFile({
+    user,
+    rawFileName: typeof req.body?.fileName === 'string' ? req.body.fileName.trim() : '',
+    fileBase64: typeof req.body?.fileBase64 === 'string' ? req.body.fileBase64.trim() : '',
+    caption: typeof req.body?.caption === 'string' ? req.body.caption : undefined,
+    serviceId: typeof req.body?.serviceId === 'string' ? req.body.serviceId : undefined,
+    serviceTitle: typeof req.body?.serviceTitle === 'string' ? req.body.serviceTitle : undefined,
+    sendToTelegram: req.body?.sendToTelegram !== false,
+    forceTelegram: req.body?.force === true,
+  });
+  if (!result.ok) {
+    res.status(result.statusCode || 400).json({ error: result.error });
+    return;
+  }
+  res.json({
+    ok: true,
+    file: result.file,
+    downloadPath: result.downloadPath,
+    sentToTelegram: result.sentToTelegram,
+    telegramError: result.telegramError,
+  });
+});
+
+app.post('/api/files/:id/download-link', async (req, res) => {
+  const user = getAuthenticatedTelegramUser(req);
+  const staff = getStaffSessionFromRequest(req);
+  if (!user && !staff) {
+    res.status(401).json({ error: 'Avtorizatsiya talab qilinadi.' });
+    return;
+  }
+  const fileId = String(req.params.id || '').trim();
+  const resolved = await resolveSavedUserFile(fileId, user?.telegramId);
+  if (!resolved) {
+    res.status(404).json({ error: 'Fayl topilmadi.' });
+    return;
+  }
+  if (!staff && resolved.record.telegramId !== user?.telegramId) {
+    res.status(403).json({ error: "Ushbu faylga ruxsat yo'q." });
+    return;
+  }
+  if (!resolved.buffer || resolved.buffer.length === 0) {
+    res.status(404).json({ error: "Fayl tarkibi serverda topilmadi (faqat eski metadata mavjud)." });
+    return;
+  }
+  const dlToken = signToken(
+    { kind: 'file_dl', fid: fileId, tid: resolved.record.telegramId },
+    15 * 60 * 1000
+  );
+  res.json({
+    ok: true,
+    fileName: resolved.fileName,
+    downloadPath: `/api/files/${encodeURIComponent(fileId)}/download?dl=${encodeURIComponent(dlToken)}`,
+  });
+});
+
+app.get('/api/files/:id/download', async (req, res) => {
+  const fileId = String(req.params.id || '').trim();
+  const dlToken = typeof req.query.dl === 'string' ? req.query.dl.trim() : '';
+  const tokenPayload = dlToken ? verifySignedToken(dlToken) : null;
+
+  let allowedTelegramId: string | undefined;
+  let isAuthorized = false;
+
+  if (
+    tokenPayload &&
+    tokenPayload.kind === 'file_dl' &&
+    tokenPayload.fid === fileId &&
+    typeof tokenPayload.tid === 'string'
+  ) {
+    allowedTelegramId = tokenPayload.tid;
+    isAuthorized = true;
+  } else {
+    const user = getAuthenticatedTelegramUser(req);
+    const staff = getStaffSessionFromRequest(req);
+    if (staff) {
+      isAuthorized = true;
+    } else if (user) {
+      allowedTelegramId = user.telegramId;
+      isAuthorized = true;
+    }
+  }
+
+  if (!isAuthorized) {
+    res.status(401).json({ error: 'Yuklab olish havolasi yaroqsiz yoki muddati tugagan.' });
+    return;
+  }
+
+  const resolved = await resolveSavedUserFile(fileId, allowedTelegramId);
+  if (!resolved) {
+    res.status(404).json({ error: 'Fayl topilmadi.' });
+    return;
+  }
+  if (allowedTelegramId && !getStaffSessionFromRequest(req) && resolved.record.telegramId !== allowedTelegramId) {
+    res.status(403).json({ error: "Ruxsat yo'q." });
+    return;
+  }
+  if (!resolved.buffer || resolved.buffer.length === 0) {
+    res.status(404).json({ error: 'Fayl tarkibi mavjud emas.' });
+    return;
+  }
+
+  sendBinaryFileResponse(res, resolved.fileName, resolved.mimeType, resolved.buffer);
+});
+
+app.post('/api/files/:id/send-telegram', async (req, res) => {
+  const user = getAuthenticatedTelegramUser(req);
+  if (!user) {
+    res.status(401).json({ error: 'Telegram autentifikatsiyasi talab qilinadi.' });
+    return;
+  }
+  const fileId = String(req.params.id || '').trim();
+  const resolved = await resolveSavedUserFile(fileId, user.telegramId);
+  if (!resolved) {
+    res.status(404).json({ error: 'Fayl topilmadi.' });
+    return;
+  }
+  if (resolved.record.telegramId !== user.telegramId) {
+    res.status(403).json({ error: "Ruxsat yo'q." });
+    return;
+  }
+  if (!resolved.buffer || resolved.buffer.length === 0) {
+    res.status(404).json({ error: 'Fayl tarkibi topilmadi, loyihadan qayta eksport qiling.' });
+    return;
+  }
+  const account = await getTgUserAccount(user);
+  const sent = await telegramSendDocument(
+    account.chatId,
+    resolved.fileName,
+    resolved.mimeType,
+    resolved.buffer,
+    `📄 ${resolved.fileName} — SlaydCanva Fayllarimdan yuborildi`
+  );
+  if (!sent.ok) {
+    res.status(502).json({ error: sent.description || 'Telegram botga yuborishda xatolik.' });
+    return;
+  }
+  await dbMarkUserFileSentTelegram(fileId, user.telegramId);
+  const prevFiles = (await kvGet<DbUserFileRecord[]>(`user_files:${user.telegramId}`)) || [];
+  await kvSet(
+    `user_files:${user.telegramId}`,
+    prevFiles.map((f) => (f.id === fileId ? { ...f, sentToTelegram: true } : f))
+  );
+  res.json({ ok: true });
+});
+
+app.delete('/api/files/:id', async (req, res) => {
+  const user = getAuthenticatedTelegramUser(req);
+  if (!user) {
+    res.status(401).json({ error: 'Telegram autentifikatsiyasi talab qilinadi.' });
+    return;
+  }
+  const fileId = String(req.params.id || '').trim();
+  if (!/^[a-zA-Z0-9_-]{4,80}$/.test(fileId)) {
+    res.status(400).json({ error: "Noto'g'ri fayl ID." });
+    return;
+  }
+  await dbDeleteUserFile(user.telegramId, fileId);
+  const diskPath = getSafeFileCachePath(fileId);
+  if (diskPath) await fs.unlink(diskPath).catch(() => {});
+  await kvDel(`user_file_bin:${fileId}`).catch(() => {});
+  const prevFiles = (await kvGet<DbUserFileRecord[]>(`user_files:${user.telegramId}`)) || [];
+  await kvSet(
+    `user_files:${user.telegramId}`,
+    prevFiles.filter((f) => f.id !== fileId)
+  );
+  res.json({ ok: true });
 });
 
 app.get('/api/admin/support/tickets', async (req, res) => {
@@ -8545,77 +9022,30 @@ app.post('/api/telegram/send-document', async (req, res) => {
     res.status(401).json({ error: 'Telegram autentifikatsiyasi talab qilinadi.' });
     return;
   }
-  const account = await getTgUserAccount(user);
-  if (!account.autoSendFiles && req.body?.force !== true) {
-    res.json({ ok: true, skipped: true });
+  const result = await saveAndMaybeSendUserFile({
+    user,
+    rawFileName: typeof req.body?.fileName === 'string' ? req.body.fileName.trim() : '',
+    fileBase64: typeof req.body?.fileBase64 === 'string' ? req.body.fileBase64.trim() : '',
+    caption: typeof req.body?.caption === 'string' ? req.body.caption : undefined,
+    serviceId: typeof req.body?.serviceId === 'string' ? req.body.serviceId : undefined,
+    serviceTitle: typeof req.body?.serviceTitle === 'string' ? req.body.serviceTitle : undefined,
+    sendToTelegram: true,
+    forceTelegram: req.body?.force === true,
+  });
+
+  if (!result.ok) {
+    res.status(result.statusCode || 400).json({ error: result.error });
     return;
   }
 
-  const rawFileName = typeof req.body?.fileName === 'string' ? req.body.fileName.trim() : '';
-  const safeFileName = rawFileName.replace(/[^a-zA-Z0-9._\-\s]/g, '_').slice(0, 120);
-  if (!safeFileName || !/\.(pptx|pdf|docx|png)$/i.test(safeFileName)) {
-    res.status(400).json({ error: "Faqat .pptx, .pdf, .docx yoki .png fayllari qo'llab-quvvatlanadi." });
-    return;
-  }
-
-  const fileBase64 = typeof req.body?.fileBase64 === 'string' ? req.body.fileBase64.trim() : '';
-  if (!fileBase64) {
-    res.status(400).json({ error: "Fayl ma'lumoti bo'sh." });
-    return;
-  }
-
-  const cleanBase64 = fileBase64.includes(',') ? fileBase64.split(',').pop() || '' : fileBase64;
-  const approxBytes = Math.floor((cleanBase64.length * 3) / 4);
-  if (approxBytes <= 0 || approxBytes > MAX_TG_DOCUMENT_BYTES) {
-    res.status(413).json({
-      error: "Fayl hajmi 3.2 MB dan oshdi — Telegram bot orqali yuborish uchun fayl juda katta.",
-    });
-    return;
-  }
-
-  const buf = Buffer.from(cleanBase64, 'base64');
-  if (buf.length === 0 || buf.length > MAX_TG_DOCUMENT_BYTES) {
-    res.status(413).json({ error: "Fayl hajmi ruxsat etilgan chegaradan oshdi." });
-    return;
-  }
-
-  const ext = safeFileName.split('.').pop()?.toLowerCase();
-  const mimeType =
-    ext === 'pptx'
-      ? 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
-      : ext === 'docx'
-        ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-        : ext === 'pdf'
-          ? 'application/pdf'
-          : 'image/png';
-
-  const caption =
-    typeof req.body?.caption === 'string' && req.body.caption.trim()
-      ? req.body.caption.trim().slice(0, 400)
-      : `📄 ${safeFileName} — SlaydCanva orqali tayyorlandi`;
-
-  const sent = await telegramSendDocument(account.chatId, safeFileName, mimeType, buf, caption);
-  if (!sent.ok) {
-    res.status(502).json({
-      error: sent.description || "Faylni Telegram botga yuborishda xatolik yuz berdi.",
-    });
-    return;
-  }
-
-  const fileRecord: DbUserFileRecord = {
-    id: `file_${Date.now().toString(36)}_${crypto.randomBytes(3).toString('hex')}`,
-    telegramId: user.telegramId,
-    fileName: safeFileName,
-    format: (ext === 'pdf' || ext === 'docx' || ext === 'png' ? ext : 'pptx') as DbUserFileRecord['format'],
-    sizeBytes: buf.length,
-    sentToTelegram: true,
-    createdAt: Date.now(),
-  };
-  await dbRecordUserFile(fileRecord);
-  const prevFiles = (await kvGet<DbUserFileRecord[]>(`user_files:${user.telegramId}`)) || [];
-  await kvSet(`user_files:${user.telegramId}`, [fileRecord, ...prevFiles].slice(0, 50));
-
-  res.json({ ok: true, fileName: safeFileName, file: fileRecord });
+  res.json({
+    ok: true,
+    fileName: result.file?.fileName,
+    file: result.file,
+    downloadPath: result.downloadPath,
+    sentToTelegram: result.sentToTelegram,
+    telegramError: result.telegramError,
+  });
 });
 
 function buildMainBotKeyboard(webAppUrl: string, staffLoginUrl?: string) {
