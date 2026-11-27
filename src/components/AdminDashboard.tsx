@@ -128,13 +128,17 @@ import {
   adminUpsertMandatoryChannel,
   adminUpsertPromo,
   adminVerifyOrder,
+  adminFetchFileBlob,
+  adminListAllFiles,
 } from '../utils/telegramClient';
+import { triggerSafeFileDownload } from '../utils/safeDownload';
 import { AdminCoordinateStats } from './AdminCoordinateStats';
 
 type AdminTab =
   | 'overview'
   | 'inbox'
   | 'users'
+  | 'files'
   | 'managers'
   | 'orders'
   | 'pricing'
@@ -274,6 +278,50 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const searchBoxRef = useRef<HTMLDivElement | null>(null);
   const [selectedAdminTx, setSelectedAdminTx] = useState<BalanceTransaction | null>(null);
+
+  // All Files & Downloads
+  const [allFiles, setAllFiles] = useState<UserFileRecord[]>([]);
+  const [filesLoading, setFilesLoading] = useState(false);
+  const [fileSearch, setFileSearch] = useState('');
+  const [fileFormatFilter, setFileFormatFilter] = useState('');
+  const [downloadingFileId, setDownloadingFileId] = useState<string | null>(null);
+
+  const loadAdminFiles = useCallback(async () => {
+    if (!adminToken) return;
+    setFilesLoading(true);
+    try {
+      const res = await adminListAllFiles(telegramSessionToken, adminToken, fileSearch, fileFormatFilter);
+      if (res.ok && Array.isArray(res.files)) {
+        setAllFiles(res.files);
+      }
+    } finally {
+      setFilesLoading(false);
+    }
+  }, [telegramSessionToken, adminToken, fileSearch, fileFormatFilter]);
+
+  useEffect(() => {
+    if (adminToken && activeTab === 'files') {
+      void loadAdminFiles();
+    }
+  }, [adminToken, activeTab, loadAdminFiles]);
+
+  const handleAdminDownloadFile = async (fileId: string, fileName: string) => {
+    if (!adminToken) return;
+    setDownloadingFileId(fileId);
+    try {
+      const blob = await adminFetchFileBlob(telegramSessionToken, adminToken, fileId);
+      if (!blob) {
+        onNotify('err', "Faylni yuklab bo'lmadi.");
+        return;
+      }
+      triggerSafeFileDownload({ blob, fileName });
+      onNotify('ok', `"${fileName}" yuklab olindi.`);
+    } catch {
+      onNotify('err', "Faylni yuklab olishda xatolik.");
+    } finally {
+      setDownloadingFileId(null);
+    }
+  };
 
 
 
@@ -886,6 +934,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       overview: hasPerm('overview') || hasPerm('crm_events'),
       inbox: hasPerm('support'),
       users: hasPerm('users') || hasPerm('balance'),
+      files: hasPerm('users') || hasPerm('balance') || isSuperAdmin,
       managers: isSuperAdmin,
       orders: hasPerm('orders') || hasPerm('settings'),
       pricing: hasPerm('pricing') || hasPerm('promos'),
@@ -2216,6 +2265,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       visible: hasPerm('users') || hasPerm('balance'),
     },
     {
+      id: 'files',
+      label: 'Fayllar & Slaydlar',
+      icon: <Download className="w-4 h-4" />,
+      visible: hasPerm('users') || hasPerm('balance') || isSuperAdmin,
+    },
+    {
       id: 'managers',
       label: 'Jamoa & Support',
       icon: <UserCheck className="w-4 h-4" />,
@@ -3010,68 +3065,472 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 ============================================================ */}
             {activeTab === 'users' && (
               <section className="bg-white border border-zinc-200 rounded-2xl overflow-hidden">
-                <div className="p-4 md:p-5 border-b border-zinc-200 space-y-3">
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                    <div>
-                      <h2 className="text-sm font-semibold text-zinc-900">
-                        Foydalanuvchilar, CRM teglar va balans boshqaruvi
-                      </h2>
-                      <p className="text-xs text-zinc-500 mt-0.5">
-                        Balans faqat TolovGo, Promokod yoki Xodim tomonidan server bazasida o‘zgartiriladi.
-                      </p>
-                    </div>
-                    <form
-                      onSubmit={(e) => {
-                        e.preventDefault();
-                        void handleSearchUsers(userSearch);
-                      }}
-                      className="flex items-center gap-2"
-                    >
-                      <div className="relative">
-                        <Search className="w-3.5 h-3.5 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                        <input
-                          type="text"
-                          value={userSearch}
-                          onChange={(e) => setUserSearch(e.target.value)}
-                          placeholder="ID, @username, ism yoki teg..."
-                          className="pl-8 pr-3 py-2 text-xs bg-zinc-50 border border-zinc-200 focus:border-red-600 focus:bg-white rounded-xl outline-none w-52 sm:w-64"
-                        />
-                      </div>
+                {selectedUserDetail || detailLoading ? (
+                  <div className="p-4 md:p-6 space-y-5">
+                    <div className="flex items-center justify-between border-b border-zinc-200 pb-4">
                       <button
-                        type="submit"
-                        disabled={usersLoading}
-                        className="px-3.5 py-2 rounded-xl bg-[#111113] hover:bg-zinc-800 text-white text-xs font-medium disabled:opacity-50 whitespace-nowrap"
-                      >
-                        Qidirish
-                      </button>
-                    </form>
-                  </div>
-
-                  {/* Segment Filters */}
-                  <div className="flex flex-wrap items-center gap-1 bg-zinc-100 p-1 rounded-xl w-fit">
-                    {(
-                      [
-                        { id: 'all', label: 'Barchasi' },
-                        { id: 'active', label: 'Faol' },
-                        { id: 'vip', label: 'VIP' },
-                        { id: 'yangi', label: 'Yangi' },
-                        { id: 'zero', label: '0 Balans' },
-                        { id: 'banned', label: 'Bloklangan' },
-                      ] as const
-                    ).map((seg) => (
-                      <button
-                        key={seg.id}
                         type="button"
-                        onClick={() => setUserSegmentFilter(seg.id)}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${
-                          userSegmentFilter === seg.id
-                            ? 'bg-white text-zinc-900 shadow-xs'
-                            : 'text-zinc-600 hover:text-zinc-900'
-                        }`}
+                        onClick={() => setSelectedUserDetail(null)}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-zinc-200 bg-white hover:bg-zinc-50 text-xs font-semibold text-zinc-800"
                       >
-                        {seg.label}
+                        <ArrowLeft className="w-4 h-4" />
+                        <span>Foydalanuvchilar ro‘yxatiga qaytish</span>
                       </button>
-                    ))}
+                      {selectedUserDetail && (
+                        <span className="text-xs font-mono text-zinc-500">
+                          {selectedUserDetail.user.firstName} · ID {selectedUserDetail.user.telegramId}
+                        </span>
+                      )}
+                    </div>
+
+                    {detailLoading || !selectedUserDetail ? (
+                      <div className="p-16 flex items-center justify-center text-xs text-zinc-500 gap-2">
+                        <Loader2 className="w-5 h-5 animate-spin text-red-600" />
+                        <span>Mijoz profili va fayllari yuklanmoqda...</span>
+                      </div>
+                    ) : (
+                      <div className="space-y-6 text-xs">
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                          <div className="p-3.5 rounded-xl border border-zinc-200 bg-zinc-50">
+                            <div className="text-zinc-500">Balans</div>
+                            <div className="font-mono tabular-nums font-bold text-zinc-900 mt-0.5 text-sm">
+                              {formatSom(selectedUserDetail.user.balance)}
+                            </div>
+                          </div>
+                          <div className="p-3.5 rounded-xl border border-zinc-200 bg-zinc-50">
+                            <div className="text-zinc-500">Kiritgan to‘lov</div>
+                            <div className="font-mono tabular-nums font-bold text-emerald-700 mt-0.5 text-sm">
+                              {formatSom(selectedUserDetail.user.totalDeposited || 0)}
+                            </div>
+                          </div>
+                          <div className="p-3.5 rounded-xl border border-zinc-200 bg-zinc-50">
+                            <div className="text-zinc-500">Sarflagan</div>
+                            <div className="font-mono tabular-nums font-bold text-zinc-900 mt-0.5 text-sm">
+                              {formatSom(selectedUserDetail.user.totalSpent || 0)}
+                            </div>
+                          </div>
+                          <div className="p-3.5 rounded-xl border border-zinc-200 bg-zinc-50">
+                            <div className="text-zinc-500">Loyihalar / Referal</div>
+                            <div className="font-mono tabular-nums font-bold text-zinc-900 mt-0.5 text-sm">
+                              {selectedUserDetail.projects.length} / {selectedUserDetail.user.referralCount}
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* User Generated Files Section */}
+                        <div className="border border-zinc-200 rounded-xl overflow-hidden bg-white">
+                          <div className="px-4 py-3 bg-zinc-50 border-b border-zinc-200 font-semibold text-zinc-900 flex items-center justify-between">
+                            <span>Mijoz tomonidan yaratilgan fayllar va slaydlar ({selectedUserDetail.files?.length || 0})</span>
+                            <span className="text-[11px] text-zinc-500 font-normal">Haqiqatan bajarganini tekshirish uchun yuklab oling</span>
+                          </div>
+                          <div className="divide-y divide-zinc-100 max-h-64 overflow-y-auto">
+                            {(!selectedUserDetail.files || selectedUserDetail.files.length === 0) ? (
+                              <div className="p-6 text-center text-zinc-400">Bu foydalanuvchi hali fayl yaratmagan.</div>
+                            ) : (
+                              selectedUserDetail.files.map((f) => (
+                                <div key={f.id} className="p-3.5 flex items-center justify-between gap-3 hover:bg-zinc-50">
+                                  <div className="flex items-center gap-2.5 min-w-0">
+                                    <span className="px-2 py-1 rounded bg-red-50 text-red-600 font-mono text-[10px] uppercase font-bold shrink-0">
+                                      {f.format || 'file'}
+                                    </span>
+                                    <div className="min-w-0">
+                                      <div className="font-medium text-zinc-900 truncate">{f.fileName}</div>
+                                      <div className="text-[11px] text-zinc-500">
+                                        {f.serviceTitle || 'AI Xizmat'} · {formatDateTime(f.createdAt)} · {Math.round((f.sizeBytes || 0) / 1024)} KB
+                                      </div>
+                                    </div>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    disabled={downloadingFileId === f.id}
+                                    onClick={() => void handleAdminDownloadFile(f.id, f.fileName)}
+                                    className="px-3 py-1.5 rounded-xl bg-red-600 hover:bg-red-700 text-white font-semibold inline-flex items-center gap-1.5 shrink-0"
+                                  >
+                                    {downloadingFileId === f.id ? (
+                                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                    ) : (
+                                      <Download className="w-3.5 h-3.5" />
+                                    )}
+                                    <span>Yuklab olish</span>
+                                  </button>
+                                </div>
+                              ))
+                            )}
+                          </div>
+                        </div>
+
+                        {/* CRM Tag & Note */}
+                        <form onSubmit={handleSaveUserCrm} className="p-4 rounded-xl border border-zinc-200 space-y-3 bg-zinc-50/50">
+                          <div className="flex items-center justify-between">
+                            <span className="font-semibold text-zinc-900 flex items-center gap-1.5">
+                              <Tag className="w-3.5 h-3.5 text-red-600" />
+                              <span>CRM Teg va Ichki Izoh</span>
+                            </span>
+                            <button
+                              type="submit"
+                              disabled={savingCrm}
+                              className="px-3.5 py-1.5 rounded-lg bg-[#111113] text-white font-medium hover:bg-zinc-800 disabled:opacity-50"
+                            >
+                              {savingCrm ? 'Saqlanmoqda...' : 'Saqlash'}
+                            </button>
+                          </div>
+                          <div className="flex flex-wrap gap-1.5">
+                            {CRM_TAGS.map((t) => (
+                              <button
+                                key={t || 'none'}
+                                type="button"
+                                onClick={() => setCrmEditTag(t)}
+                                className={`px-3 py-1 rounded-lg border font-medium transition-colors ${
+                                  crmEditTag === t
+                                    ? 'bg-red-600 border-red-600 text-white'
+                                    : 'bg-white border-zinc-200 text-zinc-700 hover:bg-zinc-100'
+                                }`}
+                              >
+                                {t || 'Tegsız'}
+                              </button>
+                            ))}
+                          </div>
+                          <textarea
+                            rows={2}
+                            value={crmEditNote}
+                            onChange={(e) => setCrmEditNote(e.target.value)}
+                            placeholder="Menejer/Admin uchun ichki izoh..."
+                            className="w-full bg-white border border-zinc-200 focus:border-red-600 rounded-xl p-3 outline-none resize-none"
+                          />
+                        </form>
+
+                        {/* Direct Telegram DM */}
+                        <form onSubmit={handleSendDirectMessage} className="p-4 rounded-xl border border-zinc-200 space-y-2.5 bg-zinc-50/50">
+                          <div className="font-semibold text-zinc-900 flex items-center gap-1.5">
+                            <MessageSquare className="w-3.5 h-3.5 text-red-600" />
+                            <span>Telegram bot orqali shaxsiy xabar yuborish</span>
+                          </div>
+                          <div className="flex gap-2">
+                            <input
+                              type="text"
+                              value={dmText}
+                              onChange={(e) => setDmText(e.target.value)}
+                              placeholder="Mijozga xabar yozing..."
+                              className="flex-1 bg-white border border-zinc-200 focus:border-red-600 rounded-xl px-3.5 py-2.5 outline-none"
+                            />
+                            <button
+                              type="submit"
+                              disabled={sendingDm || !dmText.trim()}
+                              className="px-4 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white font-semibold"
+                            >
+                              {sendingDm ? '...' : 'Yuborish'}
+                            </button>
+                          </div>
+                        </form>
+
+                        {/* Orders & Transactions */}
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          <div className="border border-zinc-200 rounded-xl overflow-hidden bg-white">
+                            <div className="px-4 py-2.5 bg-zinc-50 border-b border-zinc-200 font-semibold text-zinc-900">
+                              TolovGo Buyurtmalari ({selectedUserDetail.orders.length})
+                            </div>
+                            <div className="divide-y divide-zinc-100 max-h-44 overflow-y-auto">
+                              {selectedUserDetail.orders.length === 0 ? (
+                                <div className="p-4 text-center text-zinc-400">Buyurtmalar yo‘q</div>
+                              ) : (
+                                selectedUserDetail.orders.map((o) => (
+                                  <div key={o.orderId} className="px-4 py-2.5 flex justify-between gap-2">
+                                    <div>
+                                      <div className="font-mono text-zinc-900 font-medium">#{o.orderId}</div>
+                                      <div className="text-[11px] text-zinc-500">
+                                        {o.status} · {formatDateTime(o.createdAt)}
+                                      </div>
+                                    </div>
+                                    <span className="font-mono tabular-nums font-semibold text-zinc-900">
+                                      {formatSom(o.amount)}
+                                    </span>
+                                  </div>
+                                ))
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="border border-zinc-200 rounded-xl overflow-hidden bg-white">
+                            <div className="px-4 py-2.5 bg-zinc-50 border-b border-zinc-200 font-semibold text-zinc-900 flex items-center justify-between">
+                              <span>Amaliyotlar ({selectedUserDetail.transactions.length})</span>
+                            </div>
+                            <div className="divide-y divide-zinc-100 max-h-44 overflow-y-auto">
+                              {selectedUserDetail.transactions.length === 0 ? (
+                                <div className="p-4 text-center text-zinc-400">Amaliyotlar yo‘q</div>
+                              ) : (
+                                selectedUserDetail.transactions.map((t) => (
+                                  <button
+                                    type="button"
+                                    key={t.id}
+                                    onClick={() => setSelectedAdminTx(t)}
+                                    className="w-full px-4 py-2.5 flex justify-between gap-2 text-left hover:bg-zinc-50 transition-colors"
+                                  >
+                                    <div className="min-w-0">
+                                      <div className="text-zinc-900 font-medium truncate">{t.title}</div>
+                                      <div className="text-[11px] text-zinc-500">
+                                        {t.method} · {t.date}
+                                      </div>
+                                    </div>
+                                    <span
+                                      className={`font-mono tabular-nums font-semibold shrink-0 ${
+                                        t.amount >= 0 ? 'text-emerald-700' : 'text-zinc-700'
+                                      }`}
+                                    >
+                                      {t.amount >= 0 ? `+${formatSom(t.amount)}` : formatSom(t.amount)}
+                                    </span>
+                                  </button>
+                                ))
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <>
+                    <div className="p-4 md:p-5 border-b border-zinc-200 space-y-3">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <div>
+                          <h2 className="text-sm font-semibold text-zinc-900">
+                            Foydalanuvchilar, CRM teglar va balans boshqaruvi
+                          </h2>
+                          <p className="text-xs text-zinc-500 mt-0.5">
+                            Balans faqat TolovGo, Promokod yoki Xodim tomonidan server bazasida o‘zgartiriladi.
+                          </p>
+                        </div>
+                        <form
+                          onSubmit={(e) => {
+                            e.preventDefault();
+                            void handleSearchUsers(userSearch);
+                          }}
+                          className="flex items-center gap-2"
+                        >
+                          <div className="relative">
+                            <Search className="w-3.5 h-3.5 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                            <input
+                              type="text"
+                              value={userSearch}
+                              onChange={(e) => setUserSearch(e.target.value)}
+                              placeholder="ID, @username, ism yoki teg..."
+                              className="pl-8 pr-3 py-2 text-xs bg-zinc-50 border border-zinc-200 focus:border-red-600 focus:bg-white rounded-xl outline-none w-52 sm:w-64"
+                            />
+                          </div>
+                          <button
+                            type="submit"
+                            disabled={usersLoading}
+                            className="px-3.5 py-2 rounded-xl bg-[#111113] hover:bg-zinc-800 text-white text-xs font-medium disabled:opacity-50 whitespace-nowrap"
+                          >
+                            Qidirish
+                          </button>
+                        </form>
+                      </div>
+
+                      {/* Segment Filters */}
+                      <div className="flex flex-wrap items-center gap-1 bg-zinc-100 p-1 rounded-xl w-fit">
+                        {(
+                          [
+                            { id: 'all', label: 'Barchasi' },
+                            { id: 'active', label: 'Faol' },
+                            { id: 'vip', label: 'VIP' },
+                            { id: 'yangi', label: 'Yangi' },
+                            { id: 'zero', label: '0 Balans' },
+                            { id: 'banned', label: 'Bloklangan' },
+                          ] as const
+                        ).map((seg) => (
+                          <button
+                            key={seg.id}
+                            type="button"
+                            onClick={() => setUserSegmentFilter(seg.id)}
+                            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${
+                              userSegmentFilter === seg.id
+                                ? 'bg-white text-zinc-900 shadow-xs'
+                                : 'text-zinc-600 hover:text-zinc-900'
+                            }`}
+                          >
+                            {seg.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left border-collapse text-xs">
+                        <thead>
+                          <tr className="border-b border-zinc-200 bg-zinc-50/70 text-zinc-500">
+                            <th className="py-3 px-4 font-medium">Telegram ID</th>
+                            <th className="py-3 px-4 font-medium">Foydalanuvchi</th>
+                            <th className="py-3 px-4 font-medium">Balans / Tushum</th>
+                            <th className="py-3 px-4 font-medium">CRM Teg · Holat</th>
+                            <th className="py-3 px-4 font-medium text-right">Amallar</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-zinc-100">
+                          {usersLoading ? (
+                            <tr>
+                              <td colSpan={5} className="py-10 text-center text-zinc-500">
+                                <Loader2 className="w-4 h-4 animate-spin inline mr-2" />
+                                Yuklanmoqda...
+                              </td>
+                            </tr>
+                          ) : filteredUsers.length === 0 ? (
+                            <tr>
+                              <td colSpan={5} className="py-10 text-center text-zinc-400">
+                                Foydalanuvchi topilmadi.
+                              </td>
+                            </tr>
+                          ) : (
+                            filteredUsers.map((u) => (
+                              <tr key={u.telegramId} className="hover:bg-zinc-50/70">
+                                <td className="py-3 px-4 font-mono tabular-nums text-zinc-700">
+                                  {u.telegramId}
+                                </td>
+                                <td className="py-3 px-4">
+                                  <div className="flex items-center gap-2.5">
+                                    {u.photoUrl ? (
+                                      <img src={u.photoUrl} alt="" className="w-8 h-8 rounded-full object-cover shrink-0" />
+                                    ) : (
+                                      <div className="w-8 h-8 rounded-full bg-zinc-200 text-zinc-700 font-semibold text-xs flex items-center justify-center shrink-0">
+                                        {(u.firstName || 'U')[0].toUpperCase()}
+                                      </div>
+                                    )}
+                                    <div>
+                                      <div className="font-medium text-zinc-900">
+                                        {u.fullName || [u.firstName, u.lastName].filter(Boolean).join(' ')}
+                                      </div>
+                                      <div className="text-[11px] text-zinc-500">
+                                        {u.username ? `@${u.username}` : 'usernamesiz'}
+                                        {' · '}
+                                        {u.referralCount} ta referal
+                                      </div>
+                                    </div>
+                                  </div>
+                                </td>
+                                <td className="py-3 px-4 font-mono tabular-nums">
+                                  <div className="font-semibold text-zinc-900">
+                                    {formatSom(u.balance)}
+                                  </div>
+                                  {typeof u.totalDeposited === 'number' && u.totalDeposited > 0 && (
+                                    <div className="text-[11px] text-emerald-700">
+                                      +{formatSom(u.totalDeposited)} kiritgan
+                                    </div>
+                                  )}
+                                </td>
+                                <td className="py-3 px-4 text-xs">
+                                  <div className="text-zinc-700">
+                                    {u.crmTag ? `${u.crmTag} · ` : ''}
+                                    <span
+                                      className={`font-medium ${
+                                        u.isBanned ? 'text-red-600' : 'text-emerald-700'
+                                      }`}
+                                    >
+                                      {u.isBanned ? 'Bloklangan' : 'Faol'}
+                                    </span>
+                                  </div>
+                                  {u.crmNote && (
+                                    <div className="text-[11px] text-zinc-400 truncate max-w-[190px]">
+                                      {u.crmNote}
+                                    </div>
+                                  )}
+                                </td>
+                                <td className="py-3 px-4 text-right space-x-1.5 whitespace-nowrap">
+                                  <button
+                                    type="button"
+                                    onClick={() => void handleOpenUserDetail(u.telegramId)}
+                                    className="px-2.5 py-1.5 rounded-lg border border-zinc-200 bg-white hover:bg-zinc-50 text-zinc-800 font-medium inline-flex items-center gap-1"
+                                  >
+                                    <Eye className="w-3 h-3" />
+                                    <span>Profil & CRM</span>
+                                  </button>
+                                  {hasPerm('balance') && (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setBalanceTarget(u);
+                                        setBalanceOp('add');
+                                        setBalanceAmountText('10000');
+                                        setBalanceReason('');
+                                      }}
+                                      className="px-2.5 py-1.5 rounded-lg border border-zinc-200 bg-white hover:bg-zinc-50 text-zinc-800 font-medium inline-flex items-center gap-1"
+                                    >
+                                      <Wallet className="w-3 h-3 text-red-600" />
+                                      <span>Balans</span>
+                                    </button>
+                                  )}
+                                  {hasPerm('users') && (
+                                    <button
+                                      type="button"
+                                      disabled={u.telegramId === telegramUser.telegramId}
+                                      onClick={() => void handleToggleBan(u)}
+                                      className={`px-2.5 py-1.5 rounded-lg border font-medium inline-flex items-center gap-1 disabled:opacity-40 ${
+                                        u.isBanned
+                                          ? 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+                                          : 'border-red-200 bg-red-50 text-red-700 hover:bg-red-100'
+                                      }`}
+                                    >
+                                      {u.isBanned ? <Unlock className="w-3 h-3" /> : <Ban className="w-3 h-3" />}
+                                      <span>{u.isBanned ? 'Ochish' : 'Blok'}</span>
+                                    </button>
+                                  )}
+                                </td>
+                              </tr>
+                            ))
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
+                )}
+              </section>
+            )}
+
+            {/* ============================================================
+                TAB: FILES & SLIDES DIRECTORY & VERIFICATION
+                ============================================================ */}
+            {activeTab === 'files' && (
+              <section className="bg-white border border-zinc-200 rounded-2xl overflow-hidden space-y-4">
+                <div className="p-4 md:p-5 border-b border-zinc-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-sm font-semibold text-zinc-900">
+                      Foydalanuvchilar tomonidan yaratilgan barcha fayllar va slaydlar
+                    </h2>
+                    <p className="text-xs text-zinc-500 mt-0.5">
+                      Slaydlar, Word mustaqil ishlar, kurs ishlari va PDF daftar hujjatlari (hakamlik va tekshiruv uchun).
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="relative">
+                      <Search className="w-3.5 h-3.5 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                      <input
+                        type="text"
+                        value={fileSearch}
+                        onChange={(e) => setFileSearch(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') void loadAdminFiles();
+                        }}
+                        placeholder="Fayl nomi, ID yoki ism..."
+                        className="pl-8 pr-3 py-2 text-xs bg-zinc-50 border border-zinc-200 focus:border-red-600 focus:bg-white rounded-xl outline-none w-48 sm:w-60"
+                      />
+                    </div>
+                    <select
+                      value={fileFormatFilter}
+                      onChange={(e) => setFileFormatFilter(e.target.value)}
+                      className="text-xs bg-zinc-50 border border-zinc-200 focus:border-red-600 rounded-xl px-3 py-2 outline-none"
+                    >
+                      <option value="">Barcha formatlar</option>
+                      <option value="pptx">PPTX (Slayd)</option>
+                      <option value="docx">Word (.docx)</option>
+                      <option value="pdf">PDF</option>
+                      <option value="png">Rasm / Infografika</option>
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => void loadAdminFiles()}
+                      className="px-3.5 py-2 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-semibold flex items-center gap-1.5"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${filesLoading ? 'animate-spin' : ''}`} />
+                      <span>Yangilash</span>
+                    </button>
                   </div>
                 </div>
 
@@ -3079,120 +3538,81 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   <table className="w-full text-left border-collapse text-xs">
                     <thead>
                       <tr className="border-b border-zinc-200 bg-zinc-50/70 text-zinc-500">
-                        <th className="py-3 px-4 font-medium">Telegram ID</th>
-                        <th className="py-3 px-4 font-medium">Foydalanuvchi</th>
-                        <th className="py-3 px-4 font-medium">Balans / Tushum</th>
-                        <th className="py-3 px-4 font-medium">CRM Teg · Holat</th>
-                        <th className="py-3 px-4 font-medium text-right">Amallar</th>
+                        <th className="py-3 px-4 font-medium">Fayl nomi</th>
+                        <th className="py-3 px-4 font-medium">Foydalanuvchi / ID</th>
+                        <th className="py-3 px-4 font-medium">Format · Hajm</th>
+                        <th className="py-3 px-4 font-medium">Telegram Bot</th>
+                        <th className="py-3 px-4 font-medium">Yaratilgan vaqt</th>
+                        <th className="py-3 px-4 font-medium text-right">Yuklab olish</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-zinc-100">
-                      {usersLoading ? (
+                      {filesLoading ? (
                         <tr>
-                          <td colSpan={5} className="py-10 text-center text-zinc-500">
-                            <Loader2 className="w-4 h-4 animate-spin inline mr-2" />
-                            Yuklanmoqda...
+                          <td colSpan={6} className="py-12 text-center text-zinc-500">
+                            <Loader2 className="w-5 h-5 animate-spin inline mr-2 text-red-600" />
+                            Fayllar yuklanmoqda...
                           </td>
                         </tr>
-                      ) : filteredUsers.length === 0 ? (
+                      ) : allFiles.length === 0 ? (
                         <tr>
-                          <td colSpan={5} className="py-10 text-center text-zinc-400">
-                            Foydalanuvchi topilmadi.
+                          <td colSpan={6} className="py-12 text-center text-zinc-400">
+                            Hozircha saqlangan fayllar topilmadi.
                           </td>
                         </tr>
                       ) : (
-                        filteredUsers.map((u) => (
-                          <tr key={u.telegramId} className="hover:bg-zinc-50/70">
-                            <td className="py-3 px-4 font-mono tabular-nums text-zinc-700">
-                              {u.telegramId}
+                        allFiles.map((f) => (
+                          <tr key={f.id} className="hover:bg-zinc-50/70">
+                            <td className="py-3 px-4 font-medium text-zinc-900">
+                              <div className="flex items-center gap-2">
+                                <span className="p-1.5 rounded-lg bg-red-50 text-red-600 font-mono text-[10px] uppercase font-bold">
+                                  {f.format || 'file'}
+                                </span>
+                                <div>
+                                  <div>{f.fileName}</div>
+                                  {f.serviceTitle && (
+                                    <div className="text-[11px] text-zinc-500 font-normal">{f.serviceTitle}</div>
+                                  )}
+                                </div>
+                              </div>
+                            </td>
+                            <td className="py-3 px-4 font-mono text-zinc-700">
+                              <div>{f.userFirstName || 'Mijoz'}</div>
+                              <div className="text-[11px] text-zinc-400">ID: {f.telegramId || '—'}</div>
+                            </td>
+                            <td className="py-3 px-4 font-mono text-zinc-600">
+                              <span className="uppercase font-semibold text-zinc-800">{f.format}</span>
+                              {' · '}
+                              <span>{Math.round((f.sizeBytes || 0) / 1024)} KB</span>
                             </td>
                             <td className="py-3 px-4">
-                              <div className="flex items-center gap-2.5">
-                                {u.photoUrl ? (
-                                  <img src={u.photoUrl} alt="" className="w-8 h-8 rounded-full object-cover shrink-0" />
-                                ) : (
-                                  <div className="w-8 h-8 rounded-full bg-zinc-200 text-zinc-700 font-semibold text-xs flex items-center justify-center shrink-0">
-                                    {(u.firstName || 'U')[0].toUpperCase()}
-                                  </div>
-                                )}
-                                <div>
-                                  <div className="font-medium text-zinc-900">
-                                    {u.fullName || [u.firstName, u.lastName].filter(Boolean).join(' ')}
-                                  </div>
-                                  <div className="text-[11px] text-zinc-500">
-                                    {u.username ? `@${u.username}` : 'usernamesiz'}
-                                    {' · '}
-                                    {u.referralCount} ta referal
-                                  </div>
-                                </div>
-                              </div>
-                            </td>
-                            <td className="py-3 px-4 font-mono tabular-nums">
-                              <div className="font-semibold text-zinc-900">
-                                {formatSom(u.balance)}
-                              </div>
-                              {typeof u.totalDeposited === 'number' && u.totalDeposited > 0 && (
-                                <div className="text-[11px] text-emerald-700">
-                                  +{formatSom(u.totalDeposited)} kiritgan
-                                </div>
-                              )}
-                            </td>
-                            <td className="py-3 px-4 text-xs">
-                              <div className="text-zinc-700">
-                                {u.crmTag ? `${u.crmTag} · ` : ''}
-                                <span
-                                  className={`font-medium ${
-                                    u.isBanned ? 'text-red-600' : 'text-emerald-700'
-                                  }`}
-                                >
-                                  {u.isBanned ? 'Bloklangan' : 'Faol'}
+                              {f.sentToTelegram ? (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 font-medium text-[11px]">
+                                  <Check className="w-3 h-3" /> Yuborilgan
                                 </span>
-                              </div>
-                              {u.crmNote && (
-                                <div className="text-[11px] text-zinc-400 truncate max-w-[190px]">
-                                  {u.crmNote}
-                                </div>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 font-medium text-[11px]">
+                                  Saqlangan
+                                </span>
                               )}
                             </td>
-                            <td className="py-3 px-4 text-right space-x-1.5 whitespace-nowrap">
+                            <td className="py-3 px-4 font-mono text-zinc-500">
+                              {formatDateTime(f.createdAt)}
+                            </td>
+                            <td className="py-3 px-4 text-right">
                               <button
                                 type="button"
-                                onClick={() => void handleOpenUserDetail(u.telegramId)}
-                                className="px-2.5 py-1.5 rounded-lg border border-zinc-200 bg-white hover:bg-zinc-50 text-zinc-800 font-medium inline-flex items-center gap-1"
+                                disabled={downloadingFileId === f.id}
+                                onClick={() => void handleAdminDownloadFile(f.id, f.fileName)}
+                                className="px-3 py-1.5 rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white font-semibold inline-flex items-center gap-1.5 shadow-xs transition-colors"
                               >
-                                <Eye className="w-3 h-3" />
-                                <span>Profil & CRM</span>
+                                {downloadingFileId === f.id ? (
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                ) : (
+                                  <Download className="w-3.5 h-3.5" />
+                                )}
+                                <span>Yuklab olish</span>
                               </button>
-                              {hasPerm('balance') && (
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setBalanceTarget(u);
-                                    setBalanceOp('add');
-                                    setBalanceAmountText('10000');
-                                    setBalanceReason('');
-                                  }}
-                                  className="px-2.5 py-1.5 rounded-lg border border-zinc-200 bg-white hover:bg-zinc-50 text-zinc-800 font-medium inline-flex items-center gap-1"
-                                >
-                                  <Wallet className="w-3 h-3 text-red-600" />
-                                  <span>Balans</span>
-                                </button>
-                              )}
-                              {hasPerm('users') && (
-                                <button
-                                  type="button"
-                                  disabled={u.telegramId === telegramUser.telegramId}
-                                  onClick={() => void handleToggleBan(u)}
-                                  className={`px-2.5 py-1.5 rounded-lg border font-medium inline-flex items-center gap-1 disabled:opacity-40 ${
-                                    u.isBanned
-                                      ? 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
-                                      : 'border-red-200 bg-red-50 text-red-700 hover:bg-red-100'
-                                  }`}
-                                >
-                                  {u.isBanned ? <Unlock className="w-3 h-3" /> : <Ban className="w-3 h-3" />}
-                                  <span>{u.isBanned ? 'Ochish' : 'Blok'}</span>
-                                </button>
-                              )}
                             </td>
                           </tr>
                         ))
