@@ -63,6 +63,12 @@ export interface DbProjectSummary {
   updatedAt: number;
 }
 
+export interface AdminProjectRow extends DbProjectSummary {
+  telegramId: string;
+  userFirstName?: string;
+  userUsername?: string;
+}
+
 export interface ServicePricingConfig {
   academic_wave_pptx: { basePrice: number; baseLimit: number; extraStepPrice: number };
   white_card_pptx: { basePrice: number; baseLimit: number; extraStepPrice: number };
@@ -3406,4 +3412,94 @@ export async function dbListAllUserFilesAdmin(
     return null;
   }
 }
+
+export async function dbListAllProjectsAdmin(
+  limit = 150,
+  query = '',
+  mode = ''
+): Promise<AdminProjectRow[] | null> {
+  const sql = getSql();
+  if (!sql || !(await ensureDbSchema())) return null;
+  try {
+    const q = query.trim().toLowerCase();
+    const m = mode.trim().toLowerCase();
+    const rows = (await sql`
+      SELECT
+        p.id,
+        p.telegram_id,
+        p.title,
+        p.mode,
+        jsonb_array_length(p.pptx_pages) AS pptx_count,
+        jsonb_array_length(p.pdf_pages) AS pdf_count,
+        EXTRACT(EPOCH FROM p.updated_at) * 1000 AS updated_ms,
+        u.first_name AS user_first_name,
+        u.username AS user_username
+      FROM projects p
+      LEFT JOIN users u ON u.telegram_id = p.telegram_id
+      WHERE (${m === '' || m === 'all'} OR LOWER(p.mode) = ${m})
+        AND (
+          ${q === ''}
+          OR LOWER(p.title) LIKE ${`%${q}%`}
+          OR LOWER(COALESCE(u.first_name, '')) LIKE ${`%${q}%`}
+          OR LOWER(COALESCE(u.username, '')) LIKE ${`%${q}%`}
+          OR p.telegram_id LIKE ${`%${q}%`}
+        )
+      ORDER BY p.updated_at DESC
+      LIMIT ${limit}
+    `) as Array<Record<string, unknown>>;
+
+    return rows.map((r) => ({
+      id: String(r.id),
+      telegramId: String(r.telegram_id),
+      userFirstName: r.user_first_name ? String(r.user_first_name) : undefined,
+      userUsername: r.user_username ? String(r.user_username) : undefined,
+      title: String(r.title),
+      mode: (r.mode === 'word' || r.mode === 'pdf' ? r.mode : 'pptx') as DbProjectSummary['mode'],
+      pptxCount: Number(r.pptx_count) || 0,
+      pdfCount: Number(r.pdf_count) || 0,
+      updatedAt: Number(r.updated_ms) || Date.now(),
+    }));
+  } catch (err) {
+    console.error('[Neon dbListAllProjectsAdmin Error]', err);
+    return null;
+  }
+}
+
+export async function dbGetProjectByIdAdmin(projectId: string): Promise<DbProjectRecord | null> {
+  const sql = getSql();
+  if (!sql || !(await ensureDbSchema())) return null;
+  try {
+    const rows = (await sql`
+      SELECT
+        id, telegram_id, title, mode, pptx_pages, pdf_pages, pdf_orientation, word_doc, tolovgo_mode,
+        EXTRACT(EPOCH FROM created_at) * 1000 AS created_ms,
+        EXTRACT(EPOCH FROM updated_at) * 1000 AS updated_ms
+      FROM projects
+      WHERE id = ${projectId}
+      LIMIT 1
+    `) as Array<Record<string, unknown>>;
+    const r = rows[0];
+    if (!r) return null;
+    return {
+      id: String(r.id),
+      telegramId: String(r.telegram_id),
+      title: String(r.title),
+      mode: String(r.mode) as DbProjectRecord['mode'],
+      pptxPages: Array.isArray(r.pptx_pages) ? r.pptx_pages : [],
+      pdfPages: Array.isArray(r.pdf_pages) ? r.pdf_pages : [],
+      pdfOrientation: r.pdf_orientation === 'landscape' ? 'landscape' : 'portrait',
+      wordDoc:
+        r.word_doc && typeof r.word_doc === 'object'
+          ? (r.word_doc as Record<string, unknown>)
+          : {},
+      tolovgoMode: r.tolovgo_mode === 'test' ? 'test' : 'live',
+      createdAt: Number(r.created_ms) || Date.now(),
+      updatedAt: Number(r.updated_ms) || Date.now(),
+    };
+  } catch (err) {
+    console.error('[Neon dbGetProjectByIdAdmin Error]', err);
+    return null;
+  }
+}
+
 

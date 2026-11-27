@@ -3,6 +3,7 @@ import {
   AdminAuditRow,
   AdminOrderRow,
   AdminOverviewStats,
+  AdminProjectRow,
   AdminUserDetailPayload,
   AdminUserRow,
   AppPricingSettings,
@@ -75,19 +76,6 @@ export function getTelegramAuthHeaders(sessionToken?: string | null): Record<str
   return headers;
 }
 
-function blobToBase64(blob: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      const result = typeof reader.result === 'string' ? reader.result : '';
-      const base64 = result.includes(',') ? result.split(',').pop() || '' : '';
-      resolve(base64);
-    };
-    reader.onerror = () => reject(new Error('Failed to encode file'));
-    reader.readAsDataURL(blob);
-  });
-}
-
 export async function saveAndSendUserFile(params: {
   blob: Blob;
   fileName: string;
@@ -118,23 +106,27 @@ export async function saveAndSendUserFile(params: {
     };
   }
   try {
-    const fileBase64 = await blobToBase64(params.blob);
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/octet-stream',
+      'X-File-Name': encodeURIComponent(params.fileName),
+      'X-Send-Telegram': params.sendToTelegram !== false ? 'true' : 'false',
+      'X-Force-Telegram': params.forceTelegram === true ? 'true' : 'false',
+      ...getTelegramAuthHeaders(params.sessionToken),
+    };
+    if (params.caption) {
+      headers['X-File-Caption'] = encodeURIComponent(params.caption);
+    }
+    if (params.serviceId) {
+      headers['X-Service-Id'] = encodeURIComponent(params.serviceId);
+    }
+    if (params.serviceTitle) {
+      headers['X-Service-Title'] = encodeURIComponent(params.serviceTitle);
+    }
     const res = await fetch('/api/files/save', {
       method: 'POST',
       credentials: 'same-origin',
-      headers: {
-        'Content-Type': 'application/json',
-        ...getTelegramAuthHeaders(params.sessionToken),
-      },
-      body: JSON.stringify({
-        fileName: params.fileName,
-        fileBase64,
-        caption: params.caption,
-        serviceId: params.serviceId,
-        serviceTitle: params.serviceTitle,
-        sendToTelegram: params.sendToTelegram !== false,
-        force: params.forceTelegram === true,
-      }),
+      headers,
+      body: params.blob,
     });
     const data = (await res.json().catch(() => ({}))) as {
       ok?: boolean;
@@ -1364,6 +1356,60 @@ export async function adminFetchFileBlob(
     }
     const blob = await res.blob();
     return { ok: true, blob };
+  } catch {
+    return { ok: false, error: "Server bilan bog'lanishda xatolik." };
+  }
+}
+
+export async function adminListAllProjects(
+  sessionToken: string,
+  adminToken: string,
+  query = '',
+  mode = 'all'
+): Promise<{ ok: boolean; projects: AdminProjectRow[]; error?: string }> {
+  try {
+    const qs = new URLSearchParams();
+    if (query.trim()) qs.set('q', query.trim());
+    if (mode && mode !== 'all') qs.set('mode', mode);
+    const res = await fetch(`/api/admin/projects?${qs.toString()}`, {
+      credentials: 'same-origin',
+      headers: getAdminHeaders(sessionToken, adminToken),
+    });
+    const data = (await res.json().catch(() => ({}))) as {
+      ok?: boolean;
+      projects?: AdminProjectRow[];
+      error?: string;
+    };
+    if (!res.ok) return { ok: false, projects: [], error: data.error || 'Loyihalar yuklanmadi.' };
+    return { ok: true, projects: Array.isArray(data.projects) ? data.projects : [] };
+  } catch {
+    return { ok: false, projects: [], error: "Server bilan bog'lanishda xatolik." };
+  }
+}
+
+export async function adminGetUserProject(
+  telegramId: string,
+  projectId: string,
+  sessionToken: string,
+  adminToken: string
+): Promise<{ ok: boolean; project?: CloudProjectData; error?: string }> {
+  try {
+    const res = await fetch(
+      `/api/admin/users/${encodeURIComponent(telegramId)}/projects/${encodeURIComponent(projectId)}`,
+      {
+        credentials: 'same-origin',
+        headers: getAdminHeaders(sessionToken, adminToken),
+      }
+    );
+    const data = (await res.json().catch(() => ({}))) as {
+      ok?: boolean;
+      project?: CloudProjectData;
+      error?: string;
+    };
+    if (!res.ok || !data.project) {
+      return { ok: false, error: data.error || 'Loyiha topilmadi.' };
+    }
+    return { ok: true, project: data.project };
   } catch {
     return { ok: false, error: "Server bilan bog'lanishda xatolik." };
   }

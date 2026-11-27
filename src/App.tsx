@@ -1279,31 +1279,45 @@ export default function App() {
   const handleAiGenerated = (result: AiGeneratedPayload) => {
     const now = new Date();
     const dateStr = `${String(now.getDate()).padStart(2, '0')}.${String(now.getMonth() + 1).padStart(2, '0')}.${now.getFullYear()}`;
+    const prevSnapshot = stateRef.current;
 
     if (result.targetMode === 'pptx') {
       setPptxHistory((h) => ({
-        past: [...h.past.slice(-29), stateRef.current.pptxPages],
+        past: [...h.past.slice(-29), prevSnapshot.pptxPages],
         future: [],
       }));
     } else if (result.targetMode === 'pdf') {
       setPdfHistory((h) => ({
-        past: [...h.past.slice(-29), stateRef.current.pdfPages],
+        past: [...h.past.slice(-29), prevSnapshot.pdfPages],
         future: [],
       }));
+    }
+
+    const nextPptxPages = result.targetMode === 'pptx' ? result.pages : prevSnapshot.pptxPages;
+    const nextPdfPages = result.targetMode === 'pdf' ? result.pages : prevSnapshot.pdfPages;
+    const nextWordDoc =
+      result.targetMode === 'word' && result.wordDoc ? result.wordDoc : prevSnapshot.wordDoc;
+    const nextPdfOrientation = result.pdfOrientation || prevSnapshot.pdfOrientation;
+
+    let nextProjectId = activeProjectId;
+    if (telegramUser && tgSessionToken) {
+      nextProjectId = `proj_${telegramUser.telegramId}_${Date.now().toString(36)}`;
+      skipNextAutoSyncRef.current = true;
+      setActiveProjectId(nextProjectId);
     }
 
     setState((prev) => ({
       ...prev,
       mode: result.targetMode,
       docTitle: result.docTitle,
-      pptxPages: result.targetMode === 'pptx' ? result.pages : prev.pptxPages,
+      pptxPages: nextPptxPages,
       activePptxId:
         result.targetMode === 'pptx' ? result.pages[0]?.id || prev.activePptxId : prev.activePptxId,
-      pdfPages: result.targetMode === 'pdf' ? result.pages : prev.pdfPages,
+      pdfPages: nextPdfPages,
       activePdfId:
         result.targetMode === 'pdf' ? result.pages[0]?.id || prev.activePdfId : prev.activePdfId,
-      wordDoc: result.targetMode === 'word' && result.wordDoc ? result.wordDoc : prev.wordDoc,
-      pdfOrientation: result.pdfOrientation || prev.pdfOrientation,
+      wordDoc: nextWordDoc,
+      pdfOrientation: nextPdfOrientation,
       balance:
         result.serverCharged && typeof result.newBalance === 'number'
           ? result.newBalance
@@ -1328,7 +1342,30 @@ export default function App() {
     if (tgSessionToken) {
       const tokenSnapshot = tgSessionToken;
       const shouldSendToTg = telegramUser?.autoSendFiles !== false;
+      const projectIdToSave = nextProjectId || (telegramUser ? `proj_${telegramUser.telegramId}_main` : '');
       void (async () => {
+        if (projectIdToSave) {
+          const syncRes = await syncCloudProject(
+            {
+              id: projectIdToSave,
+              title: result.docTitle || 'Yangi loyiha',
+              mode: result.targetMode,
+              pptxPages: nextPptxPages,
+              pdfPages: nextPdfPages,
+              pdfOrientation: nextPdfOrientation,
+              wordDoc: nextWordDoc,
+              tolovgoMode: prevSnapshot.tolovgoMode || 'live',
+            },
+            tokenSnapshot
+          );
+          if (syncRes.ok && syncRes.project) {
+            setSavedProjects((prev) => [
+              syncRes.project!,
+              ...prev.filter((p) => p.id !== syncRes.project!.id),
+            ]);
+          }
+        }
+
         await logTelegramActivity(
           `${result.serviceTitle}: ${result.docTitle}`,
           'AI Xizmat',
@@ -1350,7 +1387,7 @@ export default function App() {
               result.pages,
               result.docTitle,
               'pdf',
-              result.pdfOrientation || stateRef.current.pdfOrientation,
+              nextPdfOrientation,
               { download: false }
             );
           }
@@ -1372,10 +1409,12 @@ export default function App() {
               } else {
                 showNotice('ok', `${result.serviceTitle} Fayllarim bo'limiga saqlandi.`);
               }
+            } else if (!savedRes.skipped && savedRes.error) {
+              showNotice('err', savedRes.error);
             }
           }
         } catch {
-          // Non-blocking background save & Telegram delivery
+          showNotice('err', "Faylni eksport qilib saqlashda xatolik yuz berdi.");
         }
       })();
     }

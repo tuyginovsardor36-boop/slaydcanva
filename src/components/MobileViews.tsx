@@ -45,6 +45,9 @@ import {
   UserProfile,
   WorkspaceMode,
 } from '../types/editor';
+import { exportToDocx } from '../utils/exportDocx';
+import { exportCanvasPagesToPdf } from '../utils/exportPdf';
+import { exportToPptx } from '../utils/exportPptx';
 import { triggerSafeFileDownload } from '../utils/safeDownload';
 import {
   deleteUserSavedFile,
@@ -53,9 +56,11 @@ import {
   formatTelegramDisplayName,
   getFileDownloadLink,
   getTelegramAuthHeaders,
+  loadCloudProject,
   redeemPromoCode,
   resendUserFileToTelegram,
   resetUserSupportChat,
+  saveAndSendUserFile,
   sendUserSupportMessage,
   TelegramAccountResponse,
   TelegramConfigResponse,
@@ -1152,10 +1157,26 @@ export const FilesAndOpsView: React.FC<FilesAndOpsViewProps> = ({
   onOpenTab,
 }) => {
   const [files, setFiles] = useState<UserFileRecord[]>([]);
+  const [serverProjects, setServerProjects] = useState<ProjectSummary[]>([]);
   const [loadingFiles, setLoadingFiles] = useState(false);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [sendingTgId, setSendingTgId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [exportingProjId, setExportingProjId] = useState<string | null>(null);
+  const [sendingProjId, setSendingProjId] = useState<string | null>(null);
+
+  const mergedProjects = React.useMemo(() => {
+    const byId = new Map<string, ProjectSummary>();
+    for (const p of serverProjects) {
+      byId.set(p.id, p);
+    }
+    for (const p of savedProjects) {
+      byId.set(p.id, p);
+    }
+    return Array.from(byId.values()).sort(
+      (a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0)
+    );
+  }, [savedProjects, serverProjects]);
 
   const refreshFiles = useCallback(async () => {
     if (!telegramSessionToken) return;
@@ -1165,6 +1186,9 @@ export const FilesAndOpsView: React.FC<FilesAndOpsViewProps> = ({
       if (res?.files) {
         setFiles(res.files);
       }
+      if (res?.projects) {
+        setServerProjects(res.projects);
+      }
     } finally {
       setLoadingFiles(false);
     }
@@ -1173,6 +1197,67 @@ export const FilesAndOpsView: React.FC<FilesAndOpsViewProps> = ({
   useEffect(() => {
     void refreshFiles();
   }, [refreshFiles, refreshKey]);
+
+  const handleProjectExport = async (
+    proj: ProjectSummary,
+    action: 'download' | 'telegram'
+  ) => {
+    if (!telegramSessionToken || exportingProjId || sendingProjId) return;
+    if (action === 'download') setExportingProjId(proj.id);
+    else setSendingProjId(proj.id);
+    try {
+      const cloud = await loadCloudProject(proj.id, telegramSessionToken);
+      if (!cloud) {
+        onNotify?.('err', 'Loyihani yuklab bo‘lmadi.');
+        return;
+      }
+      const docName = cloud.title || proj.title || 'SlaydCanva';
+      const downloadDirectly = action === 'download';
+      let exported: { blob: Blob; fileName: string } | null = null;
+      if (cloud.mode === 'word') {
+        exported = await exportToDocx(cloud.wordDoc, docName, { download: downloadDirectly });
+      } else if (cloud.mode === 'pdf') {
+        exported = await exportCanvasPagesToPdf(
+          cloud.pdfPages,
+          docName,
+          'pdf',
+          cloud.pdfOrientation || 'portrait',
+          { download: downloadDirectly }
+        );
+      } else {
+        exported = await exportToPptx(cloud.pptxPages, docName, { download: downloadDirectly });
+      }
+
+      if (!exported) {
+        onNotify?.('err', 'Fayl shakllantirib bo‘lmadi.');
+        return;
+      }
+
+      if (action === 'download') {
+        onNotify?.('ok', `${exported.fileName} yuklab olindi.`);
+      } else {
+        const res = await saveAndSendUserFile({
+          blob: exported.blob,
+          fileName: exported.fileName,
+          sessionToken: telegramSessionToken,
+          caption: `📄 ${docName}`,
+          sendToTelegram: true,
+          forceTelegram: true,
+        });
+        if (!res.ok) {
+          onNotify?.('err', res.error || 'Telegram botga yuborib bo‘lmadi.');
+          return;
+        }
+        void refreshFiles();
+        onNotify?.('ok', `${exported.fileName} Telegram botga yuborildi.`);
+      }
+    } catch {
+      onNotify?.('err', 'Fayl eksport qilishda xatolik yuz berdi.');
+    } finally {
+      setExportingProjId(null);
+      setSendingProjId(null);
+    }
+  };
 
   const handleDownloadSavedFile = async (f: UserFileRecord) => {
     if (!telegramSessionToken || downloadingId) return;
@@ -1409,7 +1494,7 @@ export const FilesAndOpsView: React.FC<FilesAndOpsViewProps> = ({
         <section className="max-w-md mx-auto bg-white border border-zinc-200 rounded-2xl overflow-hidden">
           <div className="px-4 py-3 border-b border-zinc-200 flex items-center justify-between gap-2">
             <h2 className="text-sm font-semibold text-zinc-900">
-              Bulutli loyihalar ({savedProjects.length})
+              Bulutli loyihalar va slaydlar ({mergedProjects.length})
             </h2>
             {onSaveProjectNow && (
               <button
@@ -1428,40 +1513,93 @@ export const FilesAndOpsView: React.FC<FilesAndOpsViewProps> = ({
             )}
           </div>
           <div className="divide-y divide-zinc-100">
-            {savedProjects.length === 0 ? (
+            {mergedProjects.length === 0 ? (
               <div className="p-5 text-center text-xs text-zinc-500">Saqlangan loyihalar yo‘q.</div>
             ) : (
-              savedProjects.map((proj) => (
-                <div
-                  key={proj.id}
-                  className={`px-4 py-3 flex items-center justify-between gap-2 ${
-                    proj.id === activeProjectId ? 'bg-red-50/40' : ''
-                  }`}
-                >
-                  <button
-                    type="button"
-                    onClick={() => onLoadCloudProject?.(proj.id)}
-                    className="min-w-0 flex-1 text-left"
+              mergedProjects.map((proj) => {
+                const isExporting = exportingProjId === proj.id;
+                const isSending = sendingProjId === proj.id;
+                const formatExt = proj.mode === 'word' ? 'DOCX' : proj.mode === 'pdf' ? 'PDF' : 'PPTX';
+                return (
+                  <div
+                    key={proj.id}
+                    className={`px-4 py-3 space-y-2 ${
+                      proj.id === activeProjectId ? 'bg-red-50/40' : ''
+                    }`}
                   >
-                    <div className="text-xs font-semibold text-zinc-900 truncate">
-                      {proj.title}
+                    <div className="flex items-start justify-between gap-2">
+                      <button
+                        type="button"
+                        onClick={() => onLoadCloudProject?.(proj.id)}
+                        className="min-w-0 flex-1 text-left"
+                      >
+                        <div className="text-xs font-semibold text-zinc-900 truncate">
+                          {proj.title}
+                        </div>
+                        <div className="text-[11px] font-mono text-zinc-500 mt-0.5">
+                          <span className="font-bold text-red-600">{formatExt}</span>
+                          {' · '}
+                          {proj.mode === 'pptx'
+                            ? `${proj.pptxCount} slayd`
+                            : proj.mode === 'pdf'
+                              ? `${proj.pdfCount} sahifa`
+                              : 'Word hujjat'}
+                          {' · '}
+                          {new Date(proj.updatedAt).toLocaleDateString('uz-UZ')}
+                        </div>
+                      </button>
+                      {onDeleteCloudProject && (
+                        <button
+                          type="button"
+                          onClick={() => onDeleteCloudProject(proj.id)}
+                          className="p-1.5 rounded-lg border border-zinc-200 text-zinc-400 hover:text-red-600 hover:border-red-200 shrink-0"
+                          aria-label="Loyihani o'chirish"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
                     </div>
-                    <div className="text-[11px] font-mono text-zinc-500 mt-0.5">
-                      {proj.mode.toUpperCase()} · {proj.pptxCount} slayd · {proj.pdfCount} PDF
+
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        disabled={isExporting || Boolean(exportingProjId)}
+                        onClick={() => void handleProjectExport(proj, 'download')}
+                        className="flex-1 py-1.5 px-2.5 rounded-lg bg-[#111113] hover:bg-zinc-800 disabled:opacity-50 text-white text-[11px] font-semibold flex items-center justify-center gap-1.5 transition-colors"
+                      >
+                        {isExporting ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Download className="w-3.5 h-3.5 text-red-400" />
+                        )}
+                        <span>{isExporting ? 'Tayyorlanmoqda...' : 'Yuklab olish'}</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={isSending || Boolean(sendingProjId)}
+                        onClick={() => void handleProjectExport(proj, 'telegram')}
+                        className="py-1.5 px-2.5 rounded-lg bg-sky-50 hover:bg-sky-100 border border-sky-200 text-sky-700 text-[11px] font-semibold flex items-center justify-center gap-1 shrink-0 disabled:opacity-50"
+                      >
+                        {isSending ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Send className="w-3.5 h-3.5" />
+                        )}
+                        <span>Botga</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => onLoadCloudProject?.(proj.id)}
+                        className="py-1.5 px-2.5 rounded-lg border border-zinc-200 bg-white hover:bg-zinc-50 text-zinc-700 text-[11px] font-semibold shrink-0"
+                      >
+                        Ochish
+                      </button>
                     </div>
-                  </button>
-                  {onDeleteCloudProject && (
-                    <button
-                      type="button"
-                      onClick={() => onDeleteCloudProject(proj.id)}
-                      className="p-1.5 rounded-lg text-zinc-400 hover:text-red-600"
-                      aria-label="Loyihani o'chirish"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  )}
-                </div>
-              ))
+                  </div>
+                );
+              })
             )}
           </div>
         </section>

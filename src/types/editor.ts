@@ -474,6 +474,12 @@ export interface ProjectSummary {
   updatedAt: number;
 }
 
+export interface AdminProjectRow extends ProjectSummary {
+  telegramId: string;
+  userFirstName?: string;
+  userUsername?: string;
+}
+
 export interface CloudProjectData {
   id: string;
   title: string;

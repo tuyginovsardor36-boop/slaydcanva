@@ -52,6 +52,7 @@ import {
   AdminAuditRow,
   AdminOrderRow,
   AdminOverviewStats,
+  AdminProjectRow,
   AdminUserDetailPayload,
   AdminUserRow,
   AppPricingSettings,
@@ -59,6 +60,7 @@ import {
   BackupAiProviderType,
   BalanceTransaction,
   BroadcastLogRow,
+  CloudProjectData,
   CrmEventRow,
   InboxMessageRow,
   ManagerPermission,
@@ -92,7 +94,10 @@ import {
   adminGetStatus,
   adminGetSupportThread,
   adminGetUserDetail,
+  adminGetUserProject,
   adminListAiProviders,
+  adminListAllFiles,
+  adminListAllProjects,
   adminListAuditLogs,
   adminListBroadcasts,
   adminListCrmEvents,
@@ -130,8 +135,10 @@ import {
   adminUpsertPromo,
   adminVerifyOrder,
   adminFetchFileBlob,
-  adminListAllFiles,
 } from '../utils/telegramClient';
+import { exportToDocx } from '../utils/exportDocx';
+import { exportCanvasPagesToPdf } from '../utils/exportPdf';
+import { exportToPptx } from '../utils/exportPptx';
 import { triggerSafeFileDownload } from '../utils/safeDownload';
 import { AdminCoordinateStats } from './AdminCoordinateStats';
 
@@ -280,20 +287,37 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const searchBoxRef = useRef<HTMLDivElement | null>(null);
   const [selectedAdminTx, setSelectedAdminTx] = useState<BalanceTransaction | null>(null);
 
-  // All Files & Downloads
+  // All Files, Saved Projects & Downloads
   const [allFiles, setAllFiles] = useState<UserFileRecord[]>([]);
+  const [allAdminProjects, setAllAdminProjects] = useState<AdminProjectRow[]>([]);
   const [filesLoading, setFilesLoading] = useState(false);
   const [fileSearch, setFileSearch] = useState('');
   const [fileFormatFilter, setFileFormatFilter] = useState('');
   const [downloadingFileId, setDownloadingFileId] = useState<string | null>(null);
+  const [downloadingProjectId, setDownloadingProjectId] = useState<string | null>(null);
+  const [previewingProjectId, setPreviewingProjectId] = useState<string | null>(null);
+  const [previewProjectData, setPreviewProjectData] = useState<CloudProjectData | null>(null);
+  const [previewProjectOwnerId, setPreviewProjectOwnerId] = useState<string | null>(null);
 
   const loadAdminFiles = useCallback(async () => {
     if (!adminToken) return;
     setFilesLoading(true);
     try {
-      const res = await adminListAllFiles(telegramSessionToken, adminToken, fileSearch, fileFormatFilter);
-      if (res.ok && Array.isArray(res.files)) {
-        setAllFiles(res.files);
+      const modeFilter =
+        fileFormatFilter === 'docx'
+          ? 'word'
+          : fileFormatFilter === 'pptx' || fileFormatFilter === 'pdf'
+            ? fileFormatFilter
+            : 'all';
+      const [fileRes, projRes] = await Promise.all([
+        adminListAllFiles(telegramSessionToken, adminToken, fileSearch, fileFormatFilter),
+        adminListAllProjects(telegramSessionToken, adminToken, fileSearch, modeFilter),
+      ]);
+      if (fileRes.ok && Array.isArray(fileRes.files)) {
+        setAllFiles(fileRes.files);
+      }
+      if (projRes.ok && Array.isArray(projRes.projects)) {
+        setAllAdminProjects(projRes.projects);
       }
     } finally {
       setFilesLoading(false);
@@ -321,6 +345,63 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       onNotify('err', "Faylni yuklab olishda xatolik.");
     } finally {
       setDownloadingFileId(null);
+    }
+  };
+
+  const exportCloudProjectForAdmin = async (proj: CloudProjectData, fallbackTitle?: string) => {
+    const docName = proj.title || fallbackTitle || 'SlaydCanva';
+    if (proj.mode === 'word') {
+      return exportToDocx(proj.wordDoc, docName, { download: true });
+    }
+    if (proj.mode === 'pdf') {
+      return exportCanvasPagesToPdf(
+        proj.pdfPages,
+        docName,
+        'pdf',
+        proj.pdfOrientation || 'portrait',
+        { download: true }
+      );
+    }
+    return exportToPptx(proj.pptxPages, docName, { download: true });
+  };
+
+  const handleAdminDownloadProject = async (
+    telegramId: string,
+    projectId: string,
+    fallbackTitle?: string
+  ) => {
+    if (!adminToken || downloadingProjectId) return;
+    setDownloadingProjectId(projectId);
+    try {
+      const res = await adminGetUserProject(telegramId, projectId, telegramSessionToken, adminToken);
+      if (!res.ok || !res.project) {
+        onNotify('err', res.error || 'Loyihani yuklab bo‘lmadi.');
+        return;
+      }
+      const exported = await exportCloudProjectForAdmin(res.project, fallbackTitle);
+      onNotify('ok', `"${exported.fileName}" yuklab olindi.`);
+    } catch {
+      onNotify('err', 'Loyihani eksport qilishda xatolik yuz berdi.');
+    } finally {
+      setDownloadingProjectId(null);
+    }
+  };
+
+  const handleAdminPreviewProject = async (telegramId: string, projectId: string) => {
+    if (!adminToken || previewingProjectId) return;
+    setPreviewingProjectId(projectId);
+    try {
+      const res = await adminGetUserProject(telegramId, projectId, telegramSessionToken, adminToken);
+      if (!res.ok || !res.project) {
+        onNotify('err', res.error || 'Loyiha ma’lumotlari topilmadi.');
+        return;
+      }
+      setPreviewProjectData(res.project);
+      setPreviewProjectOwnerId(telegramId);
+    } catch {
+      onNotify('err', 'Loyihani ochishda xatolik yuz berdi.');
+    } finally {
+      setPreviewingProjectId(null);
     }
   };
 
@@ -3126,7 +3207,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           </div>
                           <div className="divide-y divide-zinc-100 max-h-64 overflow-y-auto">
                             {(!selectedUserDetail.files || selectedUserDetail.files.length === 0) ? (
-                              <div className="p-6 text-center text-zinc-400">Bu foydalanuvchi hali fayl yaratmagan.</div>
+                              <div className="p-6 text-center text-zinc-400">Bu foydalanuvchi hali eksport fayli saqlamagan.</div>
                             ) : (
                               selectedUserDetail.files.map((f) => (
                                 <div key={f.id} className="p-3.5 flex items-center justify-between gap-3 hover:bg-zinc-50">
@@ -3156,6 +3237,72 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                   </button>
                                 </div>
                               ))
+                            )}
+                          </div>
+                        </div>
+
+                        {/* User Saved Cloud Projects & Slides */}
+                        <div className="border border-zinc-200 rounded-xl overflow-hidden bg-white">
+                          <div className="px-4 py-3 bg-zinc-50 border-b border-zinc-200 font-semibold text-zinc-900 flex items-center justify-between">
+                            <span>Mijoz saqlagan loyihalar va slaydlar ({selectedUserDetail.projects.length})</span>
+                            <span className="text-[11px] text-zinc-500 font-normal">Bulutdagi barcha slayd, Word va PDF loyihalar</span>
+                          </div>
+                          <div className="divide-y divide-zinc-100 max-h-64 overflow-y-auto">
+                            {selectedUserDetail.projects.length === 0 ? (
+                              <div className="p-6 text-center text-zinc-400">Bu foydalanuvchida saqlangan bulutli loyiha yo‘q.</div>
+                            ) : (
+                              selectedUserDetail.projects.map((p) => {
+                                const ext = p.mode === 'word' ? 'DOCX' : p.mode === 'pdf' ? 'PDF' : 'PPTX';
+                                return (
+                                  <div key={p.id} className="p-3.5 flex items-center justify-between gap-3 hover:bg-zinc-50">
+                                    <div className="flex items-center gap-2.5 min-w-0">
+                                      <span className="px-2 py-1 rounded bg-zinc-900 text-white font-mono text-[10px] uppercase font-bold shrink-0">
+                                        {ext}
+                                      </span>
+                                      <div className="min-w-0">
+                                        <div className="font-medium text-zinc-900 truncate">{p.title}</div>
+                                        <div className="text-[11px] text-zinc-500">
+                                          {p.mode === 'pptx'
+                                            ? `${p.pptxCount} slayd`
+                                            : p.mode === 'pdf'
+                                              ? `${p.pdfCount} sahifa`
+                                              : 'Word hujjat'}
+                                          {' · '}
+                                          {formatDateTime(p.updatedAt)}
+                                        </div>
+                                      </div>
+                                    </div>
+                                    <div className="flex items-center gap-1.5 shrink-0">
+                                      <button
+                                        type="button"
+                                        disabled={previewingProjectId === p.id}
+                                        onClick={() => void handleAdminPreviewProject(selectedUserDetail.user.telegramId, p.id)}
+                                        className="px-2.5 py-1.5 rounded-xl border border-zinc-200 bg-white hover:bg-zinc-100 text-zinc-800 font-semibold inline-flex items-center gap-1"
+                                      >
+                                        {previewingProjectId === p.id ? (
+                                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                        ) : (
+                                          <Eye className="w-3.5 h-3.5" />
+                                        )}
+                                        <span>Ko‘rish</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        disabled={downloadingProjectId === p.id}
+                                        onClick={() => void handleAdminDownloadProject(selectedUserDetail.user.telegramId, p.id, p.title)}
+                                        className="px-3 py-1.5 rounded-xl bg-red-600 hover:bg-red-700 text-white font-semibold inline-flex items-center gap-1.5"
+                                      >
+                                        {downloadingProjectId === p.id ? (
+                                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                        ) : (
+                                          <Download className="w-3.5 h-3.5" />
+                                        )}
+                                        <span>Yuklab olish</span>
+                                      </button>
+                                    </div>
+                                  </div>
+                                );
+                              })
                             )}
                           </div>
                         </div>
@@ -3620,6 +3767,110 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       )}
                     </tbody>
                   </table>
+                </div>
+
+                {/* Cloud Saved Projects & Slides Directory */}
+                <div className="border-t border-zinc-200 pt-4">
+                  <div className="px-4 md:px-5 pb-3 flex items-center justify-between">
+                    <div>
+                      <h3 className="text-sm font-semibold text-zinc-900">
+                        Bulutli slayd va hujjat loyihalari ({allAdminProjects.length})
+                      </h3>
+                      <p className="text-xs text-zinc-500 mt-0.5">
+                        Foydalanuvchilar muharrirda yaratgan barcha slayd, Word va PDF loyihalar — istalganini ko‘rish yoki yuklab olish mumkin.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="border-y border-zinc-200 bg-zinc-50/70 text-zinc-500">
+                          <th className="py-3 px-4 font-medium">Loyiha nomi</th>
+                          <th className="py-3 px-4 font-medium">Foydalanuvchi / ID</th>
+                          <th className="py-3 px-4 font-medium">Tur · Hajm</th>
+                          <th className="py-3 px-4 font-medium">Yangilangan</th>
+                          <th className="py-3 px-4 font-medium text-right">Amallar</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-zinc-100">
+                        {filesLoading ? (
+                          <tr>
+                            <td colSpan={5} className="py-10 text-center text-zinc-500">
+                              <Loader2 className="w-4 h-4 animate-spin inline mr-2 text-red-600" />
+                              Loyihalar yuklanmoqda...
+                            </td>
+                          </tr>
+                        ) : allAdminProjects.length === 0 ? (
+                          <tr>
+                            <td colSpan={5} className="py-10 text-center text-zinc-400">
+                              Saqlangan bulutli loyihalar topilmadi.
+                            </td>
+                          </tr>
+                        ) : (
+                          allAdminProjects.map((p) => {
+                            const ext = p.mode === 'word' ? 'DOCX' : p.mode === 'pdf' ? 'PDF' : 'PPTX';
+                            return (
+                              <tr key={`${p.telegramId}_${p.id}`} className="hover:bg-zinc-50/70">
+                                <td className="py-3 px-4 font-medium text-zinc-900">
+                                  <div className="flex items-center gap-2">
+                                    <span className="p-1.5 rounded-lg bg-zinc-900 text-white font-mono text-[10px] uppercase font-bold">
+                                      {ext}
+                                    </span>
+                                    <span className="truncate max-w-[260px]">{p.title}</span>
+                                  </div>
+                                </td>
+                                <td className="py-3 px-4 font-mono text-zinc-700">
+                                  <div>{p.userFirstName || 'Mijoz'}</div>
+                                  <div className="text-[11px] text-zinc-400">
+                                    ID: {p.telegramId}
+                                    {p.userUsername ? ` · @${p.userUsername}` : ''}
+                                  </div>
+                                </td>
+                                <td className="py-3 px-4 font-mono text-zinc-600">
+                                  {p.mode === 'pptx'
+                                    ? `${p.pptxCount} slayd`
+                                    : p.mode === 'pdf'
+                                      ? `${p.pdfCount} sahifa`
+                                      : 'Word hujjat'}
+                                </td>
+                                <td className="py-3 px-4 font-mono text-zinc-500">
+                                  {formatDateTime(p.updatedAt)}
+                                </td>
+                                <td className="py-3 px-4 text-right space-x-1.5 whitespace-nowrap">
+                                  <button
+                                    type="button"
+                                    disabled={previewingProjectId === p.id}
+                                    onClick={() => void handleAdminPreviewProject(p.telegramId, p.id)}
+                                    className="px-2.5 py-1.5 rounded-xl border border-zinc-200 bg-white hover:bg-zinc-50 text-zinc-800 font-semibold inline-flex items-center gap-1"
+                                  >
+                                    {previewingProjectId === p.id ? (
+                                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                    ) : (
+                                      <Eye className="w-3.5 h-3.5" />
+                                    )}
+                                    <span>Ko‘rish</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={downloadingProjectId === p.id}
+                                    onClick={() => void handleAdminDownloadProject(p.telegramId, p.id, p.title)}
+                                    className="px-3 py-1.5 rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white font-semibold inline-flex items-center gap-1.5"
+                                  >
+                                    {downloadingProjectId === p.id ? (
+                                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                    ) : (
+                                      <Download className="w-3.5 h-3.5" />
+                                    )}
+                                    <span>Yuklab olish</span>
+                                  </button>
+                                </td>
+                              </tr>
+                            );
+                          })
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               </section>
             )}
@@ -6187,6 +6438,102 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   </div>
                 </div>
 
+                {/* User Generated Files */}
+                <div className="border border-zinc-200 rounded-xl overflow-hidden bg-white">
+                  <div className="px-3.5 py-2.5 bg-zinc-50 border-b border-zinc-200 font-semibold text-zinc-900 flex items-center justify-between">
+                    <span>Yaratilgan fayllar ({selectedUserDetail.files?.length || 0})</span>
+                  </div>
+                  <div className="divide-y divide-zinc-100 max-h-48 overflow-y-auto">
+                    {(!selectedUserDetail.files || selectedUserDetail.files.length === 0) ? (
+                      <div className="p-4 text-center text-zinc-400">Saqlangan eksport fayllar yo‘q</div>
+                    ) : (
+                      selectedUserDetail.files.map((f) => (
+                        <div key={f.id} className="px-3.5 py-2.5 flex items-center justify-between gap-2 hover:bg-zinc-50">
+                          <div className="min-w-0">
+                            <div className="font-medium text-zinc-900 truncate">{f.fileName}</div>
+                            <div className="text-[11px] text-zinc-500">
+                              <span className="uppercase font-mono font-bold text-red-600">{f.format || 'file'}</span>
+                              {' · '}
+                              {f.serviceTitle || 'AI Xizmat'} · {formatDateTime(f.createdAt)}
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            disabled={downloadingFileId === f.id}
+                            onClick={() => void handleAdminDownloadFile(f.id, f.fileName)}
+                            className="px-2.5 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white font-semibold inline-flex items-center gap-1 shrink-0"
+                          >
+                            {downloadingFileId === f.id ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : (
+                              <Download className="w-3 h-3" />
+                            )}
+                            <span>Yuklab olish</span>
+                          </button>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+
+                {/* User Cloud Projects & Slides */}
+                <div className="border border-zinc-200 rounded-xl overflow-hidden bg-white">
+                  <div className="px-3.5 py-2.5 bg-zinc-50 border-b border-zinc-200 font-semibold text-zinc-900 flex items-center justify-between">
+                    <span>Saqlangan loyihalar va slaydlar ({selectedUserDetail.projects.length})</span>
+                  </div>
+                  <div className="divide-y divide-zinc-100 max-h-48 overflow-y-auto">
+                    {selectedUserDetail.projects.length === 0 ? (
+                      <div className="p-4 text-center text-zinc-400">Saqlangan bulutli loyihalar yo‘q</div>
+                    ) : (
+                      selectedUserDetail.projects.map((p) => {
+                        const ext = p.mode === 'word' ? 'DOCX' : p.mode === 'pdf' ? 'PDF' : 'PPTX';
+                        return (
+                          <div key={p.id} className="px-3.5 py-2.5 flex items-center justify-between gap-2 hover:bg-zinc-50">
+                            <div className="min-w-0">
+                              <div className="font-medium text-zinc-900 truncate">{p.title}</div>
+                              <div className="text-[11px] text-zinc-500">
+                                <span className="font-mono font-bold text-zinc-900">{ext}</span>
+                                {' · '}
+                                {p.mode === 'pptx'
+                                  ? `${p.pptxCount} slayd`
+                                  : p.mode === 'pdf'
+                                    ? `${p.pdfCount} sahifa`
+                                    : 'Word hujjat'}
+                                {' · '}
+                                {formatDateTime(p.updatedAt)}
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              <button
+                                type="button"
+                                disabled={previewingProjectId === p.id}
+                                onClick={() => void handleAdminPreviewProject(selectedUserDetail.user.telegramId, p.id)}
+                                className="px-2 py-1.5 rounded-lg border border-zinc-200 bg-white hover:bg-zinc-100 text-zinc-800 font-medium inline-flex items-center gap-1"
+                              >
+                                <Eye className="w-3 h-3" />
+                                <span>Ko‘rish</span>
+                              </button>
+                              <button
+                                type="button"
+                                disabled={downloadingProjectId === p.id}
+                                onClick={() => void handleAdminDownloadProject(selectedUserDetail.user.telegramId, p.id, p.title)}
+                                className="px-2.5 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white font-semibold inline-flex items-center gap-1"
+                              >
+                                {downloadingProjectId === p.id ? (
+                                  <Loader2 className="w-3 h-3 animate-spin" />
+                                ) : (
+                                  <Download className="w-3 h-3" />
+                                )}
+                                <span>Yuklab olish</span>
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+
                 {/* CRM Tag & Note */}
                 <form
                   onSubmit={handleSaveUserCrm}
@@ -6499,6 +6846,161 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               >
                 Yopish
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Project Content Preview Modal */}
+      {previewProjectData && (
+        <div
+          className="fixed inset-0 z-55 bg-black/55 backdrop-blur-xs flex items-center justify-center p-4"
+          onClick={() => setPreviewProjectData(null)}
+        >
+          <div
+            className="w-full max-w-3xl max-h-[88vh] bg-white border border-zinc-200 rounded-2xl overflow-hidden flex flex-col shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-5 py-3.5 border-b border-zinc-200 flex items-center justify-between gap-3 shrink-0">
+              <div className="min-w-0">
+                <h3 className="text-sm font-semibold text-zinc-900 truncate">
+                  {previewProjectData.title}
+                </h3>
+                <p className="text-[11px] font-mono text-zinc-500 mt-0.5">
+                  {previewProjectData.mode.toUpperCase()} ·{' '}
+                  {previewProjectData.mode === 'pptx'
+                    ? `${previewProjectData.pptxPages.length} slayd`
+                    : previewProjectData.mode === 'pdf'
+                      ? `${previewProjectData.pdfPages.length} sahifa`
+                      : 'Word hujjat'}
+                  {previewProjectOwnerId ? ` · ID: ${previewProjectOwnerId}` : ''}
+                </p>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  disabled={downloadingProjectId === previewProjectData.id}
+                  onClick={async () => {
+                    setDownloadingProjectId(previewProjectData.id);
+                    try {
+                      const exported = await exportCloudProjectForAdmin(
+                        previewProjectData,
+                        previewProjectData.title
+                      );
+                      onNotify('ok', `"${exported.fileName}" yuklab olindi.`);
+                    } catch {
+                      onNotify('err', 'Loyihani yuklab olishda xatolik.');
+                    } finally {
+                      setDownloadingProjectId(null);
+                    }
+                  }}
+                  className="px-3 py-1.5 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-semibold inline-flex items-center gap-1.5"
+                >
+                  {downloadingProjectId === previewProjectData.id ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Download className="w-3.5 h-3.5" />
+                  )}
+                  <span>Yuklab olish</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPreviewProjectData(null)}
+                  className="p-1.5 text-zinc-400 hover:text-zinc-900 rounded-lg"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-5 space-y-3 bg-zinc-50 text-xs">
+              {previewProjectData.mode === 'word' ? (
+                <div className="bg-white border border-zinc-200 rounded-xl p-5 space-y-2.5 text-zinc-800 leading-relaxed whitespace-pre-wrap">
+                  {(() => {
+                    const doc = new DOMParser().parseFromString(
+                      previewProjectData.wordDoc?.html || '',
+                      'text/html'
+                    );
+                    const blocks = Array.from(doc.body.querySelectorAll('h1,h2,h3,p,li'));
+                    if (blocks.length === 0) {
+                      return doc.body.textContent || 'Hujjat matni bo‘sh.';
+                    }
+                    return blocks.map((el, idx) => {
+                      const txt = (el.textContent || '').trim();
+                      if (!txt) return null;
+                      const tag = el.tagName.toLowerCase();
+                      if (tag === 'h1') {
+                        return (
+                          <div key={idx} className="text-base font-bold text-zinc-900 pt-2">
+                            {txt}
+                          </div>
+                        );
+                      }
+                      if (tag === 'h2' || tag === 'h3') {
+                        return (
+                          <div key={idx} className="text-sm font-semibold text-zinc-900 pt-1">
+                            {txt}
+                          </div>
+                        );
+                      }
+                      if (tag === 'li') {
+                        return (
+                          <div key={idx} className="pl-4 text-zinc-700">
+                            • {txt}
+                          </div>
+                        );
+                      }
+                      return (
+                        <p key={idx} className="text-zinc-700">
+                          {txt}
+                        </p>
+                      );
+                    });
+                  })()}
+                </div>
+              ) : (
+                (previewProjectData.mode === 'pdf'
+                  ? previewProjectData.pdfPages
+                  : previewProjectData.pptxPages
+                ).map((page, idx) => {
+                  const texts = (page.elements || [])
+                    .filter((el) => el.type === 'text' && el.text && el.text.trim())
+                    .map((el) => el.text!.trim());
+                  const imgCount = (page.elements || []).filter((el) => el.type === 'image').length;
+                  return (
+                    <div
+                      key={page.id || idx}
+                      className="bg-white border border-zinc-200 rounded-xl p-4 space-y-2"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-mono font-bold text-red-600">
+                          {idx + 1}-{previewProjectData.mode === 'pdf' ? 'sahifa' : 'slayd'}
+                          {page.title ? ` · ${page.title}` : ''}
+                        </span>
+                        {imgCount > 0 && (
+                          <span className="text-[11px] font-mono text-zinc-500">
+                            {imgCount} ta rasm
+                          </span>
+                        )}
+                      </div>
+                      {texts.length === 0 ? (
+                        <div className="text-zinc-400 italic">Matn elementlari yo‘q</div>
+                      ) : (
+                        <div className="space-y-1.5 text-zinc-800">
+                          {texts.map((t, tIdx) => (
+                            <div
+                              key={tIdx}
+                              className={tIdx === 0 ? 'font-semibold text-zinc-900' : 'text-zinc-700 whitespace-pre-wrap'}
+                            >
+                              {t}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+              )}
             </div>
           </div>
         </div>

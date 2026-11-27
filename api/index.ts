@@ -8,6 +8,7 @@ import PptxGenJS from 'pptxgenjs';
 import { Document, Paragraph, TextRun, HeadingLevel, AlignmentType, Packer } from 'docx';
 import { jsPDF } from 'jspdf';
 import {
+  AdminProjectRow,
   AppPricingSettings,
   DEFAULT_PRICING_SETTINGS,
   DbBroadcastLog,
@@ -41,9 +42,11 @@ import {
   dbGetOrCreateUser,
   dbGetPaymentOrder,
   dbGetProjectById,
+  dbGetProjectByIdAdmin,
   dbGetSetting,
   dbGetUserDetailAdmin,
   dbGetUserFileById,
+  dbListAllProjectsAdmin,
   dbListAllUserFilesAdmin,
   dbListAuditLogs,
   dbListBroadcastLogs,
@@ -6466,7 +6469,122 @@ app.get('/api/admin/users/:id/detail', async (req, res) => {
     const kvFiles = (await kvGet<DbUserFileRecord[]>(`user_files:${tid}`)) || [];
     detail.files = kvFiles;
   }
+  if (!detail.projects || detail.projects.length === 0) {
+    const kvProj = await kvGet<{
+      id: string;
+      title: string;
+      mode: 'pptx' | 'word' | 'pdf';
+      pptxPages?: unknown[];
+      pdfPages?: unknown[];
+      updatedAt: number;
+    }>(`tg_project:${tid}:default`);
+    if (kvProj) {
+      detail.projects = [
+        {
+          id: kvProj.id,
+          title: kvProj.title,
+          mode: kvProj.mode || 'pptx',
+          pptxCount: Array.isArray(kvProj.pptxPages) ? kvProj.pptxPages.length : 0,
+          pdfCount: Array.isArray(kvProj.pdfPages) ? kvProj.pdfPages.length : 0,
+          updatedAt: kvProj.updatedAt || Date.now(),
+        },
+      ];
+    }
+  }
   res.json({ ok: true, detail });
+});
+
+app.get('/api/admin/projects', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'users');
+  if (!ctx) return;
+  const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+  const mode = typeof req.query.mode === 'string' ? req.query.mode.trim().toLowerCase() : '';
+  const dbProjects = await dbListAllProjectsAdmin(250, q, mode);
+  if (dbProjects !== null) {
+    res.json({ ok: true, projects: dbProjects });
+    return;
+  }
+  const users = (await dbListUsersAdmin('', 180)) || [];
+  const allKv = await Promise.all(
+    users.map(async (u) => {
+      const p = await kvGet<{
+        id: string;
+        title: string;
+        mode: 'pptx' | 'word' | 'pdf';
+        pptxPages?: unknown[];
+        pdfPages?: unknown[];
+        updatedAt: number;
+      }>(`tg_project:${u.telegramId}:default`);
+      if (!p) return null;
+      return {
+        id: p.id,
+        telegramId: u.telegramId,
+        userFirstName: u.firstName,
+        userUsername: u.username,
+        title: p.title,
+        mode: p.mode || 'pptx',
+        pptxCount: Array.isArray(p.pptxPages) ? p.pptxPages.length : 0,
+        pdfCount: Array.isArray(p.pdfPages) ? p.pdfPages.length : 0,
+        updatedAt: p.updatedAt || Date.now(),
+      } as AdminProjectRow;
+    })
+  );
+  const queryLower = q.toLowerCase();
+  const filtered = allKv
+    .filter((p): p is AdminProjectRow => Boolean(p))
+    .filter((p) => {
+      if (mode && mode !== 'all' && p.mode !== mode) return false;
+      if (!queryLower) return true;
+      return (
+        p.title.toLowerCase().includes(queryLower) ||
+        p.telegramId.toLowerCase().includes(queryLower) ||
+        (p.userFirstName || '').toLowerCase().includes(queryLower) ||
+        (p.userUsername || '').toLowerCase().includes(queryLower)
+      );
+    })
+    .sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0))
+    .slice(0, 250);
+  res.json({ ok: true, projects: filtered });
+});
+
+app.get('/api/admin/users/:id/projects/:projectId', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'users');
+  if (!ctx) return;
+  const tid = String(req.params.id || '').trim();
+  const projectId = String(req.params.projectId || '').trim();
+  if (!/^[a-zA-Z0-9_-]{1,80}$/.test(projectId)) {
+    res.status(400).json({ error: "Noto'g'ri loyiha ID." });
+    return;
+  }
+  let project = /^\d{3,20}$/.test(tid) ? await dbGetProjectById(tid, projectId) : null;
+  if (!project) {
+    project = await dbGetProjectByIdAdmin(projectId);
+  }
+  if (!project && /^\d{3,20}$/.test(tid)) {
+    const kvProj = await kvGet<{
+      id: string;
+      title: string;
+      mode: 'pptx' | 'word' | 'pdf';
+      pptxPages: unknown[];
+      pdfPages: unknown[];
+      pdfOrientation: 'portrait' | 'landscape';
+      wordDoc: Record<string, unknown>;
+      tolovgoMode: 'live' | 'test';
+      updatedAt: number;
+    }>(`tg_project:${tid}:default`);
+    if (kvProj && kvProj.id === projectId) {
+      project = {
+        ...kvProj,
+        telegramId: tid,
+        createdAt: kvProj.updatedAt || Date.now(),
+      };
+    }
+  }
+  if (!project) {
+    res.status(404).json({ error: 'Loyiha topilmadi.' });
+    return;
+  }
+  res.json({ ok: true, project });
 });
 
 app.get('/api/admin/files', async (req, res) => {
@@ -7729,7 +7847,8 @@ async function resolveSavedUserFile(
 async function saveAndMaybeSendUserFile(params: {
   user: TgUserProfile;
   rawFileName: string;
-  fileBase64: string;
+  fileBase64?: string;
+  fileBuffer?: Buffer;
   caption?: string;
   serviceId?: string;
   serviceTitle?: string;
@@ -7753,23 +7872,26 @@ async function saveAndMaybeSendUserFile(params: {
     };
   }
 
-  const cleanBase64 = params.fileBase64.includes(',')
-    ? params.fileBase64.split(',').pop() || ''
-    : params.fileBase64;
-  if (!cleanBase64) {
-    return { ok: false, statusCode: 400, error: "Fayl ma'lumoti bo'sh." };
+  let buf: Buffer;
+  if (params.fileBuffer && Buffer.isBuffer(params.fileBuffer)) {
+    buf = params.fileBuffer;
+  } else {
+    const rawB64 = params.fileBase64 || '';
+    const cleanBase64 = rawB64.includes(',') ? rawB64.split(',').pop() || '' : rawB64;
+    if (!cleanBase64) {
+      return { ok: false, statusCode: 400, error: "Fayl ma'lumoti bo'sh." };
+    }
+    const approxBytes = Math.floor((cleanBase64.length * 3) / 4);
+    if (approxBytes <= 0 || approxBytes > MAX_TG_DOCUMENT_BYTES) {
+      return {
+        ok: false,
+        statusCode: 413,
+        error: 'Fayl hajmi ruxsat etilgan 15 MB chegaradan oshdi.',
+      };
+    }
+    buf = Buffer.from(cleanBase64, 'base64');
   }
 
-  const approxBytes = Math.floor((cleanBase64.length * 3) / 4);
-  if (approxBytes <= 0 || approxBytes > MAX_TG_DOCUMENT_BYTES) {
-    return {
-      ok: false,
-      statusCode: 413,
-      error: 'Fayl hajmi ruxsat etilgan 15 MB chegaradan oshdi.',
-    };
-  }
-
-  const buf = Buffer.from(cleanBase64, 'base64');
   if (buf.length === 0 || buf.length > MAX_TG_DOCUMENT_BYTES) {
     return { ok: false, statusCode: 413, error: 'Fayl hajmi ruxsat etilgan chegaradan oshdi.' };
   }
@@ -7859,34 +7981,69 @@ app.get('/api/files', async (req, res) => {
   res.json({ ok: true, files, projects });
 });
 
-app.post('/api/files/save', async (req, res) => {
-  const user = getAuthenticatedTelegramUser(req);
-  if (!user) {
-    res.status(401).json({ error: 'Telegram autentifikatsiyasi talab qilinadi.' });
-    return;
+app.post(
+  '/api/files/save',
+  express.raw({ type: 'application/octet-stream', limit: '15mb' }),
+  async (req, res) => {
+    const user = getAuthenticatedTelegramUser(req);
+    if (!user) {
+      res.status(401).json({ error: 'Telegram autentifikatsiyasi talab qilinadi.' });
+      return;
+    }
+    const isRawBinary = Buffer.isBuffer(req.body);
+    const decodeHeader = (h: string | string[] | undefined) => {
+      const val = Array.isArray(h) ? h[0] : h;
+      if (!val) return undefined;
+      try {
+        return decodeURIComponent(val).trim();
+      } catch {
+        return val.trim();
+      }
+    };
+    const result = await saveAndMaybeSendUserFile({
+      user,
+      rawFileName: isRawBinary
+        ? decodeHeader(req.headers['x-file-name']) || ''
+        : typeof req.body?.fileName === 'string'
+          ? req.body.fileName.trim()
+          : '',
+      fileBuffer: isRawBinary ? (req.body as Buffer) : undefined,
+      fileBase64: !isRawBinary && typeof req.body?.fileBase64 === 'string' ? req.body.fileBase64.trim() : undefined,
+      caption: isRawBinary
+        ? decodeHeader(req.headers['x-file-caption'])
+        : typeof req.body?.caption === 'string'
+          ? req.body.caption
+          : undefined,
+      serviceId: isRawBinary
+        ? decodeHeader(req.headers['x-service-id'])
+        : typeof req.body?.serviceId === 'string'
+          ? req.body.serviceId
+          : undefined,
+      serviceTitle: isRawBinary
+        ? decodeHeader(req.headers['x-service-title'])
+        : typeof req.body?.serviceTitle === 'string'
+          ? req.body.serviceTitle
+          : undefined,
+      sendToTelegram: isRawBinary
+        ? req.headers['x-send-telegram'] !== 'false'
+        : req.body?.sendToTelegram !== false,
+      forceTelegram: isRawBinary
+        ? req.headers['x-force-telegram'] === 'true'
+        : req.body?.force === true,
+    });
+    if (!result.ok) {
+      res.status(result.statusCode || 400).json({ error: result.error });
+      return;
+    }
+    res.json({
+      ok: true,
+      file: result.file,
+      downloadPath: result.downloadPath,
+      sentToTelegram: result.sentToTelegram,
+      telegramError: result.telegramError,
+    });
   }
-  const result = await saveAndMaybeSendUserFile({
-    user,
-    rawFileName: typeof req.body?.fileName === 'string' ? req.body.fileName.trim() : '',
-    fileBase64: typeof req.body?.fileBase64 === 'string' ? req.body.fileBase64.trim() : '',
-    caption: typeof req.body?.caption === 'string' ? req.body.caption : undefined,
-    serviceId: typeof req.body?.serviceId === 'string' ? req.body.serviceId : undefined,
-    serviceTitle: typeof req.body?.serviceTitle === 'string' ? req.body.serviceTitle : undefined,
-    sendToTelegram: req.body?.sendToTelegram !== false,
-    forceTelegram: req.body?.force === true,
-  });
-  if (!result.ok) {
-    res.status(result.statusCode || 400).json({ error: result.error });
-    return;
-  }
-  res.json({
-    ok: true,
-    file: result.file,
-    downloadPath: result.downloadPath,
-    sentToTelegram: result.sentToTelegram,
-    telegramError: result.telegramError,
-  });
-});
+);
 
 app.post('/api/files/:id/download-link', async (req, res) => {
   const user = getAuthenticatedTelegramUser(req);
