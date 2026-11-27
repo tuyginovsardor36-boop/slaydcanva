@@ -477,3 +477,22 @@ export interface CloudProjectData {
   tolovgoMode?: TolovgoPaymentMode;
   updatedAt: number;
 }
+
+export type BackupAiProviderType = 'openrouter' | 'gemini' | 'openai_compatible';
+
+export interface BackupAiProviderRecord {
+  id: string;
+  name: string;
+  providerType: BackupAiProviderType;
+  model: string;
+  endpointUrl?: string;
+  apiKeyMasked: string;
+  hasApiKey: boolean;
+  enabled: boolean;
+  priority: number;
+  lastStatus?: 'ok' | 'error' | 'untested';
+  lastError?: string;
+  lastTestedAt?: number;
+  createdAt: number;
+}
+

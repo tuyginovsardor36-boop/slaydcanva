@@ -50,6 +50,7 @@ import {
   formatTelegramDisplayName,
   getTelegramAuthHeaders,
   redeemPromoCode,
+  resetUserSupportChat,
   sendUserSupportMessage,
   TelegramAccountResponse,
   TelegramConfigResponse,
@@ -845,6 +846,7 @@ export const SupportClientPanel: React.FC<SupportClientPanelProps> = ({
   const [subject, setSubject] = useState('');
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
+  const [resetting, setResetting] = useState(false);
 
   const loadSupport = useCallback(async () => {
     const res = await fetchSupportInfo(telegramSessionToken);
@@ -880,10 +882,33 @@ export const SupportClientPanel: React.FC<SupportClientPanelProps> = ({
       }
       setText('');
       if (res.ticket) setTicket(res.ticket);
-      if (res.message) setMessages((prev) => [...prev, res.message!]);
+      if (res.message) {
+        setMessages((prev) =>
+          prev.some((m) => m.id === res.message!.id) ? prev : [...prev, res.message!]
+        );
+      }
       onNotify?.('ok', 'Support xizmatiga xabaringiz yuborildi.');
     } finally {
       setSending(false);
+    }
+  };
+
+  const handleResetChat = async () => {
+    if (!telegramSessionToken || resetting) return;
+    setResetting(true);
+    try {
+      const res = await resetUserSupportChat(telegramSessionToken);
+      if (!res.ok) {
+        onNotify?.('err', res.error || 'Yangi murojaat ochib bo‘lmadi.');
+        return;
+      }
+      setTicket(null);
+      setMessages([]);
+      setSubject('');
+      setText('');
+      onNotify?.('ok', 'Yangi murojaat oynasi ochildi.');
+    } finally {
+      setResetting(false);
     }
   };
 
@@ -1015,38 +1040,67 @@ export const SupportClientPanel: React.FC<SupportClientPanelProps> = ({
             )}
           </div>
 
-          <form onSubmit={handleSend} className="space-y-2">
-            {messages.length === 0 && (
-              <input
-                type="text"
-                value={subject}
-                onChange={(e) => setSubject(e.target.value)}
-                placeholder="Murojaat mavzusi (masalan: To'lov yoki slayd haqida)"
-                className="w-full text-xs text-zinc-900 bg-zinc-50 border border-zinc-200 focus:border-red-600 focus:bg-white rounded-xl px-3 py-2 outline-none"
-              />
-            )}
-            <div className="flex items-center gap-2">
-              <input
-                type="text"
-                value={text}
-                onChange={(e) => setText(e.target.value)}
-                placeholder="Support mutaxassisiga xabar yozing..."
-                className="flex-1 min-w-0 text-xs text-zinc-900 bg-zinc-50 border border-zinc-200 focus:border-red-600 focus:bg-white rounded-xl px-3 py-2.5 outline-none"
-              />
+          {ticket?.status === 'resolved' ? (
+            <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 space-y-2.5">
+              <div className="flex items-start gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                <div className="min-w-0">
+                  <div className="text-xs font-semibold text-emerald-900">
+                    Murojaat hal qilindi — Chat yakunlandi
+                  </div>
+                  <p className="text-[11px] text-emerald-700 leading-snug mt-0.5">
+                    Ushbu suhbat yopildi. Yana savol yoki murojaatingiz bo‘lsa, yangi chat ochishingiz mumkin.
+                  </p>
+                </div>
+              </div>
               <button
-                type="submit"
-                disabled={sending || !text.trim()}
-                className="px-3.5 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-45 text-white text-xs font-semibold flex items-center gap-1 shrink-0 transition-colors"
+                type="button"
+                disabled={resetting}
+                onClick={() => void handleResetChat()}
+                className="w-full py-2 px-3 rounded-xl bg-[#111113] hover:bg-zinc-800 disabled:opacity-50 text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors"
               >
-                {sending ? (
+                {resetting ? (
                   <Loader2 className="w-3.5 h-3.5 animate-spin" />
                 ) : (
-                  <Send className="w-3.5 h-3.5" />
+                  <Plus className="w-3.5 h-3.5" />
                 )}
-                <span>Yuborish</span>
+                <span>Yangi murojaat ochish</span>
               </button>
             </div>
-          </form>
+          ) : (
+            <form onSubmit={handleSend} className="space-y-2">
+              {messages.length === 0 && (
+                <input
+                  type="text"
+                  value={subject}
+                  onChange={(e) => setSubject(e.target.value)}
+                  placeholder="Murojaat mavzusi (masalan: To'lov yoki slayd haqida)"
+                  className="w-full text-xs text-zinc-900 bg-zinc-50 border border-zinc-200 focus:border-red-600 focus:bg-white rounded-xl px-3 py-2 outline-none"
+                />
+              )}
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={text}
+                  onChange={(e) => setText(e.target.value)}
+                  placeholder="Support mutaxassisiga xabar yozing..."
+                  className="flex-1 min-w-0 text-xs text-zinc-900 bg-zinc-50 border border-zinc-200 focus:border-red-600 focus:bg-white rounded-xl px-3 py-2.5 outline-none"
+                />
+                <button
+                  type="submit"
+                  disabled={sending || !text.trim()}
+                  className="px-3.5 py-2.5 rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-45 text-white text-xs font-semibold flex items-center gap-1 shrink-0 transition-colors"
+                >
+                  {sending ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Send className="w-3.5 h-3.5" />
+                  )}
+                  <span>Yuborish</span>
+                </button>
+              </div>
+            </form>
+          )}
         </>
       ) : (
         <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-800">

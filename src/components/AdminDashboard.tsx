@@ -8,10 +8,13 @@ import {
   Bell,
   Check,
   CheckCheck,
+  CheckCircle2,
   Copy,
+  Cpu,
   CreditCard,
   Database,
   Download,
+  Edit3,
   Eye,
   Gift,
   Headphones,
@@ -39,6 +42,7 @@ import {
   Users,
   Wallet,
   X,
+  Zap,
 } from 'lucide-react';
 import { DEFAULT_PRICING_SETTINGS, formatSom } from '../data/defaults';
 import {
@@ -49,6 +53,8 @@ import {
   AdminUserDetailPayload,
   AdminUserRow,
   AppPricingSettings,
+  BackupAiProviderRecord,
+  BackupAiProviderType,
   BalanceTransaction,
   BroadcastLogRow,
   CrmEventRow,
@@ -70,6 +76,7 @@ import {
   adminAnalyzeSecurityLogs,
   adminAssignSupportTicket,
   adminChangePassword,
+  adminDeleteAiProvider,
   adminDeleteManager,
   adminDeletePromo,
   adminGetAnalytics,
@@ -77,6 +84,7 @@ import {
   adminGetStatus,
   adminGetSupportThread,
   adminGetUserDetail,
+  adminListAiProviders,
   adminListAuditLogs,
   adminListBroadcasts,
   adminListCrmEvents,
@@ -101,8 +109,10 @@ import {
   adminSetupPassword,
   adminSetupTelegramWebhook,
   adminSetUserBanned,
+  adminTestAiProvider,
   adminUpdateSupportStatus,
   adminUpdateUserCrm,
+  adminUpsertAiProvider,
   adminUpsertManager,
   adminUpsertPromo,
   adminVerifyOrder,
@@ -245,9 +255,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [crmEvents, setCrmEvents] = useState<CrmEventRow[]>([]);
   const [crmFilter, setCrmFilter] = useState<'all' | 'new_user' | 'payment_paid' | 'unread'>('all');
 
-  // Google-like Global Search & Suggestions
+  // Google-like Universal Search & Suggestions
   const [globalSearchQuery, setGlobalSearchQuery] = useState('');
   const [showSearchDropdown, setShowSearchDropdown] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const searchBoxRef = useRef<HTMLDivElement | null>(null);
   const [selectedAdminTx, setSelectedAdminTx] = useState<BalanceTransaction | null>(null);
 
 
@@ -341,53 +353,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [promoExpireDays, setPromoExpireDays] = useState('30');
   const [savingPromo, setSavingPromo] = useState(false);
 
-  const searchSuggestions = useMemo(() => {
-    const q = globalSearchQuery.trim().toLowerCase();
-    if (!q || q.length < 2) return [];
-    const results: Array<{ id: string; type: 'user' | 'order' | 'promo'; title: string; subtitle: string; tab: AdminTab }> = [];
-
-    users.forEach((u) => {
-      if (results.length >= 6) return;
-      if (u.telegramId.toLowerCase().includes(q) || u.firstName.toLowerCase().includes(q) || (u.username && u.username.toLowerCase().includes(q))) {
-        results.push({
-          id: `u_${u.telegramId}`,
-          type: 'user',
-          title: u.fullName || [u.firstName, u.lastName].filter(Boolean).join(' ') || u.telegramId,
-          subtitle: `Foydalanuvchi · ID: ${u.telegramId} · Balans: ${formatSom(u.balance)}`,
-          tab: 'users',
-        });
-      }
-    });
-
-    orders.forEach((o) => {
-      if (results.length >= 10) return;
-      if (o.orderId.toLowerCase().includes(q) || (o.telegramId && o.telegramId.toLowerCase().includes(q))) {
-        results.push({
-          id: `o_${o.orderId}`,
-          type: 'order',
-          title: `Buyurtma #${o.orderId}`,
-          subtitle: `TolovGo · ${formatSom(o.amount)} · ${o.status.toUpperCase()}`,
-          tab: 'orders',
-        });
-      }
-    });
-
-    promos.forEach((p) => {
-      if (results.length >= 12) return;
-      if (p.code.toLowerCase().includes(q)) {
-        results.push({
-          id: `p_${p.code}`,
-          type: 'promo',
-          title: `Promokod: ${p.code}`,
-          subtitle: `Bonus: ${formatSom(p.bonusAmount)} · Foydalanish: ${p.usedCount}/${p.maxUses}`,
-          tab: 'pricing',
-        });
-      }
-    });
-
-    return results;
-  }, [globalSearchQuery, users, orders, promos]);
-
   // Marketing / Broadcast / Site Config
   const [broadcastSegment, setBroadcastSegment] = useState<'all' | 'active' | 'vip' | 'zero_balance'>('all');
   const [broadcastMsg, setBroadcastMsg] = useState('');
@@ -407,6 +372,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [savingSiteCfg, setSavingSiteCfg] = useState(false);
   const [testingAlert, setTestingAlert] = useState(false);
   const [syncingBotWebhook, setSyncingBotWebhook] = useState(false);
+
+  // Backup AI ("Zapaska AI") DB Providers
+  const [aiProviders, setAiProviders] = useState<BackupAiProviderRecord[]>([]);
+  const [hasPrimaryOpenRouter, setHasPrimaryOpenRouter] = useState(false);
+  const [hasPrimaryGemini, setHasPrimaryGemini] = useState(false);
+  const [aiFormId, setAiFormId] = useState('');
+  const [aiFormName, setAiFormName] = useState('');
+  const [aiFormType, setAiFormType] = useState<BackupAiProviderType>('openrouter');
+  const [aiFormModel, setAiFormModel] = useState('google/gemini-2.5-flash');
+  const [aiFormEndpoint, setAiFormEndpoint] = useState('');
+  const [aiFormApiKey, setAiFormApiKey] = useState('');
+  const [aiFormPriority, setAiFormPriority] = useState('1');
+  const [aiFormEnabled, setAiFormEnabled] = useState(true);
+  const [savingAiProvider, setSavingAiProvider] = useState(false);
+  const [testingAiId, setTestingAiId] = useState<string | null>(null);
 
   // Security Scanner, Threat Logs, Log Analyzer & Audit
   const [auditLogs, setAuditLogs] = useState<AdminAuditRow[]>([]);
@@ -445,6 +425,375 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     },
     [effectiveRole, permissions]
   );
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const isInput =
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable);
+      if (e.key === '/' && !isInput && adminToken) {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+        setShowSearchDropdown(true);
+      } else if (e.key === 'Escape') {
+        setShowSearchDropdown(false);
+      }
+    };
+    const onMouseDown = (e: MouseEvent) => {
+      if (searchBoxRef.current && !searchBoxRef.current.contains(e.target as Node)) {
+        setShowSearchDropdown(false);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    document.addEventListener('mousedown', onMouseDown);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      document.removeEventListener('mousedown', onMouseDown);
+    };
+  }, [adminToken]);
+
+  type UniversalSearchItem = {
+    id: string;
+    category: string;
+    badge: string;
+    title: string;
+    subtitle: string;
+    tab: AdminTab;
+    userTelegramId?: string;
+    supportTelegramId?: string;
+  };
+
+  const searchSuggestions = useMemo<UniversalSearchItem[]>(() => {
+    const q = globalSearchQuery.trim().toLowerCase();
+    const results: UniversalSearchItem[] = [];
+    const seen = new Set<string>();
+    const pushItem = (item: UniversalSearchItem) => {
+      if (seen.has(item.id) || results.length >= 16) return;
+      seen.add(item.id);
+      results.push(item);
+    };
+
+    const sectionCatalog: Array<{
+      id: string;
+      title: string;
+      subtitle: string;
+      keywords: string;
+      tab: AdminTab;
+      badge: string;
+      allowed: boolean;
+    }> = [
+      {
+        id: 'sec_overview',
+        title: 'KPI va 20 Kordinata Analitika',
+        subtitle: "Boshqaruv markazi · Asosiy ko'rsatkichlar va jonli CRM",
+        keywords: 'kpi analitika overview 20 kordinata statistika crm hodisa daromad',
+        tab: 'overview',
+        badge: 'KPI',
+        allowed: hasPerm('overview') || hasPerm('crm_events'),
+      },
+      {
+        id: 'sec_inbox',
+        title: 'Support Inbox & Mijoz Chati',
+        subtitle: 'Telegram va sayt murojaatlariga javob berish',
+        keywords: 'support inbox chat murojaat yordam hal qilindi javob',
+        tab: 'inbox',
+        badge: 'SUP',
+        allowed: hasPerm('support'),
+      },
+      {
+        id: 'sec_users',
+        title: 'Foydalanuvchilar, Balans va Ban',
+        subtitle: 'Mijozlar CRM profili, cheklov va balans boshqaruvi',
+        keywords: 'foydalanuvchilar users balans ban bloklash chek profile rasm',
+        tab: 'users',
+        badge: 'USR',
+        allowed: hasPerm('users') || hasPerm('balance'),
+      },
+      {
+        id: 'sec_managers',
+        title: 'Jamoa, Menejerlar & Support Xodimlar',
+        subtitle: 'Ruxsatlar, parol va javobgar xodimlarni boshqarish',
+        keywords: 'menejer jamoa staff support agent ruxsat parol',
+        tab: 'managers',
+        badge: 'STF',
+        allowed: isSuperAdmin,
+      },
+      {
+        id: 'sec_orders',
+        title: 'TolovGo Buyurtmalari & To‘lov Tekshiruvi',
+        subtitle: "Sinov/Haqiqiy rejim, callback URL va qo'lda tekshirish",
+        keywords: 'tolovgo buyurtma order webhook callback tolov tekshirish',
+        tab: 'orders',
+        badge: 'PAY',
+        allowed: hasPerm('orders') || hasPerm('settings'),
+      },
+      {
+        id: 'sec_pricing',
+        title: 'AI Xizmatlar Narxi & Bonuslar',
+        subtitle: 'Slayd, Word, Daftar, Infografika tariflari va referal bonus',
+        keywords: 'narxlar pricing bonus referal xizmat slayd word daftar infografika',
+        tab: 'pricing',
+        badge: 'PRC',
+        allowed: hasPerm('pricing') || hasPerm('promos'),
+      },
+      {
+        id: 'sec_promos',
+        title: 'Promokodlar Boshqaruvi',
+        subtitle: 'Chegirma va balans bonus promokodlarini yaratish',
+        keywords: 'promokod promo kod bonus kupon',
+        tab: 'pricing',
+        badge: 'PRM',
+        allowed: hasPerm('promos'),
+      },
+      {
+        id: 'sec_ai_backup',
+        title: 'Zapaska AI Modellar & API Kalitlar (Bazaga Saqlash)',
+        subtitle: 'OpenRouter, Gemini, OpenAI-mos zaxira AI va standart model',
+        keywords: 'ai model api kalit key zapaska backup openrouter gemini openai llm suniy intelekt',
+        tab: 'marketing',
+        badge: 'AI',
+        allowed: isSuperAdmin,
+      },
+      {
+        id: 'sec_broadcast',
+        title: 'Ommaviy Telegram Broadcast & Bot Sozlamalari',
+        subtitle: "Foydalanuvchilarga xabar yuborish, texnik rejim va webhook",
+        keywords: 'broadcast xabar bot webhook sayt elon texnik rejim',
+        tab: 'marketing',
+        badge: 'BOT',
+        allowed: hasPerm('broadcast') || hasPerm('settings'),
+      },
+      {
+        id: 'sec_security',
+        title: 'Xavfsizlik Skaneri, Loglar & CSV Eksport',
+        subtitle: 'Hujumlar, audit loglar va zaxira eksport',
+        keywords: 'xavfsizlik security skaner log audit ddos webhook hujum export csv',
+        tab: 'security',
+        badge: 'SEC',
+        allowed: hasPerm('security') || isSuperAdmin,
+      },
+    ];
+
+    if (!q) {
+      sectionCatalog
+        .filter((s) => s.allowed)
+        .slice(0, 7)
+        .forEach((s) =>
+          pushItem({
+            id: s.id,
+            category: "Bo'lim",
+            badge: s.badge,
+            title: s.title,
+            subtitle: s.subtitle,
+            tab: s.tab,
+          })
+        );
+      return results;
+    }
+
+    // 1. Admin sections & tools
+    sectionCatalog.forEach((s) => {
+      if (!s.allowed) return;
+      if (
+        s.title.toLowerCase().includes(q) ||
+        s.subtitle.toLowerCase().includes(q) ||
+        s.keywords.includes(q)
+      ) {
+        pushItem({
+          id: s.id,
+          category: "Bo'lim / Vosita",
+          badge: s.badge,
+          title: s.title,
+          subtitle: s.subtitle,
+          tab: s.tab,
+        });
+      }
+    });
+
+    // 2. AI Services (Slayd, Word, Daftar, Infografika...)
+    if (hasPerm('pricing') || hasPerm('overview')) {
+      SERVICE_LABELS.forEach((srv) => {
+        if (
+          srv.title.toLowerCase().includes(q) ||
+          srv.key.toLowerCase().includes(q) ||
+          srv.unitLabel.toLowerCase().includes(q) ||
+          'xizmat'.includes(q)
+        ) {
+          const svcCfg = pricingDraft.services[srv.key];
+          pushItem({
+            id: `srv_${srv.key}`,
+            category: 'AI Xizmat',
+            badge: 'SRV',
+            title: srv.title,
+            subtitle: `Narxi: ${formatSom(svcCfg?.basePrice || 0)} · Birlik: ${srv.unitLabel}`,
+            tab: 'pricing',
+          });
+        }
+      });
+    }
+
+    // 3. Backup AI models saved in DB
+    if (isSuperAdmin) {
+      aiProviders.forEach((ap) => {
+        if (
+          ap.name.toLowerCase().includes(q) ||
+          ap.model.toLowerCase().includes(q) ||
+          ap.providerType.toLowerCase().includes(q)
+        ) {
+          pushItem({
+            id: `ai_${ap.id}`,
+            category: 'Zapaska AI',
+            badge: 'AI',
+            title: `${ap.name} (${ap.model})`,
+            subtitle: `${ap.providerType} · Ustuvorlik #${ap.priority} · ${ap.enabled ? 'Faol' : "O'chiq"}`,
+            tab: 'marketing',
+          });
+        }
+      });
+    }
+
+    // 4. Support tickets
+    if (hasPerm('support')) {
+      supportTickets.forEach((t) => {
+        if (
+          t.telegramId.toLowerCase().includes(q) ||
+          t.userFirstName.toLowerCase().includes(q) ||
+          (t.userUsername || '').toLowerCase().includes(q) ||
+          t.subject.toLowerCase().includes(q) ||
+          t.lastMessage.toLowerCase().includes(q)
+        ) {
+          pushItem({
+            id: `sup_${t.telegramId}`,
+            category: 'Support Chat',
+            badge: 'SUP',
+            title: `${t.userFirstName} ${t.userUsername ? `@${t.userUsername}` : ''}`.trim(),
+            subtitle: `${t.status.toUpperCase()} · ${t.lastMessage.slice(0, 70)}`,
+            tab: 'inbox',
+            supportTelegramId: t.telegramId,
+          });
+        }
+      });
+    }
+
+    // 5. Users
+    if (hasPerm('users') || hasPerm('balance')) {
+      users.forEach((u) => {
+        if (
+          u.telegramId.toLowerCase().includes(q) ||
+          u.firstName.toLowerCase().includes(q) ||
+          (u.fullName || '').toLowerCase().includes(q) ||
+          (u.username || '').toLowerCase().includes(q) ||
+          (u.crmTag || '').toLowerCase().includes(q)
+        ) {
+          pushItem({
+            id: `u_${u.telegramId}`,
+            category: 'Foydalanuvchi',
+            badge: 'USR',
+            title: u.fullName || [u.firstName, u.lastName].filter(Boolean).join(' ') || u.telegramId,
+            subtitle: `ID: ${u.telegramId}${u.username ? ` (@${u.username})` : ''} · ${formatSom(u.balance)}`,
+            tab: 'users',
+            userTelegramId: u.telegramId,
+          });
+        }
+      });
+    }
+
+    // 6. Orders
+    if (hasPerm('orders')) {
+      orders.forEach((o) => {
+        if (
+          o.orderId.toLowerCase().includes(q) ||
+          (o.telegramId && o.telegramId.toLowerCase().includes(q)) ||
+          (o.method || '').toLowerCase().includes(q)
+        ) {
+          pushItem({
+            id: `o_${o.orderId}`,
+            category: 'Buyurtma',
+            badge: 'PAY',
+            title: `Buyurtma #${o.orderId}`,
+            subtitle: `${formatSom(o.amount)} · ${o.status.toUpperCase()} · ID: ${o.telegramId || '—'}`,
+            tab: 'orders',
+          });
+        }
+      });
+    }
+
+    // 7. Managers & Staff
+    if (isSuperAdmin) {
+      managers.forEach((m) => {
+        if (
+          m.firstName.toLowerCase().includes(q) ||
+          m.telegramId.toLowerCase().includes(q) ||
+          (m.username || '').toLowerCase().includes(q) ||
+          m.roleTitle.toLowerCase().includes(q)
+        ) {
+          pushItem({
+            id: `m_${m.telegramId}`,
+            category: 'Xodim',
+            badge: 'STF',
+            title: `${m.firstName} · ${m.roleTitle}`,
+            subtitle: `ID: ${m.telegramId} · ${m.isActive ? 'Faol' : 'Nofaol'}`,
+            tab: 'managers',
+          });
+        }
+      });
+    }
+
+    // 8. Promocodes
+    if (hasPerm('promos')) {
+      promos.forEach((p) => {
+        if (p.code.toLowerCase().includes(q)) {
+          pushItem({
+            id: `p_${p.code}`,
+            category: 'Promokod',
+            badge: 'PRM',
+            title: `Promokod: ${p.code}`,
+            subtitle: `Bonus: ${formatSom(p.bonusAmount)} · ${p.usedCount}/${p.maxUses}`,
+            tab: 'pricing',
+          });
+        }
+      });
+    }
+
+    // 9. Security Logs
+    if (hasPerm('security') || isSuperAdmin) {
+      securityLogs.forEach((sl) => {
+        if (
+          sl.title.toLowerCase().includes(q) ||
+          sl.category.toLowerCase().includes(q) ||
+          (sl.ipAddress || '').toLowerCase().includes(q) ||
+          sl.details.toLowerCase().includes(q)
+        ) {
+          pushItem({
+            id: `sl_${sl.id}`,
+            category: 'Xavfsizlik',
+            badge: 'SEC',
+            title: sl.title,
+            subtitle: `${sl.severity.toUpperCase()} · ${sl.ipAddress || sl.category}`,
+            tab: 'security',
+          });
+        }
+      });
+    }
+
+    return results;
+  }, [
+    globalSearchQuery,
+    hasPerm,
+    isSuperAdmin,
+    pricingDraft.services,
+    aiProviders,
+    supportTickets,
+    users,
+    orders,
+    managers,
+    promos,
+    securityLogs,
+  ]);
 
   useEffect(() => {
     const allowed: Record<AdminTab, boolean> = {
@@ -563,6 +912,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             ? adminListSecurityLogs(telegramSessionToken, token).then((r) => {
                 setSecurityLogs(r.logs);
                 if (r.lastScan) setLastScanReport(r.lastScan);
+              })
+            : Promise.resolve(),
+          roleNow === 'super_admin'
+            ? adminListAiProviders(telegramSessionToken, token).then((r) => {
+                if (r.ok) {
+                  setAiProviders(r.providers);
+                  setHasPrimaryOpenRouter(Boolean(r.hasPrimaryOpenRouter));
+                  setHasPrimaryGemini(Boolean(r.hasPrimaryGemini));
+                }
               })
             : Promise.resolve(),
         ]);
@@ -1169,9 +1527,124 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       return;
     }
     setSupportTickets((prev) =>
-      prev.map((t) => (t.telegramId === tid ? { ...t, status } : t))
+      prev.map((t) =>
+        t.telegramId === tid
+          ? {
+              ...t,
+              status,
+              unreadForStaff: status === 'resolved' ? 0 : t.unreadForStaff,
+              lastMessage: res.closingMessage ? res.closingMessage.message : t.lastMessage,
+            }
+          : t
+      )
     );
-    onNotify('ok', `Tiket holati: ${status}`);
+    if (res.closingMessage && selectedTicketTid === tid) {
+      setThreadMessages((prev) =>
+        prev.some((m) => m.id === res.closingMessage!.id) ? prev : [...prev, res.closingMessage!]
+      );
+    }
+    onNotify(
+      'ok',
+      status === 'resolved'
+        ? 'Murojaat hal qilindi deb belgilandi va mijoz chati yopildi.'
+        : `Tiket holati: ${status}`
+    );
+  };
+
+  const handleResetAiForm = () => {
+    setAiFormId('');
+    setAiFormName('');
+    setAiFormType('openrouter');
+    setAiFormModel('google/gemini-2.5-flash');
+    setAiFormEndpoint('');
+    setAiFormApiKey('');
+    setAiFormPriority(String((aiProviders.length || 0) + 1));
+    setAiFormEnabled(true);
+  };
+
+  const handleEditAiProvider = (p: BackupAiProviderRecord) => {
+    setAiFormId(p.id);
+    setAiFormName(p.name);
+    setAiFormType(p.providerType);
+    setAiFormModel(p.model);
+    setAiFormEndpoint(p.endpointUrl || '');
+    setAiFormApiKey('');
+    setAiFormPriority(String(p.priority || 1));
+    setAiFormEnabled(p.enabled);
+  };
+
+  const handleSaveAiProviderSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!adminToken || savingAiProvider) return;
+    setSavingAiProvider(true);
+    try {
+      const res = await adminUpsertAiProvider(telegramSessionToken, adminToken, {
+        id: aiFormId || undefined,
+        name: aiFormName.trim(),
+        providerType: aiFormType,
+        model: aiFormModel.trim(),
+        endpointUrl: aiFormEndpoint.trim() || undefined,
+        apiKey: aiFormApiKey.trim() || undefined,
+        enabled: aiFormEnabled,
+        priority: Math.max(1, Math.min(99, Number(aiFormPriority) || 1)),
+      });
+      if (!res.ok) {
+        onNotify('err', res.error || 'Zapaska AI saqlanmadi.');
+        return;
+      }
+      if (res.providers) setAiProviders(res.providers);
+      handleResetAiForm();
+      onNotify('ok', 'Zapaska AI modeli va API bazaga saqlandi!');
+    } finally {
+      setSavingAiProvider(false);
+    }
+  };
+
+  const handleToggleAiProvider = async (p: BackupAiProviderRecord) => {
+    if (!adminToken) return;
+    const res = await adminUpsertAiProvider(telegramSessionToken, adminToken, {
+      id: p.id,
+      name: p.name,
+      providerType: p.providerType,
+      model: p.model,
+      endpointUrl: p.endpointUrl || undefined,
+      enabled: !p.enabled,
+      priority: p.priority,
+    });
+    if (!res.ok) {
+      onNotify('err', res.error || "O'zgartirib bo'lmadi.");
+      return;
+    }
+    if (res.providers) setAiProviders(res.providers);
+    onNotify('ok', `${p.name}: ${!p.enabled ? 'yoqildi' : "o'chirildi"}`);
+  };
+
+  const handleTestAiProvider = async (id: string) => {
+    if (!adminToken || testingAiId) return;
+    setTestingAiId(id);
+    try {
+      const res = await adminTestAiProvider(telegramSessionToken, adminToken, id);
+      if (res.providers) setAiProviders(res.providers);
+      if (!res.ok) {
+        onNotify('err', res.error || 'Sinov xato bilan tugadi.');
+        return;
+      }
+      onNotify('ok', `${res.model || 'Model'} muvaffaqiyatli javob berdi (${res.latencyMs || 0} ms).`);
+    } finally {
+      setTestingAiId(null);
+    }
+  };
+
+  const handleDeleteAiProvider = async (id: string) => {
+    if (!adminToken) return;
+    const res = await adminDeleteAiProvider(telegramSessionToken, adminToken, id);
+    if (!res.ok) {
+      onNotify('err', res.error || "O'chirib bo'lmadi.");
+      return;
+    }
+    if (res.providers) setAiProviders(res.providers);
+    if (aiFormId === id) handleResetAiForm();
+    onNotify('ok', 'Zapaska AI bazadan o‘chirildi.');
   };
 
   const handleRunSecurityScan = async () => {
@@ -1647,11 +2120,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </span>
           </div>
 
-          {/* Google-like Global Search & Suggestions */}
-          <div className="relative flex-1 max-w-xs sm:max-w-sm mx-2">
+          {/* Google-like Universal Search & Suggestions */}
+          <div ref={searchBoxRef} className="relative flex-1 max-w-2xl mx-2 md:mx-4">
             <div className="relative flex items-center">
-              <Search className="w-3.5 h-3.5 text-zinc-400 absolute left-3 pointer-events-none" />
+              <Search className="w-4 h-4 text-zinc-400 absolute left-3.5 pointer-events-none" />
               <input
+                ref={searchInputRef}
                 type="text"
                 value={globalSearchQuery}
                 onChange={(e) => {
@@ -1659,27 +2133,48 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   setShowSearchDropdown(true);
                 }}
                 onFocus={() => setShowSearchDropdown(true)}
-                placeholder="Google kabi qidirish (Foydalanuvchi, buyurtma, promo)..."
-                className="w-full pl-9 pr-8 py-1.5 bg-zinc-100 hover:bg-zinc-200/60 focus:bg-white border border-zinc-200 focus:border-red-500 rounded-xl text-xs text-zinc-900 placeholder:text-zinc-400 outline-none transition-all shadow-2xs"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && searchSuggestions.length > 0) {
+                    e.preventDefault();
+                    const first = searchSuggestions[0];
+                    setActiveTab(first.tab);
+                    if (first.userTelegramId) void handleOpenUserDetail(first.userTelegramId);
+                    if (first.supportTelegramId) void handleOpenSupportThread(first.supportTelegramId);
+                    setGlobalSearchQuery('');
+                    setShowSearchDropdown(false);
+                  }
+                }}
+                placeholder="Barcha xizmatlar, foydalanuvchilar, buyurtmalar, Zapaska AI, sozlamalarni qidiring... ( / )"
+                className="w-full pl-10 pr-16 py-2 bg-zinc-100 hover:bg-zinc-200/70 focus:bg-white border border-zinc-200 focus:border-red-500 focus:ring-2 focus:ring-red-500/15 rounded-2xl text-xs md:text-sm text-zinc-900 placeholder:text-zinc-400 outline-none transition-all shadow-2xs"
               />
-              {globalSearchQuery && (
+              {globalSearchQuery ? (
                 <button
                   type="button"
                   onClick={() => {
                     setGlobalSearchQuery('');
                     setShowSearchDropdown(false);
                   }}
-                  className="absolute right-2.5 text-zinc-400 hover:text-zinc-700 text-xs font-bold"
+                  aria-label="Qidiruvni tozalash"
+                  className="absolute right-3 w-5 h-5 rounded-full bg-zinc-200/80 hover:bg-zinc-300 text-zinc-700 flex items-center justify-center text-xs font-bold"
                 >
                   ×
                 </button>
+              ) : (
+                <span className="hidden sm:inline-flex absolute right-3 px-1.5 py-0.5 rounded-md border border-zinc-300 bg-white text-[10px] font-mono text-zinc-400 pointer-events-none">
+                  /
+                </span>
               )}
             </div>
 
             {showSearchDropdown && searchSuggestions.length > 0 && (
-              <div className="absolute top-full left-0 right-0 mt-1.5 bg-white border border-zinc-200 rounded-2xl shadow-xl overflow-hidden z-50 divide-y divide-zinc-100 max-h-72 overflow-y-auto">
-                <div className="px-3 py-1.5 bg-zinc-50 text-[10px] font-semibold text-zinc-400 uppercase tracking-wider">
-                  Tezkor qidiruv natijalari ({searchSuggestions.length})
+              <div className="absolute top-full left-0 right-0 mt-2 bg-white border border-zinc-200 rounded-2xl shadow-2xl overflow-hidden z-50 divide-y divide-zinc-100 max-h-96 overflow-y-auto">
+                <div className="px-4 py-2 bg-zinc-50 flex items-center justify-between text-[10px] font-semibold text-zinc-500 uppercase tracking-wider">
+                  <span>
+                    {globalSearchQuery.trim()
+                      ? `Qidiruv natijalari (${searchSuggestions.length})`
+                      : "Tezkor o'tish va asosiy xizmatlar"}
+                  </span>
+                  <span className="font-mono text-zinc-400">Enter — birinchisini ochish</span>
                 </div>
                 {searchSuggestions.map((item) => (
                   <button
@@ -1687,18 +2182,29 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     key={item.id}
                     onClick={() => {
                       setActiveTab(item.tab);
+                      if (item.userTelegramId) {
+                        void handleOpenUserDetail(item.userTelegramId);
+                      }
+                      if (item.supportTelegramId) {
+                        void handleOpenSupportThread(item.supportTelegramId);
+                      }
                       setGlobalSearchQuery('');
                       setShowSearchDropdown(false);
                     }}
-                    className="w-full px-3.5 py-2.5 text-left hover:bg-zinc-50 flex items-start gap-2.5 transition-colors"
+                    className="w-full px-4 py-2.5 text-left hover:bg-zinc-50 flex items-center justify-between gap-3 transition-colors"
                   >
-                    <span className="w-6 h-6 rounded-lg bg-red-50 text-red-600 flex items-center justify-center text-xs shrink-0 mt-0.5 font-bold">
-                      {item.type === 'user' ? 'U' : item.type === 'order' ? 'O' : 'P'}
-                    </span>
-                    <div className="min-w-0">
-                      <div className="text-xs font-semibold text-zinc-900 truncate">{item.title}</div>
-                      <div className="text-[11px] text-zinc-500 truncate">{item.subtitle}</div>
+                    <div className="flex items-start gap-2.5 min-w-0">
+                      <span className="px-1.5 py-1 rounded-lg bg-red-50 text-red-600 flex items-center justify-center text-[10px] font-mono shrink-0 mt-0.5 font-bold">
+                        {item.badge}
+                      </span>
+                      <div className="min-w-0">
+                        <div className="text-xs font-semibold text-zinc-900 truncate">{item.title}</div>
+                        <div className="text-[11px] text-zinc-500 truncate">{item.subtitle}</div>
+                      </div>
                     </div>
+                    <span className="text-[10px] font-medium text-zinc-400 bg-zinc-100 px-2 py-0.5 rounded-md shrink-0">
+                      {item.category}
+                    </span>
                   </button>
                 ))}
               </div>
@@ -2184,6 +2690,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                               })
                             )}
                           </div>
+
+                          {activeTicket?.status === 'resolved' && (
+                            <div className="px-4 py-2 bg-emerald-50 border-t border-emerald-200 text-[11px] text-emerald-800 flex items-center gap-1.5">
+                              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                              <span>
+                                Ushbu murojaat hal qilindi va mijoz chati yopildi. Xohlasangiz quyida qayta javob yozishingiz mumkin.
+                              </span>
+                            </div>
+                          )}
 
                           {/* Reply Form */}
                           <form
@@ -3711,6 +4226,326 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         </button>
                       </div>
                     </form>
+                  </section>
+                )}
+
+                {/* #20 Backup AI ("Zapaska AI") Models & API Keys Management */}
+                {isSuperAdmin && (
+                  <section className="lg:col-span-2 bg-white border border-zinc-200 rounded-2xl p-5 space-y-4">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                      <div>
+                        <h2 className="text-sm font-semibold text-zinc-900 flex items-center gap-1.5">
+                          <Cpu className="w-4 h-4 text-red-600" />
+                          <span>Asosiy & Zapaska AI Modellari (Bazaga saqlanadigan API kalitlar)</span>
+                        </h2>
+                        <p className="text-xs text-zinc-500 mt-0.5">
+                          Asosiy AI ishlamay qolganda tizim avtomatik ravishda ustuvorlik (#1, #2...) tartibida bazadagi Zapaska AI modellarga o‘tadi.
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-mono">
+                        <span
+                          className={`px-2 py-1 rounded-lg border ${
+                            hasPrimaryOpenRouter
+                              ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
+                              : 'bg-zinc-50 border-zinc-200 text-zinc-500'
+                          }`}
+                        >
+                          ENV OpenRouter: {hasPrimaryOpenRouter ? 'Faol' : "Yo'q"}
+                        </span>
+                        <span
+                          className={`px-2 py-1 rounded-lg border ${
+                            hasPrimaryGemini
+                              ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
+                              : 'bg-zinc-50 border-zinc-200 text-zinc-500'
+                          }`}
+                        >
+                          ENV Gemini: {hasPrimaryGemini ? 'Faol' : "Yo'q"}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Default primary model selector */}
+                    <div className="p-3.5 rounded-xl bg-zinc-50 border border-zinc-200 flex flex-col sm:flex-row sm:items-end gap-3">
+                      <div className="flex-1 space-y-1">
+                        <label className="block text-xs font-medium text-zinc-700">
+                          Asosiy OpenRouter Model ID
+                        </label>
+                        <input
+                          type="text"
+                          value={siteConfigDraft.defaultAiModel}
+                          onChange={(e) =>
+                            setSiteConfigDraft((s) => ({ ...s, defaultAiModel: e.target.value }))
+                          }
+                          placeholder="google/gemini-2.5-flash"
+                          className="w-full text-xs font-mono bg-white border border-zinc-200 focus:border-red-600 rounded-xl px-3 py-2 outline-none"
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        disabled={savingSiteCfg}
+                        onClick={(e) => void handleSaveSiteConfigSubmit(e)}
+                        className="px-4 py-2 rounded-xl bg-[#111113] hover:bg-zinc-800 disabled:opacity-50 text-white text-xs font-semibold flex items-center justify-center gap-1.5 shrink-0"
+                      >
+                        <Save className="w-3.5 h-3.5" />
+                        <span>Asosiy modelni saqlash</span>
+                      </button>
+                    </div>
+
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+                      {/* Add / Edit Backup AI Form */}
+                      <form
+                        onSubmit={handleSaveAiProviderSubmit}
+                        className="p-4 rounded-xl border border-zinc-200 bg-zinc-50/70 space-y-3"
+                      >
+                        <div className="flex items-center justify-between">
+                          <div className="text-xs font-semibold text-zinc-900">
+                            {aiFormId ? 'Zapaska AI ni tahrirlash' : "Yangi Zapaska AI qo'shish"}
+                          </div>
+                          {aiFormId && (
+                            <button
+                              type="button"
+                              onClick={handleResetAiForm}
+                              className="text-[11px] text-red-600 hover:underline font-medium"
+                            >
+                              Bekor qilish
+                            </button>
+                          )}
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                          <div className="space-y-1">
+                            <label className="block text-[11px] font-medium text-zinc-700">
+                              Nomi
+                            </label>
+                            <input
+                              type="text"
+                              value={aiFormName}
+                              onChange={(e) => setAiFormName(e.target.value)}
+                              placeholder="Masalan: Zapaska Gemini #1"
+                              className="w-full text-xs bg-white border border-zinc-200 focus:border-red-600 rounded-xl px-3 py-2 outline-none"
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <label className="block text-[11px] font-medium text-zinc-700">
+                              Provayder turi
+                            </label>
+                            <select
+                              value={aiFormType}
+                              onChange={(e) => {
+                                const next = e.target.value as BackupAiProviderType;
+                                setAiFormType(next);
+                                if (next === 'gemini' && aiFormModel.includes('/')) {
+                                  setAiFormModel('gemini-2.5-flash');
+                                } else if (next === 'openrouter' && !aiFormModel.includes('/')) {
+                                  setAiFormModel('google/gemini-2.5-flash');
+                                }
+                              }}
+                              className="w-full text-xs bg-white border border-zinc-200 focus:border-red-600 rounded-xl px-3 py-2 outline-none"
+                            >
+                              <option value="openrouter">OpenRouter</option>
+                              <option value="gemini">Google Gemini (To‘g‘ridan-to‘g‘ri)</option>
+                              <option value="openai_compatible">OpenAI-mos API (Groq/Together/Custom)</option>
+                            </select>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                          <div className="sm:col-span-2 space-y-1">
+                            <label className="block text-[11px] font-medium text-zinc-700">
+                              Model ID
+                            </label>
+                            <input
+                              type="text"
+                              value={aiFormModel}
+                              onChange={(e) => setAiFormModel(e.target.value)}
+                              placeholder={
+                                aiFormType === 'gemini'
+                                  ? 'gemini-2.5-flash'
+                                  : aiFormType === 'openrouter'
+                                    ? 'google/gemini-2.5-flash'
+                                    : 'gpt-4o-mini'
+                              }
+                              className="w-full text-xs font-mono bg-white border border-zinc-200 focus:border-red-600 rounded-xl px-3 py-2 outline-none"
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <label className="block text-[11px] font-medium text-zinc-700">
+                              Ustuvorlik (#)
+                            </label>
+                            <input
+                              type="number"
+                              min={1}
+                              max={99}
+                              value={aiFormPriority}
+                              onChange={(e) => setAiFormPriority(e.target.value)}
+                              className="w-full text-xs font-mono bg-white border border-zinc-200 focus:border-red-600 rounded-xl px-3 py-2 outline-none"
+                            />
+                          </div>
+                        </div>
+
+                        {aiFormType === 'openai_compatible' && (
+                          <div className="space-y-1">
+                            <label className="block text-[11px] font-medium text-zinc-700">
+                              Endpoint URL (faqat https://)
+                            </label>
+                            <input
+                              type="url"
+                              value={aiFormEndpoint}
+                              onChange={(e) => setAiFormEndpoint(e.target.value)}
+                              placeholder="https://api.groq.com/openai/v1/chat/completions"
+                              className="w-full text-xs font-mono bg-white border border-zinc-200 focus:border-red-600 rounded-xl px-3 py-2 outline-none"
+                            />
+                          </div>
+                        )}
+
+                        <div className="space-y-1">
+                          <label className="block text-[11px] font-medium text-zinc-700">
+                            API Kalit {aiFormId ? "(bo'sh qoldirilsa eski kalit saqlanadi)" : ''}
+                          </label>
+                          <input
+                            type="password"
+                            value={aiFormApiKey}
+                            onChange={(e) => setAiFormApiKey(e.target.value)}
+                            placeholder={aiFormId ? 'Yangi kalit (ixtiyoriy)...' : 'sk-or-... yoki AIza...'}
+                            autoComplete="new-password"
+                            className="w-full text-xs font-mono bg-white border border-zinc-200 focus:border-red-600 rounded-xl px-3 py-2 outline-none"
+                          />
+                        </div>
+
+                        <div className="flex items-center justify-between gap-2 pt-1">
+                          <label className="flex items-center gap-2 text-xs text-zinc-800 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={aiFormEnabled}
+                              onChange={(e) => setAiFormEnabled(e.target.checked)}
+                              className="accent-red-600 w-4 h-4"
+                            />
+                            <span>Faol (Zapaska sifatida ishlatilsin)</span>
+                          </label>
+                          <button
+                            type="submit"
+                            disabled={savingAiProvider}
+                            className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white text-xs font-semibold flex items-center gap-1.5"
+                          >
+                            {savingAiProvider ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <Save className="w-3.5 h-3.5" />
+                            )}
+                            <span>{aiFormId ? 'Yangilash' : 'Bazaga saqlash'}</span>
+                          </button>
+                        </div>
+                      </form>
+
+                      {/* Saved Backup AI List */}
+                      <div className="space-y-2.5">
+                        <div className="text-xs font-semibold text-zinc-900">
+                          Bazadagi Zapaska AI modellari ({aiProviders.length})
+                        </div>
+                        {aiProviders.length === 0 ? (
+                          <div className="p-6 rounded-xl border border-dashed border-zinc-200 text-center text-xs text-zinc-400">
+                            Hali bazaga Zapaska AI qo‘shilmagan. Chapdagi forma orqali model va API kalit qo‘shing.
+                          </div>
+                        ) : (
+                          <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
+                            {aiProviders.map((ap) => (
+                              <div
+                                key={ap.id}
+                                className={`p-3 rounded-xl border transition-colors ${
+                                  ap.enabled
+                                    ? 'bg-white border-zinc-200'
+                                    : 'bg-zinc-50 border-zinc-200/70 opacity-75'
+                                }`}
+                              >
+                                <div className="flex items-start justify-between gap-2">
+                                  <div className="min-w-0">
+                                    <div className="flex flex-wrap items-center gap-1.5">
+                                      <span className="px-1.5 py-0.5 rounded bg-zinc-900 text-white text-[10px] font-mono font-semibold">
+                                        #{ap.priority}
+                                      </span>
+                                      <span className="text-xs font-semibold text-zinc-900 truncate">
+                                        {ap.name}
+                                      </span>
+                                      <span
+                                        className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                                          ap.lastStatus === 'ok'
+                                            ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                            : ap.lastStatus === 'error'
+                                              ? 'bg-red-50 text-red-700 border border-red-200'
+                                              : 'bg-zinc-100 text-zinc-600'
+                                        }`}
+                                      >
+                                        {ap.lastStatus === 'ok'
+                                          ? 'Ishlayapti'
+                                          : ap.lastStatus === 'error'
+                                            ? 'Xato'
+                                            : "Sinovdan o'tmagan"}
+                                      </span>
+                                    </div>
+                                    <div className="text-[11px] font-mono text-zinc-600 mt-1 truncate">
+                                      {ap.providerType} · {ap.model}
+                                    </div>
+                                    <div className="text-[10px] font-mono text-zinc-400 mt-0.5">
+                                      Kalit: {ap.apiKeyMasked || '—'}
+                                      {ap.endpointUrl ? ` · ${ap.endpointUrl}` : ''}
+                                    </div>
+                                    {ap.lastError && (
+                                      <div className="text-[10px] text-red-600 mt-1 line-clamp-2">
+                                        {ap.lastError}
+                                      </div>
+                                    )}
+                                  </div>
+
+                                  <div className="flex items-center gap-1 shrink-0">
+                                    <button
+                                      type="button"
+                                      disabled={testingAiId === ap.id}
+                                      onClick={() => void handleTestAiProvider(ap.id)}
+                                      title="API ni sinab ko'rish"
+                                      className="px-2 py-1 rounded-lg border border-zinc-200 bg-zinc-50 hover:bg-zinc-100 text-[11px] font-medium text-zinc-800 flex items-center gap-1"
+                                    >
+                                      {testingAiId === ap.id ? (
+                                        <Loader2 className="w-3 h-3 animate-spin" />
+                                      ) : (
+                                        <Zap className="w-3 h-3 text-amber-600" />
+                                      )}
+                                      <span>Sinash</span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => void handleToggleAiProvider(ap)}
+                                      className={`px-2 py-1 rounded-lg border text-[11px] font-medium ${
+                                        ap.enabled
+                                          ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                                          : 'border-zinc-200 bg-white text-zinc-600'
+                                      }`}
+                                    >
+                                      {ap.enabled ? 'Faol' : "O'chiq"}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleEditAiProvider(ap)}
+                                      title="Tahrirlash"
+                                      className="p-1.5 rounded-lg border border-zinc-200 hover:bg-zinc-50 text-zinc-600"
+                                    >
+                                      <Edit3 className="w-3 h-3" />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => void handleDeleteAiProvider(ap.id)}
+                                      title="O'chirish"
+                                      className="p-1.5 rounded-lg border border-red-200 hover:bg-red-50 text-red-600"
+                                    >
+                                      <Trash2 className="w-3 h-3" />
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
                   </section>
                 )}
               </div>

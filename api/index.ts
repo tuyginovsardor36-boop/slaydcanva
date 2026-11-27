@@ -289,7 +289,8 @@ async function callOpenRouterOnce(
   apiKey: string,
   body: Record<string, unknown>,
   totalTimeoutMs: number,
-  firstTokenTimeoutMs = 10_000
+  firstTokenTimeoutMs = 10_000,
+  endpointUrl = OPENROUTER_ENDPOINT
 ): Promise<unknown> {
   const controller = new AbortController();
   const totalTimer = setTimeout(() => controller.abort(), totalTimeoutMs);
@@ -308,7 +309,7 @@ async function callOpenRouterOnce(
   };
 
   try {
-    const response = await fetch(OPENROUTER_ENDPOINT, {
+    const response = await fetch(endpointUrl, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${apiKey}`,
@@ -350,7 +351,7 @@ async function callOpenRouterOnce(
     }
 
     if (!content.trim()) {
-      throw new ProviderHttpError('openrouter', 502, 'Empty response content from OpenRouter');
+      throw new ProviderHttpError('openrouter', 502, 'Empty response content from AI provider');
     }
 
     return parseJsonResponse(content);
@@ -366,7 +367,7 @@ async function callOpenRouterOnce(
         msg.toLowerCase().includes('timeout') ||
         msg.toLowerCase().includes('aborted'))
     ) {
-      throw new ProviderHttpError('openrouter', 504, `OpenRouter timeout at ${stage}`);
+      throw new ProviderHttpError('openrouter', 504, `AI timeout at ${stage}`);
     }
     throw err;
   } finally {
@@ -383,9 +384,10 @@ async function generateViaOpenRouter(
     systemInstruction: string;
     responseSchema: Record<string, unknown>;
     trace?: string[];
-  }
+  },
+  preferredModel?: string
 ): Promise<unknown> {
-  const customModel = process.env.OPENROUTER_MODEL?.trim();
+  const customModel = preferredModel?.trim() || process.env.OPENROUTER_MODEL?.trim();
   const compactGuide = COMPACT_SCHEMA_GUIDES[params.schemaName] || '{}';
 
   const jsonPromptMessages = [
@@ -472,12 +474,15 @@ async function generateViaGemini(
     responseSchema: Record<string, unknown>;
     thinkingLevel?: ThinkingLevel;
     trace?: string[];
-  }
+  },
+  preferredModel?: string
 ): Promise<unknown> {
-  const attempts: Array<{ model: string; delayMs: number }> = [
-    { model: 'gemini-4-hydrogen', delayMs: 0 },
-    { model: 'gemini-3.1-flash-lite', delayMs: 500 },
-  ];
+  const attempts: Array<{ model: string; delayMs: number }> = preferredModel?.trim()
+    ? [{ model: preferredModel.trim(), delayMs: 0 }]
+    : [
+        { model: 'gemini-4-hydrogen', delayMs: 0 },
+        { model: 'gemini-3.1-flash-lite', delayMs: 500 },
+      ];
 
   let lastErr: unknown;
   for (const attempt of attempts) {
@@ -509,6 +514,124 @@ async function generateViaGemini(
   throw lastErr;
 }
 
+interface StoredBackupAiProvider {
+  id: string;
+  name: string;
+  providerType: 'openrouter' | 'gemini' | 'openai_compatible';
+  model: string;
+  endpointUrl?: string;
+  apiKey: string;
+  enabled: boolean;
+  priority: number;
+  lastStatus?: 'ok' | 'error' | 'untested';
+  lastError?: string;
+  lastTestedAt?: number;
+  createdAt: number;
+}
+
+function maskBackupApiKey(key: string): string {
+  const clean = key.trim();
+  if (!clean) return '';
+  if (clean.length <= 8) return '••••' + clean.slice(-2);
+  return `${clean.slice(0, 5)}••••${clean.slice(-4)}`;
+}
+
+function validateBackupEndpointUrl(rawUrl?: string): string | undefined {
+  const trimmed = (rawUrl || '').trim();
+  if (!trimmed) return undefined;
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new Error("Noto'g'ri Endpoint URL formati.");
+  }
+  if (parsed.protocol !== 'https:') {
+    throw new Error("Endpoint URL faqat https:// bo'lishi shart.");
+  }
+  const host = parsed.hostname.toLowerCase();
+  if (
+    host === 'localhost' ||
+    host === '127.0.0.1' ||
+    host === '::1' ||
+    host.endsWith('.local') ||
+    host.startsWith('10.') ||
+    host.startsWith('192.168.') ||
+    host.startsWith('169.254.') ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(host)
+  ) {
+    throw new Error("Ichki tarmoq manzillariga ruxsat berilmaydi.");
+  }
+  return parsed.toString();
+}
+
+async function getStoredBackupAiProviders(): Promise<StoredBackupAiProvider[]> {
+  const fromDb = await dbGetSetting<StoredBackupAiProvider[]>('ai_backup_providers');
+  const fromKv = !fromDb ? await kvGet<StoredBackupAiProvider[]>('app_settings:ai_backup_providers') : null;
+  const list = Array.isArray(fromDb) ? fromDb : Array.isArray(fromKv) ? fromKv : [];
+  return list
+    .filter((p) => p && typeof p.id === 'string' && typeof p.model === 'string')
+    .sort((a, b) => (a.priority || 99) - (b.priority || 99));
+}
+
+async function saveStoredBackupAiProviders(list: StoredBackupAiProvider[]): Promise<StoredBackupAiProvider[]> {
+  const sorted = [...list].sort((a, b) => (a.priority || 99) - (b.priority || 99));
+  await Promise.all([
+    dbSetSetting('ai_backup_providers', sorted),
+    kvSet('app_settings:ai_backup_providers', sorted),
+  ]);
+  return sorted;
+}
+
+async function runSingleBackupAiProvider(
+  provider: StoredBackupAiProvider,
+  params: {
+    schemaName: string;
+    prompt: string;
+    systemInstruction: string;
+    responseSchema: Record<string, unknown>;
+    thinkingLevel?: ThinkingLevel;
+    trace?: string[];
+  }
+): Promise<unknown> {
+  const key = provider.apiKey.trim();
+  if (!key) throw new Error('Backup API key is empty');
+
+  if (provider.providerType === 'gemini') {
+    const ai = new GoogleGenAI({ apiKey: key });
+    return generateViaGemini(ai, params, provider.model);
+  }
+
+  const compactGuide = COMPACT_SCHEMA_GUIDES[params.schemaName] || '{}';
+  const messages = [
+    {
+      role: 'system',
+      content: `${params.systemInstruction} Faqat yaroqli JSON obyekt qaytar (izohsiz va markdown belgilarsiz).`,
+    },
+    {
+      role: 'user',
+      content: `${params.prompt}\n\nJSON namunasi (barcha maydonlarni to'ldir):\n${compactGuide}`,
+    },
+  ];
+  const endpoint =
+    provider.providerType === 'openai_compatible' && provider.endpointUrl
+      ? provider.endpointUrl
+      : OPENROUTER_ENDPOINT;
+
+  return callOpenRouterOnce(
+    key,
+    {
+      model: provider.model,
+      messages,
+      temperature: 0.4,
+      max_tokens: 4500,
+      response_format: { type: 'json_object' },
+    },
+    28_000,
+    14_000,
+    endpoint
+  );
+}
+
 async function generateStructuredJson(params: {
   schemaName: string;
   prompt: string;
@@ -519,27 +642,45 @@ async function generateStructuredJson(params: {
 }): Promise<unknown> {
   const openRouterKey = process.env.OPENROUTER_API_KEY?.trim();
   const geminiClient = getGeminiClient();
+  const siteCfg = await getEffectiveSiteConfig().catch(() => DEFAULT_SITE_CONFIG);
+  const preferredOrModel = siteCfg.defaultAiModel || undefined;
+
+  let primaryError: unknown = null;
 
   if (openRouterKey) {
     try {
-      return await generateViaOpenRouter(openRouterKey, params);
+      return await generateViaOpenRouter(openRouterKey, params, preferredOrModel);
     } catch (openRouterErr) {
-      if (openRouterErr instanceof ProviderHttpError && openRouterErr.status >= 400 && openRouterErr.status < 500) {
-        throw openRouterErr;
-      }
-      if (geminiClient) {
-        try {
-          return await generateViaGemini(geminiClient, params);
-        } catch {
-          throw openRouterErr;
-        }
-      }
-      throw openRouterErr;
+      primaryError = openRouterErr;
     }
   }
 
   if (geminiClient) {
-    return await generateViaGemini(geminiClient, params);
+    try {
+      return await generateViaGemini(geminiClient, params);
+    } catch (gemErr) {
+      primaryError = primaryError || gemErr;
+    }
+  }
+
+  // Fallback ("Zapaska") AI providers saved in database
+  const backups = (await getStoredBackupAiProviders()).filter((b) => b.enabled && b.apiKey.trim());
+  for (let i = 0; i < backups.length; i += 1) {
+    const b = backups[i];
+    const tb = Date.now();
+    try {
+      const out = await runSingleBackupAiProvider(b, params);
+      params.trace?.push(`zapaska${i + 1}(${b.model}):ok:${Date.now() - tb}ms`);
+      return out;
+    } catch (bErr) {
+      const bm = bErr instanceof Error ? bErr.message.slice(0, 60) : String(bErr);
+      params.trace?.push(`zapaska${i + 1}(${b.model}):err(${bm}):${Date.now() - tb}ms`);
+      primaryError = primaryError || bErr;
+    }
+  }
+
+  if (primaryError) {
+    throw primaryError;
   }
 
   throw new Error('AI_API_KEY_MISSING');
@@ -3901,11 +4042,32 @@ async function appendInboxMessageSafe(msg: Omit<DbInboxMessage, 'createdAt'>): P
   return full;
 }
 
+const recentSupportAlertDedup = new Map<string, number>();
+
 async function notifySupportStaffTelegram(
   ticket: DbSupportTicket,
   messageText: string
 ): Promise<void> {
   if (!getTelegramBotToken()) return;
+  const msgHash = crypto
+    .createHash('sha256')
+    .update(`${ticket.telegramId}:${messageText.trim().toLowerCase().slice(0, 300)}`)
+    .digest('hex')
+    .slice(0, 20);
+  const memNow = Date.now();
+  const prevMemTs = recentSupportAlertDedup.get(msgHash) || 0;
+  if (memNow - prevMemTs < 20_000) return;
+  recentSupportAlertDedup.set(msgHash, memNow);
+  if (recentSupportAlertDedup.size > 300) {
+    for (const [k, ts] of recentSupportAlertDedup) {
+      if (memNow - ts > 60_000) recentSupportAlertDedup.delete(k);
+    }
+  }
+  const kvDedupeKey = `sup_alert_dedupe:${ticket.telegramId}:${msgHash}`;
+  const alreadySent = await kvGet<boolean>(kvDedupeKey);
+  if (alreadySent) return;
+  await kvSet(kvDedupeKey, true, 20);
+
   const adminIds = getAdminTelegramIds();
   const managers = await listManagersAll();
   const supportStaffIds = managers
@@ -5837,9 +5999,263 @@ app.post('/api/admin/site-config', async (req, res) => {
     id: `aud_site_${Date.now().toString(36)}`,
     actorId: ctx.user.telegramId,
     action: 'admin_site_config',
-    details: `Texnik rejim: ${saved.maintenanceMode ? 'Yoqilgan' : 'O‘chirilgan'}`,
+    details: `Texnik rejim: ${saved.maintenanceMode ? 'Yoqilgan' : 'O‘chirilgan'} · Model: ${saved.defaultAiModel || 'standart'}`,
   });
   res.json({ ok: true, siteConfig: saved });
+});
+
+app.get('/api/admin/ai-providers', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'super_admin');
+  if (!ctx) return;
+  const [providers, siteCfg] = await Promise.all([
+    getStoredBackupAiProviders(),
+    getEffectiveSiteConfig(),
+  ]);
+  const publicProviders = providers.map((p) => ({
+    id: p.id,
+    name: p.name,
+    providerType: p.providerType,
+    model: p.model,
+    endpointUrl: p.endpointUrl || '',
+    apiKeyMasked: maskBackupApiKey(p.apiKey),
+    hasApiKey: Boolean(p.apiKey && p.apiKey.trim()),
+    enabled: Boolean(p.enabled),
+    priority: Number(p.priority) || 1,
+    lastStatus: p.lastStatus || 'untested',
+    lastError: p.lastError || undefined,
+    lastTestedAt: p.lastTestedAt || undefined,
+    createdAt: p.createdAt,
+  }));
+  res.json({
+    ok: true,
+    providers: publicProviders,
+    defaultAiModel: siteCfg.defaultAiModel || 'google/gemini-2.5-flash',
+    hasPrimaryOpenRouter: Boolean(process.env.OPENROUTER_API_KEY?.trim()),
+    hasPrimaryGemini: Boolean(process.env.GEMINI_API_KEY?.trim()),
+  });
+});
+
+app.post('/api/admin/ai-providers', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'super_admin');
+  if (!ctx) return;
+  const rawId = typeof req.body?.id === 'string' ? req.body.id.trim() : '';
+  const name = typeof req.body?.name === 'string' ? req.body.name.trim().slice(0, 60) : '';
+  const providerTypeRaw = String(req.body?.providerType || 'openrouter');
+  const providerType: 'openrouter' | 'gemini' | 'openai_compatible' =
+    providerTypeRaw === 'gemini' || providerTypeRaw === 'openai_compatible'
+      ? providerTypeRaw
+      : 'openrouter';
+  const model = typeof req.body?.model === 'string' ? req.body.model.trim().slice(0, 120) : '';
+  const rawEndpoint = typeof req.body?.endpointUrl === 'string' ? req.body.endpointUrl.trim() : '';
+  const rawApiKey = typeof req.body?.apiKey === 'string' ? req.body.apiKey.trim() : '';
+  const enabled = req.body?.enabled !== false;
+  const priority = Math.max(1, Math.min(99, Math.round(Number(req.body?.priority) || 1)));
+
+  if (name.length < 2) {
+    res.status(400).json({ error: "Provayder nomi kamida 2 ta belgi bo'lishi kerak." });
+    return;
+  }
+  if (model.length < 2) {
+    res.status(400).json({ error: 'Model ID kiritilishi shart.' });
+    return;
+  }
+
+  let validatedEndpoint: string | undefined;
+  if (providerType === 'openai_compatible') {
+    if (!rawEndpoint) {
+      res.status(400).json({ error: 'OpenAI-mos provayder uchun https:// Endpoint URL kiriting.' });
+      return;
+    }
+    try {
+      validatedEndpoint = validateBackupEndpointUrl(rawEndpoint);
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'Endpoint URL xato.' });
+      return;
+    }
+  } else if (rawEndpoint) {
+    try {
+      validatedEndpoint = validateBackupEndpointUrl(rawEndpoint);
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'Endpoint URL xato.' });
+      return;
+    }
+  }
+
+  const existingList = await getStoredBackupAiProviders();
+  const prev = rawId ? existingList.find((p) => p.id === rawId) : undefined;
+  const finalApiKey = rawApiKey || prev?.apiKey || '';
+  if (!finalApiKey) {
+    res.status(400).json({ error: 'API kalit kiritilishi shart.' });
+    return;
+  }
+
+  const nextId = prev?.id || `ai_${Date.now().toString(36)}_${crypto.randomBytes(2).toString('hex')}`;
+  const updatedRecord: StoredBackupAiProvider = {
+    id: nextId,
+    name,
+    providerType,
+    model,
+    endpointUrl: validatedEndpoint,
+    apiKey: finalApiKey,
+    enabled,
+    priority,
+    lastStatus: rawApiKey ? 'untested' : (prev?.lastStatus || 'untested'),
+    lastError: rawApiKey ? undefined : prev?.lastError,
+    lastTestedAt: rawApiKey ? undefined : prev?.lastTestedAt,
+    createdAt: prev?.createdAt || Date.now(),
+  };
+
+  const nextList = await saveStoredBackupAiProviders([
+    updatedRecord,
+    ...existingList.filter((p) => p.id !== nextId),
+  ]);
+
+  await dbAppendAuditLog({
+    id: `aud_ai_${Date.now().toString(36)}`,
+    actorId: ctx.user.telegramId,
+    action: 'admin_ai_provider_saved',
+    targetId: nextId,
+    details: `${name} (${providerType}:${model}) · Ustuvorlik: #${priority} · ${enabled ? 'Faol' : "O'chiq"}`,
+  });
+
+  res.json({
+    ok: true,
+    providers: nextList.map((p) => ({
+      id: p.id,
+      name: p.name,
+      providerType: p.providerType,
+      model: p.model,
+      endpointUrl: p.endpointUrl || '',
+      apiKeyMasked: maskBackupApiKey(p.apiKey),
+      hasApiKey: Boolean(p.apiKey && p.apiKey.trim()),
+      enabled: Boolean(p.enabled),
+      priority: Number(p.priority) || 1,
+      lastStatus: p.lastStatus || 'untested',
+      lastError: p.lastError || undefined,
+      lastTestedAt: p.lastTestedAt || undefined,
+      createdAt: p.createdAt,
+    })),
+  });
+});
+
+app.delete('/api/admin/ai-providers/:id', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'super_admin');
+  if (!ctx) return;
+  const id = String(req.params.id || '').trim();
+  const existingList = await getStoredBackupAiProviders();
+  const target = existingList.find((p) => p.id === id);
+  if (!target) {
+    res.status(404).json({ error: 'Zapaska AI provayder topilmadi.' });
+    return;
+  }
+  const nextList = await saveStoredBackupAiProviders(existingList.filter((p) => p.id !== id));
+  await dbAppendAuditLog({
+    id: `aud_aidel_${Date.now().toString(36)}`,
+    actorId: ctx.user.telegramId,
+    action: 'admin_ai_provider_deleted',
+    targetId: id,
+    details: `${target.name} (${target.model}) o'chirildi`,
+  });
+  res.json({
+    ok: true,
+    providers: nextList.map((p) => ({
+      id: p.id,
+      name: p.name,
+      providerType: p.providerType,
+      model: p.model,
+      endpointUrl: p.endpointUrl || '',
+      apiKeyMasked: maskBackupApiKey(p.apiKey),
+      hasApiKey: Boolean(p.apiKey && p.apiKey.trim()),
+      enabled: Boolean(p.enabled),
+      priority: Number(p.priority) || 1,
+      lastStatus: p.lastStatus || 'untested',
+      lastError: p.lastError || undefined,
+      lastTestedAt: p.lastTestedAt || undefined,
+      createdAt: p.createdAt,
+    })),
+  });
+});
+
+app.post('/api/admin/ai-providers/:id/test', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'super_admin');
+  if (!ctx) return;
+  const id = String(req.params.id || '').trim();
+  const existingList = await getStoredBackupAiProviders();
+  const target = existingList.find((p) => p.id === id);
+  if (!target) {
+    res.status(404).json({ error: 'Zapaska AI provayder topilmadi.' });
+    return;
+  }
+  const startedAt = Date.now();
+  try {
+    await runSingleBackupAiProvider(target, {
+      schemaName: 'ai_health_test',
+      prompt: 'Respond ONLY with valid JSON: {"status":"ok"}',
+      systemInstruction: 'Return JSON only.',
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          status: { type: Type.STRING },
+        },
+        required: ['status'],
+      },
+    });
+    const latencyMs = Date.now() - startedAt;
+    const testedAt = Date.now();
+    const updatedList = await saveStoredBackupAiProviders(
+      existingList.map((p) =>
+        p.id === id ? { ...p, lastStatus: 'ok', lastError: undefined, lastTestedAt: testedAt } : p
+      )
+    );
+    res.json({
+      ok: true,
+      latencyMs,
+      model: target.model,
+      providers: updatedList.map((p) => ({
+        id: p.id,
+        name: p.name,
+        providerType: p.providerType,
+        model: p.model,
+        endpointUrl: p.endpointUrl || '',
+        apiKeyMasked: maskBackupApiKey(p.apiKey),
+        hasApiKey: Boolean(p.apiKey && p.apiKey.trim()),
+        enabled: Boolean(p.enabled),
+        priority: Number(p.priority) || 1,
+        lastStatus: p.lastStatus || 'untested',
+        lastError: p.lastError || undefined,
+        lastTestedAt: p.lastTestedAt || undefined,
+        createdAt: p.createdAt,
+      })),
+    });
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message.slice(0, 180) : String(err);
+    const testedAt = Date.now();
+    const updatedList = await saveStoredBackupAiProviders(
+      existingList.map((p) =>
+        p.id === id ? { ...p, lastStatus: 'error', lastError: errMsg, lastTestedAt: testedAt } : p
+      )
+    );
+    res.status(400).json({
+      ok: false,
+      error: errMsg,
+      model: target.model,
+      providers: updatedList.map((p) => ({
+        id: p.id,
+        name: p.name,
+        providerType: p.providerType,
+        model: p.model,
+        endpointUrl: p.endpointUrl || '',
+        apiKeyMasked: maskBackupApiKey(p.apiKey),
+        hasApiKey: Boolean(p.apiKey && p.apiKey.trim()),
+        enabled: Boolean(p.enabled),
+        priority: Number(p.priority) || 1,
+        lastStatus: p.lastStatus || 'untested',
+        lastError: p.lastError || undefined,
+        lastTestedAt: p.lastTestedAt || undefined,
+        createdAt: p.createdAt,
+      })),
+    });
+  }
 });
 
 app.get('/api/admin/promos', async (req, res) => {
@@ -6051,12 +6467,19 @@ app.get('/api/support/info', async (req, res) => {
   }
 
   await dbMarkThreadRead(user.telegramId, 'user');
-  const [tickets, dbMsgs] = await Promise.all([
+  const [tickets, dbMsgs, resetAtRaw] = await Promise.all([
     listSupportInboxTicketsSafe(),
     dbListInboxMessages(user.telegramId, 100),
+    kvGet<number>(`support_client_reset:${user.telegramId}`),
   ]);
-  const ticket = tickets.find((t) => t.telegramId === user.telegramId) || null;
-  const messages = dbMsgs || (await kvGet<DbInboxMessage[]>(`app_inbox_msgs:${user.telegramId}`)) || [];
+  const resetAt = typeof resetAtRaw === 'number' && Number.isFinite(resetAtRaw) ? resetAtRaw : 0;
+  const rawTicket = tickets.find((t) => t.telegramId === user.telegramId) || null;
+  const rawMessages = dbMsgs || (await kvGet<DbInboxMessage[]>(`app_inbox_msgs:${user.telegramId}`)) || [];
+  const messages = resetAt > 0 ? rawMessages.filter((m) => m.createdAt > resetAt) : rawMessages;
+  const ticket =
+    rawTicket && rawTicket.status === 'resolved' && resetAt >= rawTicket.updatedAt && messages.length === 0
+      ? null
+      : rawTicket;
 
   res.json({
     ok: true,
@@ -6066,6 +6489,22 @@ app.get('/api/support/info', async (req, res) => {
     messages,
   });
 });
+
+app.post('/api/support/reset', async (req, res) => {
+  const user = getAuthenticatedTelegramUser(req);
+  if (!user) {
+    res.status(401).json({ error: 'Telegram autentifikatsiyasi talab qilinadi.' });
+    return;
+  }
+  const resetAt = Date.now();
+  await Promise.all([
+    kvSet(`support_client_reset:${user.telegramId}`, resetAt, 30 * 86400),
+    dbMarkThreadRead(user.telegramId, 'user'),
+  ]);
+  res.json({ ok: true, resetAt });
+});
+
+const recentWebSupportMsgDedup = new Map<string, number>();
 
 app.post('/api/support/messages', async (req, res) => {
   const user = getAuthenticatedTelegramUser(req);
@@ -6083,6 +6522,30 @@ app.post('/api/support/messages', async (req, res) => {
     res.status(400).json({ error: "Xabar matni 2 dan 2000 tagacha belgi bo'lishi kerak." });
     return;
   }
+
+  const msgDedupHash = crypto
+    .createHash('sha256')
+    .update(`${user.telegramId}:${message.toLowerCase()}`)
+    .digest('hex')
+    .slice(0, 20);
+  const nowTs = Date.now();
+  const prevTs = recentWebSupportMsgDedup.get(msgDedupHash) || 0;
+  if (nowTs - prevTs < 15_000) {
+    const tickets = await listSupportInboxTicketsSafe();
+    const existingTicket = tickets.find((t) => t.telegramId === user.telegramId) || null;
+    res.json({ ok: true, ticket: existingTicket, deduped: true });
+    return;
+  }
+  recentWebSupportMsgDedup.set(msgDedupHash, nowTs);
+  const kvWebDedupe = `web_sup_dedupe:${user.telegramId}:${msgDedupHash}`;
+  if (await kvGet<boolean>(kvWebDedupe)) {
+    const tickets = await listSupportInboxTicketsSafe();
+    const existingTicket = tickets.find((t) => t.telegramId === user.telegramId) || null;
+    res.json({ ok: true, ticket: existingTicket, deduped: true });
+    return;
+  }
+  await kvSet(kvWebDedupe, true, 15);
+
   const subject =
     typeof req.body?.subject === 'string' && req.body.subject.trim()
       ? req.body.subject.trim().slice(0, 120)
@@ -6331,11 +6794,53 @@ app.post('/api/admin/support/tickets/:telegramId/status', async (req, res) => {
   await dbUpdateSupportTicketStatus(tid, status);
   const tickets = await listSupportInboxTicketsSafe();
   const target = tickets.find((t) => t.telegramId === tid);
-  if (target) {
+  let closingMessage: DbInboxMessage | undefined;
+
+  if (status === 'resolved') {
+    await dbMarkThreadRead(tid, 'staff');
+    const closingText =
+      "✅ Murojaatingiz hal qilindi va ushbu chat yopildi. Yangi savol bo'lsa, ilovadan «Yangi murojaat ochish» tugmasini bosing.";
+    closingMessage = await appendInboxMessageSafe({
+      id: `msg_${Date.now().toString(36)}_${crypto.randomBytes(3).toString('hex')}`,
+      threadId: target?.id || `sup_${tid}`,
+      telegramId: tid,
+      senderRole: 'staff',
+      senderId: ctx.user.telegramId,
+      senderName: ctx.user.firstName,
+      channel: 'both',
+      message: closingText,
+      isRead: false,
+    });
+    if (target) {
+      target.status = 'resolved';
+      target.unreadForStaff = 0;
+      target.lastMessage = closingText.slice(0, 400);
+      target.updatedAt = Date.now();
+      await saveSupportTicketKvFallback(target);
+    }
+    if (getTelegramBotToken()) {
+      await telegramApi('sendMessage', {
+        chat_id: tid,
+        text:
+          `✅ <b>Murojaatingiz hal qilindi</b>\n\n` +
+          `Support suhbati mutaxassis <b>${escapeTgHtml(ctx.user.firstName)}</b> tomonidan yopildi.\n` +
+          `Yangi savol bo'lsa, ilovadagi Support bo'limidan yangi murojaat ochishingiz mumkin.`,
+        parse_mode: 'HTML',
+      }).catch(() => {});
+    }
+    await dbAppendAuditLog({
+      id: `aud_supres_${Date.now().toString(36)}`,
+      actorId: ctx.user.telegramId,
+      action: 'support_ticket_resolved',
+      targetId: tid,
+      details: 'Support murojaati hal qilindi va mijoz chati yopildi',
+    });
+  } else if (target) {
     target.status = status;
+    target.updatedAt = Date.now();
     await saveSupportTicketKvFallback(target);
   }
-  res.json({ ok: true, status });
+  res.json({ ok: true, status, closingMessage });
 });
 
 // =========================================================================
@@ -7260,6 +7765,8 @@ async function formatBotFilesMessage(telegramId: string): Promise<string> {
   return lines.join('\n');
 }
 
+const recentTelegramUpdateIds = new Map<number, number>();
+
 app.post('/api/telegram/webhook', async (req, res) => {
   if (!checkIpRateLimit(req, 'telegram_webhook', 120, 60_000)) {
     res.status(429).json({ ok: false, error: 'Rate limit exceeded' });
@@ -7276,6 +7783,27 @@ app.post('/api/telegram/webhook', async (req, res) => {
     }
 
     const update = (req.body || {}) as Record<string, unknown>;
+    const updateId = typeof update.update_id === 'number' ? update.update_id : null;
+    if (updateId !== null) {
+      const nowMs = Date.now();
+      if (recentTelegramUpdateIds.has(updateId)) {
+        res.json({ ok: true, deduped: true });
+        return;
+      }
+      recentTelegramUpdateIds.set(updateId, nowMs);
+      if (recentTelegramUpdateIds.size > 800) {
+        for (const [uid, ts] of recentTelegramUpdateIds) {
+          if (nowMs - ts > 10 * 60_000) recentTelegramUpdateIds.delete(uid);
+        }
+      }
+      const kvUpdKey = `tg_upd_dedupe:${updateId}`;
+      if (await kvGet<boolean>(kvUpdKey)) {
+        res.json({ ok: true, deduped: true });
+        return;
+      }
+      await kvSet(kvUpdKey, true, 3600);
+    }
+
     const origin = getPreferredPublicOrigin(req);
 
     // 1) Handle inline button callback queries
@@ -7523,8 +8051,8 @@ app.post('/api/telegram/webhook', async (req, res) => {
       return;
     }
 
-    // 2) Handle incoming text commands & 5-button persistent ReplyKeyboard
-    const message = (update.message || update.edited_message) as Record<string, unknown> | undefined;
+    // 2) Handle incoming text commands & 5-button persistent ReplyKeyboard (ignore edited_message duplicates)
+    const message = update.message as Record<string, unknown> | undefined;
     if (message && typeof message === 'object') {
       const from = (message.from || {}) as Record<string, unknown>;
       const chat = (message.chat || {}) as Record<string, unknown>;
@@ -7814,6 +8342,7 @@ app.post('/api/telegram/webhook', async (req, res) => {
                   `🎧 Mutaxassis: <b>${escapeTgHtml(defaultSupport.firstName)}</b> tez orada javob beradi.`,
                 parse_mode: 'HTML',
               });
+              res.json({ ok: true });
               return;
             }
           }

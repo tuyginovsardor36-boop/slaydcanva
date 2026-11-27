@@ -6,6 +6,8 @@ import {
   AdminUserDetailPayload,
   AdminUserRow,
   AppPricingSettings,
+  BackupAiProviderRecord,
+  BackupAiProviderType,
   BalanceTransaction,
   BroadcastLogRow,
   CloudProjectData,
@@ -1110,6 +1112,27 @@ export async function sendUserSupportMessage(
   }
 }
 
+export async function resetUserSupportChat(
+  sessionToken: string
+): Promise<{ ok: boolean; resetAt?: number; error?: string }> {
+  try {
+    const res = await fetch('/api/support/reset', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: getTelegramAuthHeaders(sessionToken),
+    });
+    const data = (await res.json().catch(() => ({}))) as {
+      ok?: boolean;
+      resetAt?: number;
+      error?: string;
+    };
+    if (!res.ok) return { ok: false, error: data.error || 'Chatni tiklab bo‘lmadi.' };
+    return { ok: true, resetAt: data.resetAt };
+  } catch {
+    return { ok: false, error: "Server bilan bog'lanishda xatolik." };
+  }
+}
+
 export async function fetchUserSavedFiles(sessionToken?: string | null): Promise<{
   files: UserFileRecord[];
   projects: ProjectSummary[];
@@ -1276,7 +1299,12 @@ export async function adminUpdateSupportStatus(
   adminToken: string,
   targetTelegramId: string,
   status: SupportTicketStatus
-): Promise<{ ok: boolean; status?: SupportTicketStatus; error?: string }> {
+): Promise<{
+  ok: boolean;
+  status?: SupportTicketStatus;
+  closingMessage?: InboxMessageRow;
+  error?: string;
+}> {
   const res = await fetch(
     `/api/admin/support/tickets/${encodeURIComponent(targetTelegramId)}/status`,
     {
@@ -1292,10 +1320,11 @@ export async function adminUpdateSupportStatus(
   const data = (await res.json().catch(() => ({}))) as {
     ok?: boolean;
     status?: SupportTicketStatus;
+    closingMessage?: InboxMessageRow;
     error?: string;
   };
   if (!res.ok) return { ok: false, error: data.error || "Holatni o'zgartirib bo'lmadi." };
-  return { ok: true, status: data.status };
+  return { ok: true, status: data.status, closingMessage: data.closingMessage };
 }
 
 export async function adminListSecurityLogs(
@@ -1429,6 +1458,128 @@ export async function adminSetupTelegramWebhook(
     botUsername: data.botUsername,
     commandsUpdated: data.commandsUpdated,
     menuButtonUpdated: data.menuButtonUpdated,
+  };
+}
+
+export async function adminListAiProviders(
+  sessionToken: string,
+  adminToken: string
+): Promise<{
+  ok: boolean;
+  providers: BackupAiProviderRecord[];
+  defaultAiModel?: string;
+  hasPrimaryOpenRouter?: boolean;
+  hasPrimaryGemini?: boolean;
+  error?: string;
+}> {
+  const res = await fetch('/api/admin/ai-providers', {
+    credentials: 'same-origin',
+    headers: getAdminHeaders(sessionToken, adminToken),
+  });
+  const data = (await res.json().catch(() => ({}))) as {
+    ok?: boolean;
+    providers?: BackupAiProviderRecord[];
+    defaultAiModel?: string;
+    hasPrimaryOpenRouter?: boolean;
+    hasPrimaryGemini?: boolean;
+    error?: string;
+  };
+  if (!res.ok) return { ok: false, providers: [], error: data.error || 'AI provayderlarni yuklab bo‘lmadi.' };
+  return {
+    ok: true,
+    providers: Array.isArray(data.providers) ? data.providers : [],
+    defaultAiModel: data.defaultAiModel,
+    hasPrimaryOpenRouter: Boolean(data.hasPrimaryOpenRouter),
+    hasPrimaryGemini: Boolean(data.hasPrimaryGemini),
+  };
+}
+
+export async function adminUpsertAiProvider(
+  sessionToken: string,
+  adminToken: string,
+  payload: {
+    id?: string;
+    name: string;
+    providerType: BackupAiProviderType;
+    model: string;
+    endpointUrl?: string;
+    apiKey?: string;
+    enabled: boolean;
+    priority: number;
+  }
+): Promise<{ ok: boolean; providers?: BackupAiProviderRecord[]; error?: string }> {
+  const res = await fetch('/api/admin/ai-providers', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: {
+      'Content-Type': 'application/json',
+      ...getAdminHeaders(sessionToken, adminToken),
+    },
+    body: JSON.stringify(payload),
+  });
+  const data = (await res.json().catch(() => ({}))) as {
+    ok?: boolean;
+    providers?: BackupAiProviderRecord[];
+    error?: string;
+  };
+  if (!res.ok) return { ok: false, error: data.error || 'Zapaska AI saqlanmadi.' };
+  return { ok: true, providers: Array.isArray(data.providers) ? data.providers : [] };
+}
+
+export async function adminDeleteAiProvider(
+  sessionToken: string,
+  adminToken: string,
+  id: string
+): Promise<{ ok: boolean; providers?: BackupAiProviderRecord[]; error?: string }> {
+  const res = await fetch(`/api/admin/ai-providers/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    credentials: 'same-origin',
+    headers: getAdminHeaders(sessionToken, adminToken),
+  });
+  const data = (await res.json().catch(() => ({}))) as {
+    ok?: boolean;
+    providers?: BackupAiProviderRecord[];
+    error?: string;
+  };
+  if (!res.ok) return { ok: false, error: data.error || "O'chirib bo'lmadi." };
+  return { ok: true, providers: Array.isArray(data.providers) ? data.providers : [] };
+}
+
+export async function adminTestAiProvider(
+  sessionToken: string,
+  adminToken: string,
+  id: string
+): Promise<{
+  ok: boolean;
+  latencyMs?: number;
+  model?: string;
+  providers?: BackupAiProviderRecord[];
+  error?: string;
+}> {
+  const res = await fetch(`/api/admin/ai-providers/${encodeURIComponent(id)}/test`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: getAdminHeaders(sessionToken, adminToken),
+  });
+  const data = (await res.json().catch(() => ({}))) as {
+    ok?: boolean;
+    latencyMs?: number;
+    model?: string;
+    providers?: BackupAiProviderRecord[];
+    error?: string;
+  };
+  if (!res.ok) {
+    return {
+      ok: false,
+      error: data.error || 'AI sinovdan o‘tmadi.',
+      providers: Array.isArray(data.providers) ? data.providers : undefined,
+    };
+  }
+  return {
+    ok: true,
+    latencyMs: data.latencyMs,
+    model: data.model,
+    providers: Array.isArray(data.providers) ? data.providers : [],
   };
 }
 
