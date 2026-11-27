@@ -75,6 +75,7 @@ import {
   SystemApiKeySlot,
   TelegramUser,
   TolovgoPaymentMode,
+  UserFileRecord,
 } from '../types/editor';
 import {
   adminAdjustUserBalance,
@@ -309,12 +310,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     if (!adminToken) return;
     setDownloadingFileId(fileId);
     try {
-      const blob = await adminFetchFileBlob(telegramSessionToken, adminToken, fileId);
-      if (!blob) {
-        onNotify('err', "Faylni yuklab bo'lmadi.");
+      const res = await adminFetchFileBlob(fileId, telegramSessionToken, adminToken);
+      if (!res.ok || !res.blob) {
+        onNotify('err', res.error || "Faylni yuklab bo'lmadi.");
         return;
       }
-      triggerSafeFileDownload({ blob, fileName });
+      await triggerSafeFileDownload({ blob: res.blob, fileName });
       onNotify('ok', `"${fileName}" yuklab olindi.`);
     } catch {
       onNotify('err', "Faylni yuklab olishda xatolik.");

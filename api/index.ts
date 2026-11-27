@@ -4,6 +4,9 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import express from 'express';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
+import PptxGenJS from 'pptxgenjs';
+import { Document, Paragraph, TextRun, HeadingLevel, AlignmentType, Packer } from 'docx';
+import { jsPDF } from 'jspdf';
 import {
   AppPricingSettings,
   DEFAULT_PRICING_SETTINGS,
