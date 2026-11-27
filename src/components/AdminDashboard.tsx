@@ -49,6 +49,7 @@ import {
   AdminUserDetailPayload,
   AdminUserRow,
   AppPricingSettings,
+  BalanceTransaction,
   BroadcastLogRow,
   CrmEventRow,
   InboxMessageRow,
@@ -249,52 +250,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [showSearchDropdown, setShowSearchDropdown] = useState(false);
   const [selectedAdminTx, setSelectedAdminTx] = useState<BalanceTransaction | null>(null);
 
-  const searchSuggestions = useMemo(() => {
-    const q = globalSearchQuery.trim().toLowerCase();
-    if (!q || q.length < 2) return [];
-    const results: Array<{ id: string; type: 'user' | 'order' | 'promo'; title: string; subtitle: string; tab: AdminTabId }> = [];
 
-    users.forEach((u) => {
-      if (results.length >= 6) return;
-      if (u.telegramId.toLowerCase().includes(q) || u.firstName.toLowerCase().includes(q) || (u.username && u.username.toLowerCase().includes(q))) {
-        results.push({
-          id: `u_${u.telegramId}`,
-          type: 'user',
-          title: u.fullName || [u.firstName, u.lastName].filter(Boolean).join(' ') || u.telegramId,
-          subtitle: `Foydalanuvchi · ID: ${u.telegramId} · Balans: ${formatSom(u.balance)}`,
-          tab: 'users',
-        });
-      }
-    });
-
-    orders.forEach((o) => {
-      if (results.length >= 10) return;
-      if (o.orderId.toLowerCase().includes(q) || (o.telegramId && o.telegramId.toLowerCase().includes(q))) {
-        results.push({
-          id: `o_${o.orderId}`,
-          type: 'order',
-          title: `Buyurtma #${o.orderId}`,
-          subtitle: `TolovGo · ${formatSom(o.amount)} · ${o.status.toUpperCase()}`,
-          tab: 'orders',
-        });
-      }
-    });
-
-    promos.forEach((p) => {
-      if (results.length >= 12) return;
-      if (p.code.toLowerCase().includes(q)) {
-        results.push({
-          id: `p_${p.code}`,
-          type: 'promo',
-          title: `Promokod: ${p.code}`,
-          subtitle: `Bonus: ${formatSom(p.bonusAmount)} · Foydalanish: ${p.usedCount}/${p.maxUses}`,
-          tab: 'promos',
-        });
-      }
-    });
-
-    return results;
-  }, [globalSearchQuery, users, orders, promos]);
 
   // Users & CRM
   const [users, setUsers] = useState<AdminUserRow[]>([]);
@@ -384,6 +340,53 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [promoMaxUses, setPromoMaxUses] = useState('50');
   const [promoExpireDays, setPromoExpireDays] = useState('30');
   const [savingPromo, setSavingPromo] = useState(false);
+
+  const searchSuggestions = useMemo(() => {
+    const q = globalSearchQuery.trim().toLowerCase();
+    if (!q || q.length < 2) return [];
+    const results: Array<{ id: string; type: 'user' | 'order' | 'promo'; title: string; subtitle: string; tab: AdminTab }> = [];
+
+    users.forEach((u) => {
+      if (results.length >= 6) return;
+      if (u.telegramId.toLowerCase().includes(q) || u.firstName.toLowerCase().includes(q) || (u.username && u.username.toLowerCase().includes(q))) {
+        results.push({
+          id: `u_${u.telegramId}`,
+          type: 'user',
+          title: u.fullName || [u.firstName, u.lastName].filter(Boolean).join(' ') || u.telegramId,
+          subtitle: `Foydalanuvchi · ID: ${u.telegramId} · Balans: ${formatSom(u.balance)}`,
+          tab: 'users',
+        });
+      }
+    });
+
+    orders.forEach((o) => {
+      if (results.length >= 10) return;
+      if (o.orderId.toLowerCase().includes(q) || (o.telegramId && o.telegramId.toLowerCase().includes(q))) {
+        results.push({
+          id: `o_${o.orderId}`,
+          type: 'order',
+          title: `Buyurtma #${o.orderId}`,
+          subtitle: `TolovGo · ${formatSom(o.amount)} · ${o.status.toUpperCase()}`,
+          tab: 'orders',
+        });
+      }
+    });
+
+    promos.forEach((p) => {
+      if (results.length >= 12) return;
+      if (p.code.toLowerCase().includes(q)) {
+        results.push({
+          id: `p_${p.code}`,
+          type: 'promo',
+          title: `Promokod: ${p.code}`,
+          subtitle: `Bonus: ${formatSom(p.bonusAmount)} · Foydalanish: ${p.usedCount}/${p.maxUses}`,
+          tab: 'pricing',
+        });
+      }
+    });
+
+    return results;
+  }, [globalSearchQuery, users, orders, promos]);
 
   // Marketing / Broadcast / Site Config
   const [broadcastSegment, setBroadcastSegment] = useState<'all' | 'active' | 'vip' | 'zero_balance'>('all');
