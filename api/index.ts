@@ -4550,6 +4550,14 @@ function extractAdminTokenFromRequest(req: express.Request): {
   return { token: cookieToken, usedCookie: Boolean(cookieToken) };
 }
 
+function getStaffSessionFromRequest(req: express.Request): boolean {
+  const { token, usedCookie } = extractAdminTokenFromRequest(req);
+  if (!token) return false;
+  if (usedCookie && !hasValidCookieCsrf(req)) return false;
+  const payload = verifySignedToken(token);
+  return Boolean(payload && payload.kind === 'admin_session' && typeof payload.tid === 'string');
+}
+
 async function requireStaffSession(
   req: express.Request,
   res: express.Response,
@@ -7990,7 +7998,7 @@ app.post('/api/files/:id/send-telegram', async (req, res) => {
     res.status(502).json({ error: sent.description || 'Telegram botga yuborishda xatolik.' });
     return;
   }
-  await dbMarkUserFileSentTelegram(fileId, user.telegramId);
+  await dbMarkUserFileSentTelegram(fileId, true);
   const prevFiles = (await kvGet<DbUserFileRecord[]>(`user_files:${user.telegramId}`)) || [];
   await kvSet(
     `user_files:${user.telegramId}`,
