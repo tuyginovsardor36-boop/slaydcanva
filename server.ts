@@ -17,7 +17,7 @@ async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true, hmr: false },
+      server: { middlewareMode: true, hmr: false, ws: false, allowedHosts: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
@@ -39,4 +39,7 @@ async function startServer() {
   });
 }
 
-startServer();
+startServer().catch((err) => {
+  console.error('Failed to start SlaydCanva server:', err);
+  process.exit(1);
+});

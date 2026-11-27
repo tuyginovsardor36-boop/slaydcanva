@@ -112,6 +112,21 @@ type SlideDesignTheme =
 
 type AiTone = 'academic' | 'business' | 'lesson' | 'creative';
 
+interface WordChapterSummary {
+  code?: string;
+  title: string;
+  sectionTitles?: string[];
+  lastParagraph?: string;
+}
+
+interface WordChunkContext {
+  title?: string;
+  subtitle?: string;
+  planOutline?: Array<{ code?: string; title: string }>;
+  introGoal?: string;
+  previousChaptersSummary?: WordChapterSummary[];
+}
+
 interface GenerateRequestBody {
   serviceId: AiServiceId;
   topic: string;
@@ -134,12 +149,17 @@ interface GenerateRequestBody {
   designTheme?: SlideDesignTheme;
   aiTone?: AiTone;
   includeTopicImages?: boolean;
-  splitMode?: 'single' | 'part1' | 'part2';
+  splitMode?: 'single' | 'part1' | 'part2' | 'part3' | 'part4';
+  splitJobToken?: string;
   part1Count?: number;
   part2Count?: number;
+  partStageLabel?: string;
+  isFinalPart?: boolean;
   skipPhotoFetch?: boolean;
   pendingPhotoSlots?: number;
   previousContext?: GeneratePreviousContext;
+  wordChunk?: 1 | 2 | 3 | 4;
+  wordContext?: WordChunkContext;
 }
 
 const OPENROUTER_ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
@@ -222,6 +242,12 @@ const COMPACT_SCHEMA_GUIDES: Record<string, string> = {
     '{"deckTitle":"...","topicImageQueries":["english photo query 1","english photo query 2"],"slides":[{"title":"...","background":"#FFFFFF","primaryColor":"#1D4ED8","accentColor":"#DC2626","svgArtwork":"<svg xmlns=\\"http://www.w3.org/2000/svg\\" width=\\"960\\" height=\\"540\\" viewBox=\\"0 0 960 540\\">...</svg>","photoSlot":{"enabled":true,"x":550,"y":110,"width":356,"height":268,"borderRadius":16},"elements":[{"type":"rect|circle|text","x":56,"y":64,"width":450,"height":72,"text":"...","fontSize":32,"fontWeight":"bold","textAlign":"left","color":"#0F172A","fill":"#F8FAFC","stroke":"transparent","borderRadius":12,"shadow":true}]}]}',
   slaydcanva_academic_doc:
     '{"docKind":"independent_work|course_work|essay_article","title":"...","subtitle":"...","ministryHeader":"O\'ZBEKISTON RESPUBLIKASI OLIY TA\'LIM, FAN VA INNOVATSIYALAR VAZIRLIGI","abstract":"...","keywords":["..."],"planOutline":[{"code":"1-bob.","title":"..."}],"introduction":{"relevance":"...","priorResearch":"...","goal":"...","tasks":["..."],"object":"...","subjectMatter":"...","methods":"..."},"chapters":[{"code":"I BOB","title":"...","sections":[{"code":"1.1","title":"...","paragraphs":["...","..."]}]}],"comparisonTable":{"caption":"1-jadval. ...","headers":["...","...","..."],"rows":[["...","...","..."]]},"conclusion":["..."],"references":["..."]}',
+  slaydcanva_academic_chunk1:
+    '{"docKind":"independent_work|course_work|essay_article","title":"...","subtitle":"...","ministryHeader":"O\'ZBEKISTON RESPUBLIKASI OLIY TA\'LIM, FAN VA INNOVATSIYALAR VAZIRLIGI","abstract":"...","keywords":["..."],"planOutline":[{"code":"I BOB","title":"..."},{"code":"1.1","title":"..."}],"introduction":{"relevance":"...","priorResearch":"...","goal":"...","tasks":["..."],"object":"...","subjectMatter":"...","methods":"..."}}',
+  slaydcanva_academic_chunk_chapters:
+    '{"chapters":[{"code":"I BOB","title":"...","sections":[{"code":"1.1","title":"...","paragraphs":["...","...","..."]}]}]}',
+  slaydcanva_academic_chunk4:
+    '{"comparisonTable":{"caption":"1-jadval. ...","headers":["...","...","..."],"rows":[["...","...","..."]]},"conclusion":["...","...","...","..."],"references":["..."]}',
 };
 
 async function readSseContent(
@@ -418,8 +444,8 @@ async function generateViaOpenRouter(
         provider: { sort: 'throughput' },
         response_format: { type: 'json_object' },
       },
-      26_000,
-      12_000
+      32_000,
+      14_000
     );
     params.trace?.push(`or1:ok:${Date.now() - t1}ms`);
     return out;
@@ -442,8 +468,8 @@ async function generateViaOpenRouter(
         max_tokens: 4500,
         provider: { sort: 'throughput' },
       },
-      30_000,
-      18_000
+      22_000,
+      13_000
     );
     params.trace?.push(`or2:ok:${Date.now() - t2}ms`);
     return out;
@@ -1036,6 +1062,93 @@ const ACADEMIC_DOC_RESPONSE_SCHEMA = {
     references: { type: Type.ARRAY, items: { type: Type.STRING } },
   },
   required: ['title', 'introduction', 'chapters', 'conclusion', 'references'],
+};
+
+const ACADEMIC_CHUNK1_SCHEMA = {
+  type: Type.OBJECT,
+  properties: {
+    docKind: { type: Type.STRING },
+    title: { type: Type.STRING },
+    subtitle: { type: Type.STRING },
+    ministryHeader: { type: Type.STRING },
+    abstract: { type: Type.STRING },
+    keywords: { type: Type.ARRAY, items: { type: Type.STRING } },
+    planOutline: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          code: { type: Type.STRING },
+          title: { type: Type.STRING },
+        },
+        required: ['code', 'title'],
+      },
+    },
+    introduction: {
+      type: Type.OBJECT,
+      properties: {
+        relevance: { type: Type.STRING },
+        priorResearch: { type: Type.STRING },
+        goal: { type: Type.STRING },
+        tasks: { type: Type.ARRAY, items: { type: Type.STRING } },
+        object: { type: Type.STRING },
+        subjectMatter: { type: Type.STRING },
+        methods: { type: Type.STRING },
+      },
+      required: ['relevance', 'goal', 'tasks'],
+    },
+  },
+  required: ['title', 'planOutline', 'introduction'],
+};
+
+const ACADEMIC_CHUNK_CHAPTERS_SCHEMA = {
+  type: Type.OBJECT,
+  properties: {
+    chapters: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          code: { type: Type.STRING },
+          title: { type: Type.STRING },
+          sections: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                code: { type: Type.STRING },
+                title: { type: Type.STRING },
+                paragraphs: { type: Type.ARRAY, items: { type: Type.STRING } },
+              },
+              required: ['code', 'title', 'paragraphs'],
+            },
+          },
+        },
+        required: ['code', 'title', 'sections'],
+      },
+    },
+  },
+  required: ['chapters'],
+};
+
+const ACADEMIC_CHUNK4_SCHEMA = {
+  type: Type.OBJECT,
+  properties: {
+    comparisonTable: {
+      type: Type.OBJECT,
+      properties: {
+        caption: { type: Type.STRING },
+        headers: { type: Type.ARRAY, items: { type: Type.STRING } },
+        rows: {
+          type: Type.ARRAY,
+          items: { type: Type.ARRAY, items: { type: Type.STRING } },
+        },
+      },
+    },
+    conclusion: { type: Type.ARRAY, items: { type: Type.STRING } },
+    references: { type: Type.ARRAY, items: { type: Type.STRING } },
+  },
+  required: ['conclusion', 'references'],
 };
 
 const WIKIMEDIA_USER_AGENT = 'SlaydCanva/1.0 (https://slaydcanva.app; support@slaydcanva.app)';
@@ -2145,10 +2258,13 @@ app.post('/api/ai/generate', async (req, res) => {
   let pendingCharge: { tgUser: TgUserProfile; txId: string; price: number } | null = null;
   let chargedBalance: number | undefined;
 
+  let issuedSplitJobTokenForResponse: string | undefined;
+
   const sendAiJson = (payload: Record<string, unknown>) => {
     res.setHeader('X-AI-Trace', trace.join(' | '));
     res.json({
       ...payload,
+      ...(issuedSplitJobTokenForResponse ? { splitJobToken: issuedSplitJobTokenForResponse } : {}),
       chargedPrice: pendingCharge?.price ?? 0,
       newBalance: chargedBalance,
       serverCharged: Boolean(pendingCharge),
@@ -2188,13 +2304,53 @@ app.post('/api/ai/generate', async (req, res) => {
       return;
     }
 
-    const serverPrice = calculateServerServicePrice(body, pricing);
+    const isContinuationRequest =
+      body.splitMode === 'part2' ||
+      body.splitMode === 'part3' ||
+      body.splitMode === 'part4' ||
+      (typeof body.wordChunk === 'number' && body.wordChunk > 1);
 
-    if (serverPrice > 0 && !tgUser) {
+    const fullJobPrice = calculateServerServicePrice(
+      { ...body, splitMode: 'single', wordChunk: 1 },
+      pricing
+    );
+    let serverPrice = isContinuationRequest ? 0 : fullJobPrice;
+    let issuedSplitJobToken: string | undefined;
+
+    if (fullJobPrice > 0 && !tgUser) {
       res.status(401).json({
         error: 'Xizmatdan foydalanish uchun avval Telegram orqali tizimga kiring.',
       });
       return;
+    }
+
+    if (isContinuationRequest && fullJobPrice > 0) {
+      const tokenStr = typeof body.splitJobToken === 'string' ? body.splitJobToken.trim() : '';
+      const verifiedJob = tokenStr ? verifySignedToken(tokenStr) : null;
+      if (
+        !verifiedJob ||
+        verifiedJob.kind !== 'ai_split_job' ||
+        verifiedJob.tid !== (tgUser?.telegramId || 'anon') ||
+        verifiedJob.svc !== body.serviceId
+      ) {
+        res.status(403).json({
+          error: "Davom ettirish sessiyasi yaroqsiz yoki muddati tugagan. Qaytadan boshlang.",
+        });
+        return;
+      }
+      serverPrice = 0;
+    }
+
+    if (body.splitMode === 'part1' || body.wordChunk === 1) {
+      issuedSplitJobToken = signToken(
+        {
+          kind: 'ai_split_job',
+          tid: tgUser?.telegramId || 'anon',
+          svc: body.serviceId,
+        },
+        15 * 60 * 1000
+      );
+      issuedSplitJobTokenForResponse = issuedSplitJobToken;
     }
 
     if (tgUser && serverPrice > 0) {
@@ -2449,7 +2605,9 @@ ${isSplit ? `- MUHIM: Bu faqat 1/2-qism bo'lgani uchun "Xulosa" yoki "Yakun" sla
       const buildPart2Prompt = (
         part1DoneCount: number,
         part2NeedCount: number,
-        prev: GeneratePreviousContext
+        prev: GeneratePreviousContext,
+        stageLabel = '2/2-QISM DAVOMI',
+        isFinalPart = true
       ) => {
         const prevSlideLines = (prev.previousSlides || [])
           .map((s, idx) => `${idx + 1}. ${s.tag || `${idx + 1}-BO'LIM`} — ${s.title || ''}`)
@@ -2461,21 +2619,21 @@ ${isSplit ? `- MUHIM: Bu faqat 1/2-qism bo'lgani uchun "Xulosa" yoki "Yakun" sla
         return `
 Mavzu: "${topic}"
 Taqdimot sarlavhasi: "${prev.deckTitle || topic}"
-Umiy reja bandlari: ${planLines || 'Asosiy ilmiy reja'}
+Umumiy reja bandlari: ${planLines || 'Asosiy ilmiy reja'}
 ${toneGuide.promptRule}
-1-QISMDA YARATILGAN SLAYDLAR (bularni TAKRORLAMA!):
+OLDINGI QISMLARDA YARATILGAN SLAYDLAR (bularni TAKRORLAMA!):
 ${prevSlideLines}
 
-VAZIFA (2/2-QISM DAVOMI):
-Yuqoridagi 1-qismning bevosita DAVOMI sifatida, ${part1DoneCount + 1}-bo'limdan ${part1DoneCount + part2NeedCount}-bo'limgacha ANIQ ${part2NeedCount} ta YANGI, chuqur mazmunli va takrorlanmas kontent slayd yarat hamda oxirgi slayd uchun 5 ta haqiqiy ilmiy adabiyot/manba (references) tuz.
+VAZIFA (${stageLabel}):
+Yuqoridagi slaydlarning bevosita DAVOMI sifatida, ${part1DoneCount + 1}-bo'limdan ${part1DoneCount + part2NeedCount}-bo'limgacha ANIQ ${part2NeedCount} ta YANGI, chuqur mazmunli va takrorlanmas kontent slayd yarat${isFinalPart ? ' hamda oxirgi slayd uchun 5 ta haqiqiy ilmiy adabiyot/manba (references) tuz' : ' (hali Xulosa qo‘shma, chunki keyingi qism davom etadi)'}.
 Qoidalar:
 - slides massivida ANIQ ${part2NeedCount} ta kontent slayd bo'lsin (teg: "${String(part1DoneCount + 1).padStart(2, '0')}-BO'LIM" dan boshlab ketma-ket).
-- Faqat oxirgi (${part1DoneCount + part2NeedCount}-bo'lim) slaydni yakuniy xulosa va amaliy tavsiyalarga bag'ishla.
+${isFinalPart ? `- Faqat oxirgi (${part1DoneCount + part2NeedCount}-bo'lim) slaydni yakuniy xulosa va amaliy tavsiyalarga bag'ishla.` : `- Bu oraliq qism bo'lgani uchun Xulosa slaydini qo'shma — mavzuni chuqurlashtirib davom ettir.`}
 - Ketma-ket bir xil layout qo'yma: "split_image_right", "split_image_left", "three_columns", "timeline", "table", "grid_2x2", "steps", "case_analysis", "schedule", "highlight_note".
 - Kamida 1-2 ta slayd "split_image_right" yoki "split_image_left" bo'lsin.
 - "table" layoutida albatta tableHeaders (3 ta) va tableRows (kamida 4 ta qator, har qatorda 3 ta katak) bo'lsin, boshqalarida [].
 - "table" dan tashqari barcha layoutlarda "blocks" 2-4 ta to'ldirilgan banddan iborat bo'lsin.
-- references massivida 5 ta haqiqiy ilmiy adabiyot va manba (muallif, asar nomi, yil, nashriyot) yoz.
+- references massivida ${isFinalPart ? '5 ta haqiqiy ilmiy adabiyot va manba (muallif, asar nomi, yil, nashriyot)' : 'bo‘sh massiv []'} yoz.
 - QAT'IY QOIDA: Matnlarda "N ta slayd qilindi/tayyorlandi" kabi meta-iboralarni yozma. Jiddiy, faktlarga asoslangan matn ber!
 `;
       };
@@ -2511,28 +2669,35 @@ Qoidalar:
         return;
       }
 
-      if (splitMode === 'part2') {
-        const part1Count = Math.max(1, Number(body.part1Count) || Math.ceil(totalContentCount / 2));
-        const part2Count = Math.min(18, Math.max(1, Number(body.part2Count) || (totalContentCount - part1Count)));
+      if (splitMode === 'part2' || splitMode === 'part3' || splitMode === 'part4') {
         const prev = body.previousContext || {};
+        const doneSoFar = Math.max(1, Number(body.part1Count) || prev.previousSlides?.length || Math.ceil(totalContentCount / 2));
+        const needCount = Math.min(18, Math.max(1, Number(body.part2Count) || (totalContentCount - doneSoFar)));
+        const isFinalPart = body.isFinalPart !== undefined ? Boolean(body.isFinalPart) : splitMode === 'part2' || splitMode === 'part4';
+        const stageLabel =
+          typeof body.partStageLabel === 'string' && body.partStageLabel.trim()
+            ? body.partStageLabel.trim()
+            : isFinalPart
+              ? 'YAKUNIY QISM DAVOMI'
+              : 'ORALIQ QISM DAVOMI';
 
         const part2Data = (await generateStructuredJson({
           schemaName: 'slaydcanva_deck_part2',
-          prompt: buildPart2Prompt(part1Count, part2Count, prev),
+          prompt: buildPart2Prompt(doneSoFar, needCount, prev, stageLabel, isFinalPart),
           systemInstruction:
-            `${toneGuide.systemRole} 1-qismning mantiqiy davomi sifatida faqat yangi slaydlar va manbalarni JSON shaklida qaytaring.`,
+            `${toneGuide.systemRole} Oldingi qismlarning mantiqiy davomi sifatida faqat yangi slaydlar va manbalarni JSON shaklida qaytaring.`,
           responseSchema: SLIDE_PART2_SCHEMA,
           thinkingLevel: ThinkingLevel.MEDIUM,
           trace,
         })) as Record<string, unknown>;
 
         const rawPart2Slides = Array.isArray(part2Data.slides)
-          ? (part2Data.slides as Array<Record<string, unknown>>).slice(0, part2Count)
+          ? (part2Data.slides as Array<Record<string, unknown>>).slice(0, needCount)
           : [];
         part2Data.slides = sanitizeSlideItems(rawPart2Slides);
-        part2Data.references = normalizeReferenceList(part2Data.references);
+        part2Data.references = isFinalPart ? normalizeReferenceList(part2Data.references) : [];
 
-        sendAiJson({ serviceId: body.serviceId, splitMode: 'part2', data: part2Data });
+        sendAiJson({ serviceId: body.serviceId, splitMode, data: part2Data });
         return;
       }
 
@@ -2711,6 +2876,192 @@ Qoidalar:
               : 'Ilmiy maqola (IMRAD)'
           : 'Mustaqil ish (Referat)';
 
+      const docKindValue = isCourse
+        ? 'course_work'
+        : isEssay
+          ? 'essay_article'
+          : 'independent_work';
+
+      const wordChunk =
+        body.wordChunk === 1 || body.wordChunk === 2 || body.wordChunk === 3 || body.wordChunk === 4
+          ? body.wordChunk
+          : null;
+
+      if (wordChunk) {
+        const wCtx = body.wordContext || {};
+        const planText = Array.isArray(wCtx.planOutline) && wCtx.planOutline.length > 0
+          ? wCtx.planOutline.map((p) => `${p.code || ''} ${p.title}`).join('\n')
+          : '';
+        const prevChaptersText =
+          Array.isArray(wCtx.previousChaptersSummary) && wCtx.previousChaptersSummary.length > 0
+            ? wCtx.previousChaptersSummary
+                .map(
+                  (c) =>
+                    `${c.code || ''} ${c.title}${c.sectionTitles?.length ? ` (${c.sectionTitles.join('; ')})` : ''}${c.lastParagraph ? `\nOxirgi fikr: "${c.lastParagraph.slice(0, 260)}..."` : ''}`
+                )
+                .join('\n\n')
+            : '';
+
+        if (wordChunk === 1) {
+          const outlinePlanInstruction = isEssay
+            ? chaptersTarget === 2
+              ? '2 ta asosiy qism (I QISM: 1.1, 1.2; II QISM: 2.1, 2.2) — jami 4 ta bo‘limdan iborat reja tuz.'
+              : '1 ta asosiy qism (1.1, 1.2, 1.3) dan iborat ixcham reja tuz.'
+            : chaptersTarget === 4
+              ? '4 ta bob (I BOB: 1.1, 1.2; II BOB: 2.1, 2.2; III BOB: 3.1, 3.2; IV BOB: 4.1, 4.2) dan iborat to‘liq reja tuz.'
+              : chaptersTarget === 3
+                ? '3 ta bob (I BOB: 1.1, 1.2; II BOB: 2.1, 2.2; III BOB: 3.1, 3.2) dan iborat to‘liq reja tuz.'
+                : '2 ta bob (I BOB: 1.1, 1.2, 1.3; II BOB: 2.1, 2.2, 2.3) dan iborat to‘liq 5-10 sahifalik reja tuz.';
+
+          const chunk1Prompt = `
+Ish turi: ${workLabel}
+Mavzu: "${topic}"
+Ta'lim muassasasi: "${institution || "Oliy ta'lim muassasasi"}"
+${facultyText ? `Fakultet: "${facultyText}"` : ''}
+${deptText ? `Kafedra: "${deptText}"` : ''}
+Fan nomi: "${subject || "Asosiy fan"}"
+Qo'shimcha ko'rsatma: "${details || "O'zbekiston OTM akademik standartlariga mos 5-10 sahifalik chuqur tahliliy ish tayyorla"}"
+${toneGuide.promptRule}
+
+VAZIFA (1/4-BOSQICH — TITUL MA'LUMOTLARI, TO'LIQ REJA VA KIRISH):
+Faqat ishning umumiy titul sarlavhasi, to'liq mundarija rejasi (planOutline) hamda chuqur KIRISH qismini sof adabiy o'zbek tilida (lotin yozuvida) JSON ko'rinishida yarat (boblarni keyingi 2- va 3-bosqichlarda yozamiz!).
+Qoidalar:
+- title: mavzuning rasmiy ilmiy sarlavhasi (qo'shtirnoqsiz); subtitle: qisqa akademik aniqlashtiruvchi sarlavha.
+${isEssay ? '- abstract: 70-100 so‘zlik annotatsiya; keywords: 5-7 ta ilmiy kalit so‘z.' : ''}
+- planOutline: ${outlinePlanInstruction} Har bir elementda { code, title } bo'lsin.
+- introduction:
+  - relevance: mavzuning dolzarbligi (120-160 so'z, kuchli ilmiy asos);
+  - priorResearch: muammoning o'rganilganlik darajasi (mahalliy va xorijiy olimlar nuqtai nazari, 90-120 so'z);
+  - goal: tadqiqotning aniq maqsadi (40-65 so'z);
+  - tasks: 4-5 ta aniq ilmiy vazifa;
+  - object: tadqiqot obyekti;
+  - subjectMatter: tadqiqot predmeti;
+  - methods: qo'llanilgan metodlar.
+- QAT'IY QOIDA: "N sahifa", "AI tomonidan" kabi meta-so'zlarni yozma.
+`;
+          const chunk1Data = (await generateStructuredJson({
+            schemaName: 'slaydcanva_academic_chunk1',
+            prompt: chunk1Prompt,
+            systemInstruction:
+              `${toneGuide.systemRole} Siz O'zbekiston OTM ilmiy muharririsiz. 1-bosqich uchun mukammal Titul, To'liq Reja va Kirish qismini JSON shaklida qaytaring.`,
+            responseSchema: ACADEMIC_CHUNK1_SCHEMA,
+            thinkingLevel: ThinkingLevel.MEDIUM,
+            trace,
+          })) as Record<string, unknown>;
+          chunk1Data.docKind = docKindValue;
+          sendAiJson({ serviceId: body.serviceId, wordChunk: 1, data: chunk1Data });
+          return;
+        }
+
+        if (wordChunk === 2) {
+          const chunk2TargetDesc = isEssay
+            ? 'I qism (1.1 va 1.2 bo‘limlar: Nazariy asos va metodologiya). Har bir bo‘limda 3 ta 80-115 so‘zli chuqur xatboshi yoz.'
+            : chaptersTarget === 4
+              ? 'I BOB (1.1, 1.2) va II BOB (2.1, 2.2) ni TO‘LIQ yoz. Har bir paragrafda 3 ta 75-105 so‘zli chuqur akademik xatboshi bo‘lsin.'
+              : chaptersTarget === 3
+                ? 'I BOB (1.1, 1.2 to‘liq) va II BOB ning 2.1-paragrafini yoz (kod: "II BOB", section code: "2.1"). Har bir paragrafda 3 ta 80-115 so‘zli chuqur xatboshi yoz.'
+                : 'I BOB (1.1, 1.2, 1.3 — jami 3 ta paragraf) ni TO‘LIQ yoz. Har bir paragrafda 3 ta 85-120 so‘zli chuqur akademik xatboshi (paragraphs) bo‘lsin.';
+
+          const chunk2Prompt = `
+Ish turi: ${workLabel}
+Asosiy sarlavha: "${wCtx.title || topic}"
+Qo'shimcha ko'rsatma: "${details || 'Chuqur nazariy va ilmiy tahlil'}"
+${toneGuide.promptRule}
+ISHNING TASDIQLANGAN REJASI:
+${planText || 'I BOB va II BOB'}
+Tadqiqot maqsadi: "${wCtx.introGoal || topic}"
+
+VAZIFA (2/4-BOSQICH — BIRINCHI QISM BOBLARINI YOZISH):
+Rejaga qat'iy amal qilgan holda quyidagi boblarni to'liq, dalillarga, atamalarga va ilmiy tahlilga boy qilib yoz:
+${chunk2TargetDesc}
+Qoidalar:
+- Sof adabiy o'zbek tilida (lotin yozuvida) yoz.
+- Umumiy yuzaki gaplar emas, real nazariy tushunchalar, olimlar qarashlari, qonuniyatlar va tahlillar bo'lsin.
+- Har bir paragrafda kamida 3 ta to'liq, keng xatboshi (paragraphs) bo'lsin.
+`;
+          const chunk2Data = (await generateStructuredJson({
+            schemaName: 'slaydcanva_academic_chunk_chapters',
+            prompt: chunk2Prompt,
+            systemInstruction:
+              `${toneGuide.systemRole} Siz ilmiy tadqiqot muallifisiz. Kirish va rejaga tayangan holda 2-bosqich boblarini JSON shaklida batafsil yozing.`,
+            responseSchema: ACADEMIC_CHUNK_CHAPTERS_SCHEMA,
+            thinkingLevel: ThinkingLevel.MEDIUM,
+            trace,
+          })) as Record<string, unknown>;
+          sendAiJson({ serviceId: body.serviceId, wordChunk: 2, data: chunk2Data });
+          return;
+        }
+
+        if (wordChunk === 3) {
+          const chunk3TargetDesc = isEssay
+            ? chaptersTarget === 2
+              ? 'II qism (2.1 va 2.2 bo‘limlar: Amaliy tahlil, natijalar va muhokama). Har bir bo‘limda 3 ta 80-115 so‘zli xatboshi yoz.'
+              : 'I qismning 1.3-bo‘limi (Natijalar va muhokama) ni 3-4 ta 85-120 so‘zli xatboshi bilan yoz.'
+            : chaptersTarget === 4
+              ? 'III BOB (3.1, 3.2) va IV BOB (4.1, 4.2) ni TO‘LIQ yoz. Har bir paragrafda 3 ta 75-105 so‘zli amaliy tahlil va tavsiya xatboshisi bo‘lsin.'
+              : chaptersTarget === 3
+                ? 'II BOB ning davomi — 2.2-paragraf (kod: "II BOB", section code: "2.2") hamda III BOB (3.1, 3.2 to‘liq) ni yoz. Har bir paragrafda 3 ta 80-115 so‘zli amaliy tahlil xatboshisi yoz.'
+                : 'II BOB (2.1, 2.2, 2.3 — jami 3 ta paragraf) ni TO‘LIQ yoz. I bobning mantiqiy davomi sifatida amaliy tahlil, statistik/qiyosiy misollar va muammo yechimlarini yoz (har paragrafda 3 ta 85-120 so‘zli xatboshi).';
+
+          const chunk3Prompt = `
+Ish turi: ${workLabel}
+Asosiy sarlavha: "${wCtx.title || topic}"
+${toneGuide.promptRule}
+ISHNING TASDIQLANGAN REJASI:
+${planText || 'Davomiy boblar'}
+
+OLDINGI BOSQICHDA YOZILGAN QISM (takrorlama, bevosita DAVOMIDAN ma'noli qilib ula!):
+${prevChaptersText}
+
+VAZIFA (3/4-BOSQICH — DAVOMIY BOBLAR VA AMALIY TAHLIL):
+Yuqoridagi boblarning uzviy va mantiqiy DAVOMI sifatida ushbu qismni yoz:
+${chunk3TargetDesc}
+Qoidalar:
+- Oldingi boblardagi jumlalarni takrorlama — fikrni mantiqan rivojlantirib, amaliy tahlil, O'zbekiston va jahon tajribasi, muammolar va yechimlar bilan boyit.
+- Sof adabiy o'zbek tilida (lotin yozuvida) yoz.
+`;
+          const chunk3Data = (await generateStructuredJson({
+            schemaName: 'slaydcanva_academic_chunk_chapters',
+            prompt: chunk3Prompt,
+            systemInstruction:
+              `${toneGuide.systemRole} Oldingi boblar mazmuniga mantiqan bog'langan holda keyingi boblarni chuqur va uzviy davom ettirib JSON qaytaring.`,
+            responseSchema: ACADEMIC_CHUNK_CHAPTERS_SCHEMA,
+            thinkingLevel: ThinkingLevel.MEDIUM,
+            trace,
+          })) as Record<string, unknown>;
+          sendAiJson({ serviceId: body.serviceId, wordChunk: 3, data: chunk3Data });
+          return;
+        }
+
+        if (wordChunk === 4) {
+          const chunk4Prompt = `
+Ish turi: ${workLabel}
+Asosiy sarlavha: "${wCtx.title || topic}"
+${toneGuide.promptRule}
+ISHNING REJASI VA YOZILGAN BOBLARI:
+${prevChaptersText || planText || topic}
+
+VAZIFA (4/4-BOSQICH — TAHLILIY JADVAL, YAKUNIY XULOSA VA ADABIYOTLAR):
+Barcha boblarning umumiy mantiqiy yakuni sifatida quyidagilarni yarat:
+1) comparisonTable: mavzuga doir 3-4 ustunli, 4-5 qatorli aniq qiyosiy yoki statistik tahlil jadvali (caption: "1-jadval. ...").
+2) conclusion: 4-5 ta teran, har biri 75-110 so'zli yakuniy ilmiy xulosa va amaliy takliflar paragrafi (oldingi boblar natijalarini sintez qilsin).
+3) references: ${isCourse ? '12-14 ta' : isEssay ? '7-9 ta' : '10-12 ta'} O'zDST standartidagi haqiqiy ilmiy adabiyot (qonunlar, farmonlar, darsliklar, monografiyalar, ilmiy maqolalar; muallif, asar nomi, nashriyot, yil).
+`;
+          const chunk4Data = (await generateStructuredJson({
+            schemaName: 'slaydcanva_academic_chunk4',
+            prompt: chunk4Prompt,
+            systemInstruction:
+              `${toneGuide.systemRole} Butun ishni mantiqan yakunlovchi tahliliy jadval, Xulosa va O'zDST Adabiyotlar ro'yxatini JSON shaklida qaytaring.`,
+            responseSchema: ACADEMIC_CHUNK4_SCHEMA,
+            thinkingLevel: ThinkingLevel.MEDIUM,
+            trace,
+          })) as Record<string, unknown>;
+          chunk4Data.references = normalizeReferenceList(chunk4Data.references);
+          sendAiJson({ serviceId: body.serviceId, wordChunk: 4, data: chunk4Data });
+          return;
+        }
+      }
+
       const structureRules = isCourse
         ? `
 - Bu O'zbekiston OTM davlat standarti darajasidagi KURS ISHI.
@@ -2780,11 +3131,7 @@ QAT'IY QOIDALAR:
         trace,
       })) as Record<string, unknown>;
 
-      data.docKind = isCourse
-        ? 'course_work'
-        : isEssay
-          ? 'essay_article'
-          : 'independent_work';
+      data.docKind = docKindValue;
       data.references = normalizeReferenceList(data.references);
 
       sendAiJson({ serviceId: body.serviceId, data });
@@ -2813,11 +3160,13 @@ QAT'IY QOIDALAR:
       return;
     }
 
-    if (err instanceof ProviderHttpError && err.provider === 'openrouter') {
+    if (err instanceof ProviderHttpError) {
       if (err.status === 401) {
         res.status(401).json({
           error:
-            "OpenRouter API kaliti yaroqsiz. Settings > Secrets bo'limida OPENROUTER_API_KEY ni tekshiring.",
+            err.provider === 'openrouter'
+              ? "OpenRouter API kaliti yaroqsiz. Settings > Secrets bo'limida OPENROUTER_API_KEY ni tekshiring."
+              : "AI provayder API kaliti yaroqsiz. Sozlamalarni tekshiring.",
         });
         return;
       }
@@ -2830,7 +3179,7 @@ QAT'IY QOIDALAR:
       }
       if (err.status === 429) {
         res.status(429).json({
-          error: "OpenRouter so'rovlar limiti to'ldi. Biroz kutib qaytadan urinib ko'ring.",
+          error: "AI so'rovlar limiti to'ldi. Biroz kutib qaytadan urinib ko'ring.",
         });
         return;
       }
@@ -2841,6 +3190,22 @@ QAT'IY QOIDALAR:
         });
         return;
       }
+    }
+
+    const errName = err instanceof Error ? err.name : '';
+    const lowerMsg = msg.toLowerCase();
+    if (
+      errName === 'AbortError' ||
+      errName === 'TimeoutError' ||
+      lowerMsg.includes('timeout') ||
+      lowerMsg.includes('timed out') ||
+      lowerMsg.includes('aborted')
+    ) {
+      res.status(504).json({
+        error:
+          "Sun'iy intellekt javobi kutilganidan uzoq davom etdi (timeout). Qaytadan urinib ko'ring.",
+      });
+      return;
     }
 
     if (
@@ -3397,7 +3762,6 @@ async function savePricingSettings(next: AppPricingSettings): Promise<AppPricing
 }
 
 function calculateServerServicePrice(body: GenerateRequestBody, pricing: AppPricingSettings): number {
-  if (body.splitMode === 'part2') return 0;
   const s = pricing.services;
   if (body.serviceId === 'academic_wave_pptx' || body.serviceId === 'white_card_pptx') {
     const cfg = s[body.serviceId];

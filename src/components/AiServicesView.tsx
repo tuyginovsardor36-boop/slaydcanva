@@ -35,6 +35,7 @@ import {
   WorkspaceMode,
 } from '../types/editor';
 import {
+  AcademicDocChapter,
   buildAcademicWordDocument,
   GeneratedAcademicDocData,
 } from '../utils/academicWordBuilder';
@@ -313,6 +314,7 @@ export const AiServicesView: React.FC<AiServicesViewProps> = ({
 
   const [isGenerating, setIsGenerating] = useState(false);
   const [pipelineStep, setPipelineStep] = useState<number>(0);
+  const [isFourStageJob, setIsFourStageJob] = useState<boolean>(false);
   const [splitStatusText, setSplitStatusText] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -485,8 +487,11 @@ export const AiServicesView: React.FC<AiServicesViewProps> = ({
     setSplitStatusText(null);
 
     const isSplitPptx = isPptxService && effectiveSlideCount > 10;
+    const isFourPartPptx = isPptxService && effectiveSlideCount > 16;
     const isSplitCanvas = isAiCanvasService && effectiveCanvasCount > 6;
-    const isSplitRequest = isSplitPptx || isSplitCanvas;
+    const isSplitWord = isAcademicWordService;
+    const isSplitRequest = isSplitPptx || isSplitCanvas || isSplitWord;
+    setIsFourStageJob(isSplitWord || isFourPartPptx);
 
     const stepTimer1 = window.setTimeout(() => {
       if (!isSplitRequest) setPipelineStep(2);
@@ -495,25 +500,104 @@ export const AiServicesView: React.FC<AiServicesViewProps> = ({
       if (!isSplitRequest) setPipelineStep(3);
     }, 4200);
 
-    const controller = new AbortController();
-    const requestTimeout = window.setTimeout(() => controller.abort(), isSplitRequest ? 150_000 : 95_000);
+    const activeControllerRef: { current: AbortController | null } = { current: null };
+    let isCancelled = false;
 
-    const postGenerate = async (bodyPayload: Record<string, unknown>) => {
-      const response = await fetch('/api/ai/generate', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...getTelegramAuthHeaders(telegramSessionToken),
-        },
-        signal: controller.signal,
-        body: JSON.stringify(bodyPayload),
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(payload?.error || "Serverdan xatolik qaytdi.");
+    const postGenerate = async (bodyPayload: Record<string, unknown>, allowRetry = false) => {
+      let lastError: unknown;
+      const maxAttempts = allowRetry ? 2 : 1;
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        if (isCancelled) throw new Error("So'rov bekor qilindi.");
+        const ctrl = new AbortController();
+        activeControllerRef.current = ctrl;
+        const timer = window.setTimeout(() => ctrl.abort(), 52_000);
+        try {
+          const response = await fetch('/api/ai/generate', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              ...getTelegramAuthHeaders(telegramSessionToken),
+            },
+            signal: ctrl.signal,
+            body: JSON.stringify(bodyPayload),
+          });
+          const payload = await response.json().catch(() => ({}));
+          if (!response.ok) {
+            const errText = String(payload?.error || "Serverdan xatolik qaytdi.");
+            const retryable =
+              attempt < maxAttempts &&
+              (response.status === 504 || response.status === 503 || response.status === 502 || response.status === 429);
+            if (retryable) {
+              await new Promise((r) => setTimeout(r, 1500));
+              continue;
+            }
+            throw new Error(errText);
+          }
+          return payload as Record<string, unknown>;
+        } catch (err) {
+          lastError = err;
+          if (attempt < maxAttempts) {
+            await new Promise((r) => setTimeout(r, 1500));
+            continue;
+          }
+        } finally {
+          window.clearTimeout(timer);
+          if (activeControllerRef.current === ctrl) activeControllerRef.current = null;
+        }
       }
-      return payload as Record<string, unknown>;
+      throw lastError instanceof Error ? lastError : new Error("Serverdan xatolik qaytdi.");
     };
+
+    const normalizeChapterBucket = (code?: string, idx = 0): string => {
+      const c = String(code || '').trim().toUpperCase();
+      if (/^IV\b|^4\b|^4[-\s.]/.test(c)) return '4';
+      if (/^III\b|^3\b|^3[-\s.]/.test(c)) return '3';
+      if (/^II\b|^2\b|^2[-\s.]/.test(c)) return '2';
+      if (/^I\b|^1\b|^1[-\s.]/.test(c)) return '1';
+      return `idx_${idx}_${c}`;
+    };
+
+    const mergeAcademicChapters = (
+      partA: AcademicDocChapter[],
+      partB: AcademicDocChapter[]
+    ): AcademicDocChapter[] => {
+      const merged: AcademicDocChapter[] = [];
+      const bucketIndex = new Map<string, number>();
+      [...partA, ...partB].forEach((ch, idx) => {
+        if (!ch) return;
+        const key = normalizeChapterBucket(ch.code, idx);
+        const existingIdx = bucketIndex.get(key);
+        if (existingIdx !== undefined) {
+          merged[existingIdx] = {
+            ...merged[existingIdx],
+            sections: [
+              ...(merged[existingIdx].sections || []),
+              ...(Array.isArray(ch.sections) ? ch.sections : []),
+            ],
+          };
+        } else {
+          bucketIndex.set(key, merged.length);
+          merged.push({
+            ...ch,
+            sections: Array.isArray(ch.sections) ? [...ch.sections] : [],
+          });
+        }
+      });
+      return merged;
+    };
+
+    const summarizeChapters = (chapters: AcademicDocChapter[]) =>
+      chapters.map((ch) => {
+        const secs = Array.isArray(ch.sections) ? ch.sections : [];
+        const lastSec = secs[secs.length - 1];
+        const lastParas = Array.isArray(lastSec?.paragraphs) ? lastSec.paragraphs : [];
+        return {
+          code: ch.code,
+          title: ch.title,
+          sectionTitles: secs.map((s) => `${s.code || ''} ${s.title}`.trim()),
+          lastParagraph: lastParas[lastParas.length - 1] || '',
+        };
+      });
 
     try {
       const chosenDocStyle = isEssayArticle ? essayStyle : academicStyle;
@@ -562,12 +646,123 @@ export const AiServicesView: React.FC<AiServicesViewProps> = ({
       let newBalance: number | undefined;
       let chargedPrice = currentPrice;
 
-      if (isSplitPptx) {
-        const totalContentCount = Math.max(2, effectiveSlideCount - 3);
-        const part1Count = Math.ceil(totalContentCount / 2);
-        const part2Count = totalContentCount - part1Count;
+      if (isSplitWord) {
+        setPipelineStep(1);
+        setSplitStatusText('1/4-qism: Titul, mundarija rejasi va kirish shakllantirilmoqda...');
+        const chunk1Res = await postGenerate({
+          ...baseBody,
+          wordChunk: 1,
+        });
+        if (chunk1Res.serverCharged) {
+          serverCharged = true;
+          if (typeof chunk1Res.newBalance === 'number') newBalance = chunk1Res.newBalance;
+          if (typeof chunk1Res.chargedPrice === 'number' && chunk1Res.chargedPrice > 0) {
+            chargedPrice = chunk1Res.chargedPrice;
+          }
+        }
+        const splitJobToken =
+          typeof chunk1Res.splitJobToken === 'string' ? chunk1Res.splitJobToken : undefined;
+        const c1 = (chunk1Res.data || {}) as GeneratedAcademicDocData;
 
-        setSplitStatusText('1-bosqich: Asosiy reja va birinchi qism tuzilmoqda...');
+        setPipelineStep(2);
+        setSplitStatusText('2/4-qism: Nazariy boblar va asosiy tushunchalar yozilmoqda...');
+        const chunk2Res = await postGenerate(
+          {
+            ...baseBody,
+            wordChunk: 2,
+            splitJobToken,
+            wordContext: {
+              title: c1.title || cleanTopic,
+              subtitle: c1.subtitle,
+              planOutline: c1.planOutline || [],
+              introGoal: c1.introduction?.goal || cleanTopic,
+            },
+          },
+          true
+        );
+        const c2 = (chunk2Res.data || {}) as { chapters?: AcademicDocChapter[] };
+        const chapters2 = Array.isArray(c2.chapters) ? c2.chapters : [];
+
+        setPipelineStep(3);
+        setSplitStatusText('3/4-qism: Davomiy boblar va amaliy tahlil ulanmoqda...');
+        const chunk3Res = await postGenerate(
+          {
+            ...baseBody,
+            wordChunk: 3,
+            splitJobToken,
+            wordContext: {
+              title: c1.title || cleanTopic,
+              subtitle: c1.subtitle,
+              planOutline: c1.planOutline || [],
+              introGoal: c1.introduction?.goal || cleanTopic,
+              previousChaptersSummary: summarizeChapters(chapters2),
+            },
+          },
+          true
+        );
+        const c3 = (chunk3Res.data || {}) as { chapters?: AcademicDocChapter[] };
+        const chapters3 = Array.isArray(c3.chapters) ? c3.chapters : [];
+        const allChapters = mergeAcademicChapters(chapters2, chapters3);
+
+        setPipelineStep(4);
+        setSplitStatusText('4/4-qism: Tahliliy jadval, xulosa va adabiyotlar jamlanmoqda...');
+        const chunk4Res = await postGenerate(
+          {
+            ...baseBody,
+            wordChunk: 4,
+            splitJobToken,
+            wordContext: {
+              title: c1.title || cleanTopic,
+              subtitle: c1.subtitle,
+              planOutline: c1.planOutline || [],
+              previousChaptersSummary: summarizeChapters(allChapters),
+            },
+          },
+          true
+        );
+        const c4 = (chunk4Res.data || {}) as {
+          comparisonTable?: GeneratedAcademicDocData['comparisonTable'];
+          conclusion?: string[];
+          references?: string[];
+        };
+
+        const mergedWordData: GeneratedAcademicDocData = {
+          ...c1,
+          chapters: allChapters,
+          comparisonTable: c4.comparisonTable,
+          conclusion: Array.isArray(c4.conclusion) ? c4.conclusion : [],
+          references: Array.isArray(c4.references) ? c4.references : [],
+        };
+
+        const built = buildAcademicWordDocument(
+          mergedWordData,
+          meta,
+          selectedService as 'independent_work_word' | 'course_work_word' | 'essay_article_word',
+          chosenDocStyle
+        );
+        builtWordDoc = built.wordDoc;
+        docTitle = built.docTitle;
+      } else if (isSplitPptx) {
+        const totalContentCount = Math.max(2, effectiveSlideCount - 3);
+        const chunkCounts = isFourPartPptx
+          ? (() => {
+              const base = Math.floor(totalContentCount / 4);
+              let rem = totalContentCount % 4;
+              return [0, 1, 2, 3].map(() => {
+                const extra = rem > 0 ? 1 : 0;
+                if (rem > 0) rem -= 1;
+                return base + extra;
+              }).filter((c) => c > 0);
+            })()
+          : [Math.ceil(totalContentCount / 2), totalContentCount - Math.ceil(totalContentCount / 2)];
+
+        const part1Count = chunkCounts[0];
+        setPipelineStep(1);
+        setSplitStatusText(
+          isFourPartPptx
+            ? `1/${chunkCounts.length}-qism: Titul, reja va dastlabki slaydlar tuzilmoqda...`
+            : '1-bosqich: Asosiy reja va birinchi qism tuzilmoqda...'
+        );
         const part1Res = await postGenerate({
           ...baseBody,
           slideCount: effectiveSlideCount,
@@ -581,49 +776,67 @@ export const AiServicesView: React.FC<AiServicesViewProps> = ({
             chargedPrice = part1Res.chargedPrice;
           }
         }
+        const splitJobToken =
+          typeof part1Res.splitJobToken === 'string' ? part1Res.splitJobToken : undefined;
         const part1Data = part1Res.data as GeneratedSlideDeckData;
+        let accumulatedSlides: GeneratedSlideItem[] = Array.isArray(part1Data.slides)
+          ? part1Data.slides.slice(0, part1Count)
+          : [];
+        let finalRefs: string[] = part1Data.references || [];
 
-        setPipelineStep(2);
-        setSplitStatusText('2-bosqich: Keyingi bo‘limlar va manbalar shakllantirilmoqda...');
-        const part2Res = await postGenerate({
-          ...baseBody,
-          slideCount: effectiveSlideCount,
-          splitMode: 'part2',
-          part1Count,
-          part2Count,
-          previousContext: {
-            deckTitle: part1Data.deckTitle || cleanTopic,
-            deckSubtitle: part1Data.deckSubtitle,
-            institution: part1Data.institution,
-            direction: part1Data.direction,
-            footerTopic: part1Data.footerTopic,
-            planItems: part1Data.planItems || [],
-            previousSlides: (part1Data.slides || []).map((s) => ({
-              tag: s.tag,
-              title: s.title,
-            })),
-          },
-        });
-        const part2Data = part2Res.data as {
-          slides?: GeneratedSlideItem[];
-          references?: string[];
-        };
+        for (let idx = 1; idx < chunkCounts.length; idx += 1) {
+          const need = chunkCounts[idx];
+          const isFinal = idx === chunkCounts.length - 1;
+          const modeName = (`part${idx + 1}`) as 'part2' | 'part3' | 'part4';
+          setPipelineStep(Math.min(4, idx + 1));
+          setSplitStatusText(
+            `${idx + 1}/${chunkCounts.length}-qism: ${isFinal ? 'Yakuniy slaydlar va manbalar' : 'Davomiy slaydlar'} yaratilmoqda...`
+          );
+          const nextRes = await postGenerate(
+            {
+              ...baseBody,
+              slideCount: effectiveSlideCount,
+              splitMode: modeName,
+              splitJobToken,
+              part1Count: accumulatedSlides.length,
+              part2Count: need,
+              partStageLabel: `${idx + 1}/${chunkCounts.length}-QISM${isFinal ? ' (YAKUNIY)' : ' DAVOMI'}`,
+              isFinalPart: isFinal,
+              previousContext: {
+                deckTitle: part1Data.deckTitle || cleanTopic,
+                deckSubtitle: part1Data.deckSubtitle,
+                institution: part1Data.institution,
+                direction: part1Data.direction,
+                footerTopic: part1Data.footerTopic,
+                planItems: part1Data.planItems || [],
+                previousSlides: accumulatedSlides.map((s) => ({
+                  tag: s.tag,
+                  title: s.title,
+                })),
+              },
+            },
+            true
+          );
+          const nextData = nextRes.data as {
+            slides?: GeneratedSlideItem[];
+            references?: string[];
+          };
+          if (Array.isArray(nextData.slides)) {
+            accumulatedSlides = [...accumulatedSlides, ...nextData.slides.slice(0, need)];
+          }
+          if (isFinal && Array.isArray(nextData.references) && nextData.references.length > 0) {
+            finalRefs = nextData.references;
+          }
+        }
 
-        setPipelineStep(3);
+        setPipelineStep(isFourPartPptx ? 4 : 3);
         setSplitStatusText('Dizayn va sahifalar jamlanmoqda...');
 
-        const combinedSlidesRaw = [
-          ...(Array.isArray(part1Data.slides) ? part1Data.slides.slice(0, part1Count) : []),
-          ...(Array.isArray(part2Data.slides) ? part2Data.slides.slice(0, part2Count) : []),
-        ];
         const topicPhotos = Array.isArray(part1Data.topicImages) ? part1Data.topicImages : [];
         const mergedDeck: GeneratedSlideDeckData = {
           ...part1Data,
-          slides: distributeContentTopicPhotos(combinedSlidesRaw, topicPhotos),
-          references:
-            Array.isArray(part2Data.references) && part2Data.references.length > 0
-              ? part2Data.references
-              : part1Data.references || [],
+          slides: distributeContentTopicPhotos(accumulatedSlides, topicPhotos),
+          references: finalRefs,
         };
 
         builtPages =
@@ -649,6 +862,8 @@ export const AiServicesView: React.FC<AiServicesViewProps> = ({
             chargedPrice = part1Res.chargedPrice;
           }
         }
+        const splitJobToken =
+          typeof part1Res.splitJobToken === 'string' ? part1Res.splitJobToken : undefined;
         const part1Data = part1Res.data as {
           deckTitle?: string;
           pages?: CanvasPage[];
@@ -661,21 +876,25 @@ export const AiServicesView: React.FC<AiServicesViewProps> = ({
 
         setPipelineStep(2);
         setSplitStatusText('2-bosqich: Qolgan sahifalar dizayni yaratilmoqda...');
-        const part2Res = await postGenerate({
-          ...baseBody,
-          slideCount: effectiveCanvasCount,
-          splitMode: 'part2',
-          part1Count,
-          part2Count,
-          pendingPhotoSlots: unusedPhotos.length,
-          previousContext: {
-            deckTitle: part1Data?.deckTitle || cleanTopic,
-            previousSlides: pages1.map((p, idx) => ({
-              tag: String(idx + 1).padStart(2, '0'),
-              title: p.title || `Bo'lim ${idx + 1}`,
-            })),
+        const part2Res = await postGenerate(
+          {
+            ...baseBody,
+            slideCount: effectiveCanvasCount,
+            splitMode: 'part2',
+            splitJobToken,
+            part1Count,
+            part2Count,
+            pendingPhotoSlots: unusedPhotos.length,
+            previousContext: {
+              deckTitle: part1Data?.deckTitle || cleanTopic,
+              previousSlides: pages1.map((p, idx) => ({
+                tag: String(idx + 1).padStart(2, '0'),
+                title: p.title || `Bo'lim ${idx + 1}`,
+              })),
+            },
           },
-        });
+          true
+        );
         const part2Data = part2Res.data as { pages?: CanvasPage[] };
         const rawPages2 = Array.isArray(part2Data?.pages) ? part2Data.pages : [];
 
@@ -725,15 +944,6 @@ export const AiServicesView: React.FC<AiServicesViewProps> = ({
           const deckData = payload.data as GeneratedSlideDeckData;
           builtPages = buildWhiteCardDeck(deckData, meta);
           docTitle = deckData.deckTitle || cleanTopic;
-        } else if (
-          selectedService === 'independent_work_word' ||
-          selectedService === 'course_work_word' ||
-          selectedService === 'essay_article_word'
-        ) {
-          const docData = payload.data as GeneratedAcademicDocData;
-          const built = buildAcademicWordDocument(docData, meta, selectedService, chosenDocStyle);
-          builtWordDoc = built.wordDoc;
-          docTitle = built.docTitle;
         } else if (selectedService === 'stitched_notebook_pdf') {
           const nbData = payload.data as GeneratedNotebookData;
           builtPages = buildStitchedNotebookPdf(nbData, meta);
@@ -778,10 +988,12 @@ export const AiServicesView: React.FC<AiServicesViewProps> = ({
         );
       }
     } finally {
-      window.clearTimeout(requestTimeout);
+      isCancelled = true;
+      activeControllerRef.current?.abort();
       window.clearTimeout(stepTimer1);
       window.clearTimeout(stepTimer2);
       setIsGenerating(false);
+      setIsFourStageJob(false);
       setPipelineStep(0);
       setSplitStatusText(null);
     }
@@ -1508,12 +1720,20 @@ export const AiServicesView: React.FC<AiServicesViewProps> = ({
                 <Loader2 className="w-4 h-4 animate-spin text-red-600" />
                 <span>{splitStatusText || 'Hujjat tuzilmasi shakllantirilmoqda...'}</span>
               </div>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
-                {[
-                  { step: 1, label: '1. Mavzu tahlili' },
-                  { step: 2, label: '2. Boblar va mazmun' },
-                  { step: 3, label: '3. Rasmiylashtirish' },
-                ].map((item) => {
+              <div className={`grid grid-cols-1 ${isFourStageJob ? 'sm:grid-cols-4' : 'sm:grid-cols-3'} gap-2 text-xs`}>
+                {(isFourStageJob
+                  ? [
+                      { step: 1, label: '1. Titul va reja' },
+                      { step: 2, label: '2. Nazariy qism' },
+                      { step: 3, label: '3. Asosiy tahlil' },
+                      { step: 4, label: '4. Xulosa va yakun' },
+                    ]
+                  : [
+                      { step: 1, label: '1. Mavzu tahlili' },
+                      { step: 2, label: '2. Boblar va mazmun' },
+                      { step: 3, label: '3. Rasmiylashtirish' },
+                    ]
+                ).map((item) => {
                   const done = pipelineStep > item.step;
                   const active = pipelineStep === item.step;
                   return (
