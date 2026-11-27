@@ -20,6 +20,7 @@ export interface GeneratedAcademicDocData {
   ministryHeader?: string;
   abstract?: string;
   keywords?: string[];
+  topicImages?: string[];
   planOutline?: Array<{ code?: string; title: string }>;
   introduction?: {
     relevance?: string;
@@ -54,6 +55,16 @@ function renderIndentedParagraph(text: string, justify = true): string {
   return `<p style="text-align:${justify ? 'justify' : 'left'};text-indent:1.25cm;line-height:1.5;margin:0 0 8pt 0;">${escapeHtml(clean)}</p>`;
 }
 
+function renderTopicFigure(src: string, figNumber: number, captionText: string): string {
+  const safeCaption = escapeHtml(captionText.trim() || "Mavzuga oid illyustrativ tasvir");
+  return [
+    `<figure class="doc-figure" style="margin:14pt 0 14pt 0;text-align:center;">`,
+    `<p style="text-align:center;margin:0 0 6pt 0;"><img src="${src}" alt="${safeCaption}" style="max-width:86%;max-height:280px;width:auto;height:auto;display:inline-block;border-radius:4px;" /></p>`,
+    `<p style="text-align:center;font-style:italic;font-size:11pt;color:#475569;margin:0;">${figNumber}-rasm. ${safeCaption}</p>`,
+    `</figure>`,
+  ].join('');
+}
+
 export function buildAcademicWordDocument(
   data: GeneratedAcademicDocData,
   meta: TemplateMetadata,
@@ -78,6 +89,10 @@ export function buildAcademicWordDocument(
   const teacher = (meta.teacher || '__________________').trim();
   const city = (meta.city || 'Toshkent').trim();
   const academicYear = (meta.academicYear || '2025–2026').trim();
+
+  const topicImages = Array.isArray(data.topicImages)
+    ? data.topicImages.filter((src) => typeof src === 'string' && src.trim().length > 0)
+    : [];
 
   const workTypeTitle = isCourseWork
     ? 'KURS ISHI'
@@ -136,54 +151,52 @@ export function buildAcademicWordDocument(
     }
     parts.push('<hr />');
   } else {
-    // Formal Uzbekistan OTM Titul Varag'i (Mustaqil ish / Kurs ishi)
+    // Formal Uzbekistan OTM Full-Page Titul Varag'i (Mustaqil ish / Kurs ishi)
     const isFramed = style === 'framed_academic';
     const isModern = style === 'modern_university';
     const accentHex = isModern ? '#1E3A8A' : '#0F172A';
 
+    const titulTop: string[] = [];
     if (isFramed) {
-      parts.push('<hr />');
+      titulTop.push('<hr />');
     }
-
-    parts.push(
-      `<p style="text-align:center;font-weight:bold;line-height:1.35;margin:0 0 6pt 0;color:${accentHex};">${escapeHtml(ministry)}</p>`
+    titulTop.push(
+      `<p style="text-align:center;font-weight:bold;line-height:1.4;margin:0 0 6pt 0;color:${accentHex};">${escapeHtml(ministry)}</p>`
     );
-    parts.push(
-      `<p style="text-align:center;font-weight:bold;line-height:1.35;margin:0 0 10pt 0;color:${accentHex};">${escapeHtml(institution.toUpperCase())}</p>`
+    titulTop.push(
+      `<p style="text-align:center;font-weight:bold;line-height:1.4;margin:0 0 10pt 0;color:${accentHex};">${escapeHtml(institution.toUpperCase())}</p>`
     );
     if (faculty) {
-      parts.push(
-        `<p style="text-align:center;line-height:1.35;margin:0 0 4pt 0;"><strong>Fakultet:</strong> ${escapeHtml(faculty)}</p>`
+      titulTop.push(
+        `<p style="text-align:center;line-height:1.4;margin:0 0 4pt 0;"><strong>Fakultet:</strong> ${escapeHtml(faculty)}</p>`
       );
     }
     if (department) {
-      parts.push(
-        `<p style="text-align:center;line-height:1.35;margin:0 0 4pt 0;"><strong>Kafedra:</strong> ${escapeHtml(department)}</p>`
+      titulTop.push(
+        `<p style="text-align:center;line-height:1.4;margin:0 0 4pt 0;"><strong>Kafedra:</strong> ${escapeHtml(department)}</p>`
       );
     }
     if (subject) {
-      parts.push(
-        `<p style="text-align:center;line-height:1.35;margin:0 0 18pt 0;"><strong>Fan:</strong> ${escapeHtml(subject)}</p>`
+      titulTop.push(
+        `<p style="text-align:center;line-height:1.4;margin:0 0 8pt 0;"><strong>Fan:</strong> ${escapeHtml(subject)}</p>`
       );
-    } else {
-      parts.push('<p style="margin:0 0 18pt 0;">&nbsp;</p>');
     }
 
-    parts.push(
-      `<h1 style="text-align:center;font-weight:bold;color:${accentHex};letter-spacing:1.5px;margin:20pt 0 8pt 0;">${escapeHtml(workTypeTitle)}</h1>`
+    const titulCenter: string[] = [];
+    titulCenter.push(
+      `<h1 style="text-align:center;font-weight:bold;font-size:26pt;color:${accentHex};letter-spacing:2px;margin:0 0 14pt 0;">${escapeHtml(workTypeTitle)}</h1>`
     );
-    parts.push(
-      `<p style="text-align:center;font-weight:bold;font-size:15pt;line-height:1.35;margin:0 0 6pt 0;">Mavzu: ${escapeHtml(docTitle)}</p>`
+    titulCenter.push(
+      `<p style="text-align:center;font-weight:bold;font-size:15pt;line-height:1.4;margin:0 0 8pt 0;">Mavzu: ${escapeHtml(docTitle)}</p>`
     );
     if (data.subtitle) {
-      parts.push(
-        `<p style="text-align:center;font-style:italic;color:#334155;margin:0 0 22pt 0;">${escapeHtml(data.subtitle)}</p>`
+      titulCenter.push(
+        `<p style="text-align:center;font-style:italic;color:#334155;margin:0 0 36pt 0;">${escapeHtml(data.subtitle)}</p>`
       );
     } else {
-      parts.push('<p style="margin:0 0 22pt 0;">&nbsp;</p>');
+      titulCenter.push('<p style="margin:0 0 36pt 0;">&nbsp;</p>');
     }
 
-    // Separated Titul execution metadata lines (each on its own line!)
     const rightBlockLines: string[] = [];
     rightBlockLines.push(`<strong>Bajaruvchi:</strong> ${escapeHtml(authorName)}`);
     if (course) {
@@ -197,53 +210,62 @@ export function buildAcademicWordDocument(
     );
 
     rightBlockLines.forEach((line) => {
-      parts.push(
-        `<p style="text-align:right;line-height:1.45;margin:0 0 4pt 0;">${line}</p>`
+      titulCenter.push(
+        `<p style="text-align:right;line-height:1.55;margin:0 0 5pt 0;">${line}</p>`
       );
     });
 
-    parts.push('<p style="margin:26pt 0 12pt 0;">&nbsp;</p>');
-    parts.push(
-      `<p style="text-align:center;font-weight:bold;margin:0 0 6pt 0;">${escapeHtml(city)} – ${escapeHtml(academicYear)}</p>`
+    const titulBottom: string[] = [];
+    titulBottom.push(
+      `<p style="text-align:center;font-weight:bold;margin:0 0 4pt 0;">${escapeHtml(city)} – ${escapeHtml(academicYear)}</p>`
     );
-
     if (isFramed) {
-      parts.push('<hr />');
+      titulBottom.push('<hr />');
     }
+
+    parts.push(
+      `<div class="doc-titul-page" style="min-height:1015px;display:flex;flex-direction:column;justify-content:space-between;box-sizing:border-box;">` +
+        `<div class="doc-titul-top">${titulTop.join('')}</div>` +
+        `<div class="doc-titul-center" style="margin:auto 0;padding:24px 0;">${titulCenter.join('')}</div>` +
+        `<div class="doc-titul-bottom">${titulBottom.join('')}</div>` +
+      `</div>`
+    );
 
     // Hard page break after Titul page
     parts.push('<hr class="doc-page-break" />');
 
-    // REJA / MUNDARIJA
-    parts.push('<h2 style="text-align:center;margin:0 0 12pt 0;">MUNDARIJA</h2>');
-    parts.push('<p style="text-align:left;line-height:1.5;margin:0 0 4pt 0;"><strong>KIRISH</strong></p>');
+    // REJA / MUNDARIJA (dedicated page)
+    const tocLines: string[] = [];
+    tocLines.push('<h2 style="text-align:center;margin:0 0 16pt 0;">MUNDARIJA</h2>');
+    tocLines.push('<p style="text-align:left;line-height:1.65;margin:0 0 6pt 0;"><strong>KIRISH</strong></p>');
     const outline = Array.isArray(data.planOutline) ? data.planOutline : [];
     if (outline.length > 0) {
       outline.forEach((item) => {
         const prefix = item.code ? `${escapeHtml(item.code)} ` : '';
-        parts.push(
-          `<p style="text-align:left;line-height:1.5;margin:0 0 4pt 0;">${prefix}${escapeHtml(item.title)}</p>`
+        tocLines.push(
+          `<p style="text-align:left;line-height:1.65;margin:0 0 6pt 0;">${prefix}${escapeHtml(item.title)}</p>`
         );
       });
     } else if (Array.isArray(data.chapters)) {
       data.chapters.forEach((ch, idx) => {
         const chCode = ch.code || `${idx + 1}-bob.`;
-        parts.push(
-          `<p style="text-align:left;line-height:1.5;margin:4pt 0 2pt 0;"><strong>${escapeHtml(chCode)} ${escapeHtml(ch.title)}</strong></p>`
+        tocLines.push(
+          `<p style="text-align:left;line-height:1.65;margin:6pt 0 3pt 0;"><strong>${escapeHtml(chCode)} ${escapeHtml(ch.title)}</strong></p>`
         );
         (ch.sections || []).forEach((sec, sIdx) => {
           const secCode = sec.code || `${idx + 1}.${sIdx + 1}.`;
-          parts.push(
-            `<p style="text-align:left;line-height:1.5;margin:0 0 2pt 18pt;">${escapeHtml(secCode)} ${escapeHtml(sec.title)}</p>`
+          tocLines.push(
+            `<p style="text-align:left;line-height:1.65;margin:0 0 3pt 18pt;">${escapeHtml(secCode)} ${escapeHtml(sec.title)}</p>`
           );
         });
       });
     }
-    parts.push('<p style="text-align:left;line-height:1.5;margin:4pt 0 4pt 0;"><strong>XULOSA</strong></p>');
-    parts.push(
-      '<p style="text-align:left;line-height:1.5;margin:0 0 8pt 0;"><strong>FOYDALANILGAN ADABIYOTLAR RO\'YXATI</strong></p>'
+    tocLines.push('<p style="text-align:left;line-height:1.65;margin:6pt 0 6pt 0;"><strong>XULOSA</strong></p>');
+    tocLines.push(
+      '<p style="text-align:left;line-height:1.65;margin:0 0 8pt 0;"><strong>FOYDALANILGAN ADABIYOTLAR RO\'YXATI</strong></p>'
     );
 
+    parts.push(`<div class="doc-toc-page" style="min-height:920px;box-sizing:border-box;">${tocLines.join('')}</div>`);
     parts.push('<hr class="doc-page-break" />');
   }
 
@@ -284,14 +306,17 @@ export function buildAcademicWordDocument(
     }
   }
 
-  // CHAPTERS / SECTIONS
+  // CHAPTERS / SECTIONS + EMBEDDED TOPIC FIGURES
   const chapters = Array.isArray(data.chapters) ? data.chapters : [];
+  let figureIndex = 0;
+
   chapters.forEach((chapter, cIdx) => {
     const chapterHeading = `${chapter.code ? `${chapter.code}. ` : `${cIdx + 1}-BOB. `}${chapter.title}`;
     parts.push(
       `<h2 style="text-align:center;margin:16pt 0 10pt 0;">${escapeHtml(chapterHeading.toUpperCase())}</h2>`
     );
-    (chapter.sections || []).forEach((sec, sIdx) => {
+    const sections = Array.isArray(chapter.sections) ? chapter.sections : [];
+    sections.forEach((sec, sIdx) => {
       const secHeading = `${sec.code ? `${sec.code}. ` : `${cIdx + 1}.${sIdx + 1}. `}${sec.title}`;
       parts.push(`<h3 style="text-align:left;margin:12pt 0 8pt 0;">${escapeHtml(secHeading)}</h3>`);
       (sec.paragraphs || []).forEach((p) => {
@@ -299,8 +324,21 @@ export function buildAcademicWordDocument(
           parts.push(renderIndentedParagraph(p));
         }
       });
+      // Place topic image neatly after the first section of each chapter (up to available photos)
+      if (sIdx === 0 && figureIndex < topicImages.length) {
+        const imgSrc = topicImages[figureIndex];
+        figureIndex += 1;
+        parts.push(renderTopicFigure(imgSrc, figureIndex, `${sec.title || chapter.title} — vizual illyustratsiya`));
+      }
     });
   });
+
+  // If any extra fetched image remains and wasn't placed in chapters, place before Comparison Table / Conclusion
+  if (figureIndex < topicImages.length) {
+    const imgSrc = topicImages[figureIndex];
+    figureIndex += 1;
+    parts.push(renderTopicFigure(imgSrc, figureIndex, `${docTitle} — amaliy tasvir`));
+  }
 
   // ANALYTICAL COMPARISON TABLE (if supplied)
   const tbl = data.comparisonTable;

@@ -496,3 +496,44 @@ export interface BackupAiProviderRecord {
   createdAt: number;
 }
 
+export type SystemApiKeySlot =
+  | 'OPENROUTER_API_KEY'
+  | 'GEMINI_API_KEY'
+  | 'TELEGRAM_BOT_TOKEN'
+  | 'TOLOVGO_API_KEY'
+  | 'TOLOVGO_TEST_API'
+  | 'TOLOVGO_WEBHOOK_SECRET';
+
+export interface SystemApiKeyRow {
+  slot: SystemApiKeySlot;
+  label: string;
+  category: 'ai' | 'telegram' | 'payment';
+  description: string;
+  source: 'db' | 'env' | 'missing';
+  maskedValue: string;
+  hasDbOverride: boolean;
+  hasEnvFallback: boolean;
+  updatedAt?: number;
+}
+
+export interface MandatoryChannelRecord {
+  id: string;
+  title: string;
+  chatId: string;
+  inviteUrl: string;
+  enabled: boolean;
+  priority: number;
+  lastCheckStatus?: 'ok' | 'error' | 'untested';
+  lastCheckMessage?: string;
+  lastCheckedAt?: number;
+  createdAt: number;
+}
+
+export interface MandatoryChannelPublic {
+  id: string;
+  title: string;
+  chatId: string;
+  inviteUrl: string;
+}
+
+

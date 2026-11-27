@@ -200,6 +200,130 @@ export async function exportWordElementToPdf(
   const pageW = 794;
   const pageH = 1123;
 
+  const contentRoot = element.querySelector('.word-editor-content') as HTMLElement | null;
+  const computedPaper = window.getComputedStyle(element);
+  const padTop = parseFloat(computedPaper.paddingTop) || 48;
+  const padRight = parseFloat(computedPaper.paddingRight) || 48;
+  const padBottom = parseFloat(computedPaper.paddingBottom) || 48;
+  const padLeft = parseFloat(computedPaper.paddingLeft) || 72;
+  const fontFamily = computedPaper.fontFamily || 'Times New Roman, Times, serif';
+  const fontSize = computedPaper.fontSize || '16px';
+  const maxInnerHeight = pageH - padTop - padBottom;
+
+  const pdf = new jsPDF({
+    orientation: 'portrait',
+    unit: 'px',
+    format: [pageW, pageH],
+    hotfixes: ['px_scaling'],
+  });
+
+  if (contentRoot) {
+    // Split document at explicit <hr class="doc-page-break" /> markers
+    const sections: HTMLElement[][] = [[]];
+    Array.from(contentRoot.childNodes).forEach((node) => {
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        const el = node as HTMLElement;
+        if (el.tagName.toLowerCase() === 'hr' && el.classList.contains('doc-page-break')) {
+          if (sections[sections.length - 1].length > 0) {
+            sections.push([]);
+          }
+          return;
+        }
+        sections[sections.length - 1].push(el.cloneNode(true) as HTMLElement);
+      } else if (node.nodeType === Node.TEXT_NODE && node.textContent?.trim()) {
+        const p = document.createElement('p');
+        p.textContent = node.textContent;
+        sections[sections.length - 1].push(p);
+      }
+    });
+
+    const nonEmptySections = sections.filter((s) => s.length > 0);
+    if (nonEmptySections.length > 0) {
+      const host = document.createElement('div');
+      host.style.position = 'fixed';
+      host.style.left = '-99999px';
+      host.style.top = '0';
+      host.style.zIndex = '-1';
+      document.body.appendChild(host);
+
+      try {
+        const createA4PageShell = () => {
+          const shell = document.createElement('div');
+          shell.style.width = `${pageW}px`;
+          shell.style.height = `${pageH}px`;
+          shell.style.backgroundColor = '#FFFFFF';
+          shell.style.padding = `${padTop}px ${padRight}px ${padBottom}px ${padLeft}px`;
+          shell.style.boxSizing = 'border-box';
+          shell.style.fontFamily = fontFamily;
+          shell.style.fontSize = fontSize;
+          shell.style.overflow = 'hidden';
+
+          const inner = document.createElement('div');
+          inner.className = 'word-editor-content';
+          shell.appendChild(inner);
+          return { shell, inner };
+        };
+
+        let pdfPageCount = 0;
+
+        for (const secNodes of nonEmptySections) {
+          let current = createA4PageShell();
+          host.innerHTML = '';
+          host.appendChild(current.shell);
+
+          for (const node of secNodes) {
+            const cloned = node.cloneNode(true) as HTMLElement;
+            current.inner.appendChild(cloned);
+
+            // Check if adding this node overflows printable A4 height
+            if (current.inner.scrollHeight > maxInnerHeight && current.inner.children.length > 1) {
+              current.inner.removeChild(cloned);
+              const pagePng = await toPng(current.shell, {
+                width: pageW,
+                height: pageH,
+                backgroundColor: '#FFFFFF',
+                pixelRatio: 2,
+                cacheBust: true,
+              });
+              if (pdfPageCount > 0) pdf.addPage([pageW, pageH], 'portrait');
+              pdf.addImage(pagePng, 'PNG', 0, 0, pageW, pageH);
+              pdfPageCount += 1;
+
+              current = createA4PageShell();
+              host.innerHTML = '';
+              host.appendChild(current.shell);
+              current.inner.appendChild(cloned);
+            }
+          }
+
+          if (current.inner.children.length > 0) {
+            const pagePng = await toPng(current.shell, {
+              width: pageW,
+              height: pageH,
+              backgroundColor: '#FFFFFF',
+              pixelRatio: 2,
+              cacheBust: true,
+            });
+            if (pdfPageCount > 0) pdf.addPage([pageW, pageH], 'portrait');
+            pdf.addImage(pagePng, 'PNG', 0, 0, pageW, pageH);
+            pdfPageCount += 1;
+          }
+        }
+
+        const safeName = (title || 'SlaydCanva-hujjat').trim().replace(/[\\/:*?"<>|]/g, '_');
+        const fileName = `${safeName}.pdf`;
+        const blob = pdf.output('blob');
+        if (options?.download !== false) {
+          pdf.save(fileName);
+        }
+        return { blob, fileName };
+      } finally {
+        document.body.removeChild(host);
+      }
+    }
+  }
+
+  // Fallback raw capture
   const dataUrl = await toPng(element, {
     backgroundColor: '#FFFFFF',
     pixelRatio: 2,
@@ -215,13 +339,6 @@ export async function exportWordElementToPdf(
 
   const imgWidth = pageW;
   const imgHeight = (img.height * pageW) / img.width;
-
-  const pdf = new jsPDF({
-    orientation: 'portrait',
-    unit: 'px',
-    format: [pageW, pageH],
-    hotfixes: ['px_scaling'],
-  });
 
   let heightLeft = imgHeight;
   let position = 0;

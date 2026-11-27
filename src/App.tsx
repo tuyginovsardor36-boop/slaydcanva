@@ -2,10 +2,12 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ArrowLeft,
+  CheckCircle2,
   ExternalLink,
   Headphones,
   Loader2,
   Megaphone,
+  Radio,
   Send,
   Shield,
   X,
@@ -40,6 +42,7 @@ import {
   CloudProjectData,
   DesktopView,
   ManagerPermission,
+  MandatoryChannelPublic,
   MobileTab,
   PdfOrientation,
   ProjectSummary,
@@ -60,6 +63,7 @@ import { exportToPptx } from './utils/exportPptx';
 import {
   adminGetStatus,
   adminLogout,
+  checkTelegramSubscriptionStatus,
   deleteCloudProject,
   fetchAppPricing,
   fetchCloudProjects,
@@ -191,6 +195,8 @@ export default function App() {
   const [activeProjectId, setActiveProjectId] = useState<string>('');
   const [savedProjects, setSavedProjects] = useState<ProjectSummary[]>([]);
   const [syncingProject, setSyncingProject] = useState(false);
+  const [missingSubChannels, setMissingSubChannels] = useState<MandatoryChannelPublic[]>([]);
+  const [checkingSub, setCheckingSub] = useState(false);
 
   const wordPaperRef = useRef<HTMLDivElement | null>(null);
   const hydratedCloudUserRef = useRef<string | null>(null);
@@ -274,6 +280,7 @@ export default function App() {
         user: TelegramUser;
         sessionToken: string;
         account?: TelegramAccountResponse;
+        missingChannels?: MandatoryChannelPublic[];
         kvConfigured?: boolean;
         isAdmin?: boolean;
         isManager?: boolean;
@@ -321,9 +328,18 @@ export default function App() {
 
       // Restore 15-day Admin/Manager/Support session cookie if already unlocked
       if (adminFlag || managerFlag || supportFlag) {
+        setMissingSubChannels([]);
         void adminGetStatus(payload.sessionToken).then((st) => {
           if (!('error' in st) && st.adminUnlocked && st.adminToken) {
             setAdminToken(st.adminToken);
+          }
+        });
+      } else if (Array.isArray(payload.missingChannels)) {
+        setMissingSubChannels(payload.missingChannels);
+      } else {
+        void checkTelegramSubscriptionStatus(payload.sessionToken).then((subRes) => {
+          if (subRes.ok) {
+            setMissingSubChannels(subRes.subscribed ? [] : subRes.missingChannels);
           }
         });
       }
@@ -476,6 +492,7 @@ export default function App() {
             user?: TelegramUser;
             sessionToken?: string;
             account?: TelegramAccountResponse;
+            missingChannels?: MandatoryChannelPublic[];
             kvConfigured?: boolean;
             isAdmin?: boolean;
             isManager?: boolean;
@@ -489,6 +506,7 @@ export default function App() {
                 user: data.user,
                 sessionToken: data.sessionToken,
                 account: data.account,
+                missingChannels: data.missingChannels,
                 kvConfigured: data.kvConfigured,
                 isAdmin: data.isAdmin,
                 isManager: data.isManager,
@@ -574,6 +592,37 @@ export default function App() {
       window.clearInterval(timer);
     };
   }, [waitingStaffAuth, staffLoginNonce, telegramUser, applyTelegramAuth]);
+
+  useEffect(() => {
+    const onSubRequired = (ev: Event) => {
+      const detail = (ev as CustomEvent<MandatoryChannelPublic[]>).detail;
+      if (Array.isArray(detail) && detail.length > 0) {
+        setMissingSubChannels(detail);
+      }
+    };
+    window.addEventListener('slaydcanva:subscription-required', onSubRequired);
+    return () => window.removeEventListener('slaydcanva:subscription-required', onSubRequired);
+  }, []);
+
+  const handleRecheckSubscription = useCallback(async () => {
+    if (!tgSessionToken || checkingSub) return;
+    setCheckingSub(true);
+    try {
+      const res = await checkTelegramSubscriptionStatus(tgSessionToken);
+      if (!res.ok) {
+        showNotice('err', res.error || 'Obunani tekshirib bo‘lmadi.');
+        return;
+      }
+      setMissingSubChannels(res.subscribed ? [] : res.missingChannels);
+      if (res.subscribed) {
+        showNotice('ok', 'Barcha majburiy kanallarga obuna tasdiqlandi!');
+      } else {
+        showNotice('err', "Hali barcha kanallarga a'zo bo'lmagansiz.");
+      }
+    } finally {
+      setCheckingSub(false);
+    }
+  }, [tgSessionToken, checkingSub, showNotice]);
 
   const handleModeChange = (mode: WorkspaceMode) => {
     setMobileSheetOpen(false);
@@ -839,6 +888,11 @@ export default function App() {
         balance: me.account!.balance,
         transactions: me.account!.transactions.slice(0, 60),
       }));
+    }
+    if (me && Array.isArray(me.missingChannels)) {
+      setMissingSubChannels(
+        me.isAdmin || me.isManager || me.isSupport ? [] : me.missingChannels
+      );
     }
   }, [tgSessionToken]);
 
@@ -1731,6 +1785,65 @@ export default function App() {
                 compact
                 onNotify={showNotice}
               />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {telegramUser && !isStaffMember && missingSubChannels.length > 0 && (
+        <div className="fixed inset-0 z-55 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="w-full max-w-md bg-white border border-zinc-200 rounded-2xl shadow-2xl overflow-hidden">
+            <div className="bg-[#111113] text-white px-5 py-4 flex items-center gap-2.5">
+              <div className="w-9 h-9 rounded-xl bg-red-600/20 border border-red-500/40 flex items-center justify-center shrink-0">
+                <Radio className="w-4 h-4 text-red-400" />
+              </div>
+              <div>
+                <h2 className="text-sm font-bold leading-snug">Majburiy obuna talab etiladi</h2>
+                <p className="text-[11px] text-zinc-400">
+                  Ilovadan to‘liq foydalanish uchun quyidagi kanallarga a’zo bo‘ling
+                </p>
+              </div>
+            </div>
+
+            <div className="p-5 space-y-3">
+              <div className="space-y-2 max-h-60 overflow-y-auto">
+                {missingSubChannels.map((ch, idx) => (
+                  <a
+                    key={ch.id}
+                    href={ch.inviteUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center justify-between gap-3 p-3 rounded-xl border border-zinc-200 bg-zinc-50 hover:border-red-500 hover:bg-red-50/40 transition-colors"
+                  >
+                    <div className="min-w-0">
+                      <div className="text-xs font-semibold text-zinc-900 truncate">
+                        {idx + 1}. {ch.title}
+                      </div>
+                      <div className="text-[11px] font-mono text-zinc-500 truncate">
+                        {ch.chatId}
+                      </div>
+                    </div>
+                    <span className="px-2.5 py-1 rounded-lg bg-red-600 text-white text-[11px] font-semibold inline-flex items-center gap-1 shrink-0">
+                      <span>Obuna bo‘lish</span>
+                      <ExternalLink className="w-3 h-3" />
+                    </span>
+                  </a>
+                ))}
+              </div>
+
+              <button
+                type="button"
+                disabled={checkingSub}
+                onClick={() => void handleRecheckSubscription()}
+                className="w-full py-2.5 px-4 rounded-xl bg-[#111113] hover:bg-zinc-800 disabled:opacity-55 text-white text-xs font-semibold flex items-center justify-center gap-2"
+              >
+                {checkingSub ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                )}
+                <span>{checkingSub ? 'Tekshirilmoqda...' : 'Obunani tekshirish'}</span>
+              </button>
             </div>
           </div>
         </div>

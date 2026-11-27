@@ -15,6 +15,8 @@ import {
   InboxMessageRow,
   ManagerPermission,
   ManagerRecord,
+  MandatoryChannelPublic,
+  MandatoryChannelRecord,
   ProjectSummary,
   PromoCodeRow,
   SecurityLogRow,
@@ -24,6 +26,8 @@ import {
   SupportAgentPublic,
   SupportTicketRow,
   SupportTicketStatus,
+  SystemApiKeyRow,
+  SystemApiKeySlot,
   TelegramUser,
   TolovgoPaymentMode,
   UserFileRecord,
@@ -212,6 +216,7 @@ export async function fetchTelegramAccountMe(sessionToken?: string | null): Prom
   user?: TelegramUser;
   sessionToken?: string;
   account?: TelegramAccountResponse;
+  missingChannels?: MandatoryChannelPublic[];
   isAdmin?: boolean;
   isManager?: boolean;
   isSupport?: boolean;
@@ -229,6 +234,7 @@ export async function fetchTelegramAccountMe(sessionToken?: string | null): Prom
       user?: TelegramUser;
       sessionToken?: string;
       account?: TelegramAccountResponse;
+      missingChannels?: MandatoryChannelPublic[];
       isAdmin?: boolean;
       isManager?: boolean;
       isSupport?: boolean;
@@ -237,6 +243,41 @@ export async function fetchTelegramAccountMe(sessionToken?: string | null): Prom
     };
   } catch {
     return null;
+  }
+}
+
+export async function checkTelegramSubscriptionStatus(sessionToken?: string | null): Promise<{
+  ok: boolean;
+  subscribed: boolean;
+  missingChannels: MandatoryChannelPublic[];
+  error?: string;
+}> {
+  try {
+    const res = await fetch('/api/telegram/subscription-status', {
+      credentials: 'same-origin',
+      headers: getTelegramAuthHeaders(sessionToken),
+    });
+    const data = (await res.json().catch(() => ({}))) as {
+      ok?: boolean;
+      subscribed?: boolean;
+      missingChannels?: MandatoryChannelPublic[];
+      error?: string;
+    };
+    if (!res.ok) {
+      return {
+        ok: false,
+        subscribed: true,
+        missingChannels: [],
+        error: data.error || 'Obuna holatini tekshirib bo‘lmadi.',
+      };
+    }
+    return {
+      ok: true,
+      subscribed: Boolean(data.subscribed),
+      missingChannels: Array.isArray(data.missingChannels) ? data.missingChannels : [],
+    };
+  } catch {
+    return { ok: false, subscribed: true, missingChannels: [], error: 'Tarmoq xatosi.' };
   }
 }
 
@@ -1582,5 +1623,167 @@ export async function adminTestAiProvider(
     providers: Array.isArray(data.providers) ? data.providers : [],
   };
 }
+
+export async function adminListSystemApiKeys(
+  sessionToken: string,
+  adminToken: string
+): Promise<{ ok: boolean; keys: SystemApiKeyRow[]; error?: string }> {
+  const res = await fetch('/api/admin/api-keys', {
+    credentials: 'same-origin',
+    headers: getAdminHeaders(sessionToken, adminToken),
+  });
+  const data = (await res.json().catch(() => ({}))) as {
+    ok?: boolean;
+    keys?: SystemApiKeyRow[];
+    error?: string;
+  };
+  if (!res.ok) return { ok: false, keys: [], error: data.error || 'API kalitlarni yuklab bo‘lmadi.' };
+  return { ok: true, keys: Array.isArray(data.keys) ? data.keys : [] };
+}
+
+export async function adminSaveSystemApiKey(
+  sessionToken: string,
+  adminToken: string,
+  slot: SystemApiKeySlot,
+  value: string
+): Promise<{ ok: boolean; keys?: SystemApiKeyRow[]; error?: string }> {
+  const res = await fetch('/api/admin/api-keys', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: {
+      'Content-Type': 'application/json',
+      ...getAdminHeaders(sessionToken, adminToken),
+    },
+    body: JSON.stringify({ slot, value }),
+  });
+  const data = (await res.json().catch(() => ({}))) as {
+    ok?: boolean;
+    keys?: SystemApiKeyRow[];
+    error?: string;
+  };
+  if (!res.ok) return { ok: false, error: data.error || 'API kalit saqlanmadi.' };
+  return { ok: true, keys: Array.isArray(data.keys) ? data.keys : [] };
+}
+
+export async function adminDeleteSystemApiKey(
+  sessionToken: string,
+  adminToken: string,
+  slot: SystemApiKeySlot
+): Promise<{ ok: boolean; keys?: SystemApiKeyRow[]; error?: string }> {
+  const res = await fetch(`/api/admin/api-keys/${encodeURIComponent(slot)}`, {
+    method: 'DELETE',
+    credentials: 'same-origin',
+    headers: getAdminHeaders(sessionToken, adminToken),
+  });
+  const data = (await res.json().catch(() => ({}))) as {
+    ok?: boolean;
+    keys?: SystemApiKeyRow[];
+    error?: string;
+  };
+  if (!res.ok) return { ok: false, error: data.error || "Kalitni o'chirib bo'lmadi." };
+  return { ok: true, keys: Array.isArray(data.keys) ? data.keys : [] };
+}
+
+export async function adminListMandatoryChannels(
+  sessionToken: string,
+  adminToken: string
+): Promise<{ ok: boolean; channels: MandatoryChannelRecord[]; hasBotToken?: boolean; error?: string }> {
+  const res = await fetch('/api/admin/channels', {
+    credentials: 'same-origin',
+    headers: getAdminHeaders(sessionToken, adminToken),
+  });
+  const data = (await res.json().catch(() => ({}))) as {
+    ok?: boolean;
+    channels?: MandatoryChannelRecord[];
+    hasBotToken?: boolean;
+    error?: string;
+  };
+  if (!res.ok) return { ok: false, channels: [], error: data.error || 'Kanallarni yuklab bo‘lmadi.' };
+  return {
+    ok: true,
+    channels: Array.isArray(data.channels) ? data.channels : [],
+    hasBotToken: Boolean(data.hasBotToken),
+  };
+}
+
+export async function adminUpsertMandatoryChannel(
+  sessionToken: string,
+  adminToken: string,
+  payload: {
+    id?: string;
+    title: string;
+    chatId: string;
+    inviteUrl?: string;
+    enabled: boolean;
+    priority: number;
+  }
+): Promise<{ ok: boolean; channels?: MandatoryChannelRecord[]; error?: string }> {
+  const res = await fetch('/api/admin/channels', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: {
+      'Content-Type': 'application/json',
+      ...getAdminHeaders(sessionToken, adminToken),
+    },
+    body: JSON.stringify(payload),
+  });
+  const data = (await res.json().catch(() => ({}))) as {
+    ok?: boolean;
+    channels?: MandatoryChannelRecord[];
+    error?: string;
+  };
+  if (!res.ok) return { ok: false, error: data.error || 'Kanal saqlanmadi.' };
+  return { ok: true, channels: Array.isArray(data.channels) ? data.channels : [] };
+}
+
+export async function adminTestMandatoryChannel(
+  sessionToken: string,
+  adminToken: string,
+  id: string
+): Promise<{ ok: boolean; message?: string; channels?: MandatoryChannelRecord[]; error?: string }> {
+  const res = await fetch(`/api/admin/channels/${encodeURIComponent(id)}/test`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: getAdminHeaders(sessionToken, adminToken),
+  });
+  const data = (await res.json().catch(() => ({}))) as {
+    ok?: boolean;
+    message?: string;
+    channels?: MandatoryChannelRecord[];
+    error?: string;
+  };
+  if (!res.ok) {
+    return {
+      ok: false,
+      error: data.error || 'Kanal tekshiruvdan o‘tmadi.',
+      channels: Array.isArray(data.channels) ? data.channels : undefined,
+    };
+  }
+  return {
+    ok: true,
+    message: data.message,
+    channels: Array.isArray(data.channels) ? data.channels : [],
+  };
+}
+
+export async function adminDeleteMandatoryChannel(
+  sessionToken: string,
+  adminToken: string,
+  id: string
+): Promise<{ ok: boolean; channels?: MandatoryChannelRecord[]; error?: string }> {
+  const res = await fetch(`/api/admin/channels/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    credentials: 'same-origin',
+    headers: getAdminHeaders(sessionToken, adminToken),
+  });
+  const data = (await res.json().catch(() => ({}))) as {
+    ok?: boolean;
+    channels?: MandatoryChannelRecord[];
+    error?: string;
+  };
+  if (!res.ok) return { ok: false, error: data.error || "Kanal o'chirib bo'lmadi." };
+  return { ok: true, channels: Array.isArray(data.channels) ? data.channels : [] };
+}
+
 
 

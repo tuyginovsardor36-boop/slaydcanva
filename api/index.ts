@@ -175,7 +175,7 @@ class ProviderHttpError extends Error {
 }
 
 function getGeminiClient(): GoogleGenAI | null {
-  const apiKey = process.env.GEMINI_API_KEY?.trim();
+  const apiKey = getEffectiveSystemApiKey('GEMINI_API_KEY');
   if (!apiKey) {
     return null;
   }
@@ -608,6 +608,304 @@ async function saveStoredBackupAiProviders(list: StoredBackupAiProvider[]): Prom
   return sorted;
 }
 
+type SystemApiKeySlot =
+  | 'OPENROUTER_API_KEY'
+  | 'GEMINI_API_KEY'
+  | 'TELEGRAM_BOT_TOKEN'
+  | 'TOLOVGO_API_KEY'
+  | 'TOLOVGO_TEST_API'
+  | 'TOLOVGO_WEBHOOK_SECRET';
+
+interface StoredSystemApiKeyEntry {
+  value: string;
+  updatedAt: number;
+}
+
+const SYSTEM_API_KEY_DEFINITIONS: Array<{
+  slot: SystemApiKeySlot;
+  label: string;
+  category: 'ai' | 'telegram' | 'payment';
+  description: string;
+  envPlaceholder?: string;
+}> = [
+  {
+    slot: 'OPENROUTER_API_KEY',
+    label: 'OpenRouter API Kaliti (Asosiy AI)',
+    category: 'ai',
+    description: 'Slayd, Mustaqil ish, Kurs ishi va matn generatsiyasi uchun asosiy OpenRouter kaliti.',
+  },
+  {
+    slot: 'GEMINI_API_KEY',
+    label: 'Google Gemini API Kaliti',
+    category: 'ai',
+    description: 'OpenRouter mavjud bo‘lmasa yoki zaxira sifatida ishlatiladigan Gemini kaliti.',
+  },
+  {
+    slot: 'TELEGRAM_BOT_TOKEN',
+    label: 'Telegram Bot Tokeni',
+    category: 'telegram',
+    description: 'Bot, Mini App autentifikatsiyasi, fayl yuborish va majburiy obuna tekshiruvi uchun.',
+    envPlaceholder: 'MY_TELEGRAM_BOT_TOKEN',
+  },
+  {
+    slot: 'TOLOVGO_API_KEY',
+    label: 'TolovGo Live API Kaliti',
+    category: 'payment',
+    description: 'Haqiqiy (UZS) to‘lovlarni qabul qilish uchun TolovGo savdogar kaliti.',
+    envPlaceholder: 'MY_TOLOVGO_API_KEY',
+  },
+  {
+    slot: 'TOLOVGO_TEST_API',
+    label: 'TolovGo Sinov (Test) API Kaliti',
+    category: 'payment',
+    description: 'Sinov rejimida to‘lovlarni test qilish uchun TolovGo test kaliti.',
+    envPlaceholder: 'MY_TOLOVGO_TEST_API',
+  },
+  {
+    slot: 'TOLOVGO_WEBHOOK_SECRET',
+    label: 'TolovGo Webhook HMAC Kaliti',
+    category: 'payment',
+    description: 'TolovGo callback so‘rovlarini HMAC-SHA256 orqali himoya qilish siri.',
+    envPlaceholder: 'MY_TOLOVGO_WEBHOOK_SECRET',
+  },
+];
+
+let cachedSystemApiKeys: Partial<Record<SystemApiKeySlot, StoredSystemApiKeyEntry>> = {};
+let systemApiKeysLoadedAt = 0;
+
+async function refreshSystemApiKeysCache(force = false): Promise<Partial<Record<SystemApiKeySlot, StoredSystemApiKeyEntry>>> {
+  if (!force && systemApiKeysLoadedAt > 0 && Date.now() - systemApiKeysLoadedAt < 30_000) {
+    return cachedSystemApiKeys;
+  }
+  const fromDb = await dbGetSetting<Record<string, StoredSystemApiKeyEntry>>('system_api_keys').catch(() => null);
+  const fromKv = !fromDb
+    ? await kvGet<Record<string, StoredSystemApiKeyEntry>>('app_settings:system_api_keys').catch(() => null)
+    : null;
+  const raw = fromDb || fromKv || {};
+  const next: Partial<Record<SystemApiKeySlot, StoredSystemApiKeyEntry>> = {};
+  for (const def of SYSTEM_API_KEY_DEFINITIONS) {
+    const entry = raw[def.slot];
+    if (entry && typeof entry.value === 'string' && entry.value.trim()) {
+      next[def.slot] = {
+        value: entry.value.trim(),
+        updatedAt: Number(entry.updatedAt) || Date.now(),
+      };
+    }
+  }
+  cachedSystemApiKeys = next;
+  systemApiKeysLoadedAt = Date.now();
+  return next;
+}
+
+async function saveSystemApiKeysMap(
+  next: Partial<Record<SystemApiKeySlot, StoredSystemApiKeyEntry>>
+): Promise<void> {
+  cachedSystemApiKeys = next;
+  systemApiKeysLoadedAt = Date.now();
+  await Promise.all([
+    dbSetSetting('system_api_keys', next),
+    kvSet('app_settings:system_api_keys', next),
+  ]);
+}
+
+function getEffectiveSystemApiKey(slot: SystemApiKeySlot, envPlaceholder?: string): string | null {
+  const dbOverride = cachedSystemApiKeys[slot]?.value?.trim();
+  if (dbOverride) return dbOverride;
+  if (slot === 'TOLOVGO_API_KEY') {
+    return (
+      getCleanEnvKey(process.env.TOLOVGO_API_KEY, 'MY_TOLOVGO_API_KEY') ||
+      getCleanEnvKey(process.env.TOLOVGO_KEY, 'MY_TOLOVGO_API_KEY')
+    );
+  }
+  if (slot === 'TOLOVGO_WEBHOOK_SECRET') {
+    return (
+      getCleanEnvKey(process.env.TOLOVGO_WEBHOOK_SECRET, 'MY_TOLOVGO_WEBHOOK_SECRET') ||
+      getCleanEnvKey(process.env.TOLOVGO_SIGNATURE_SECRET, 'MY_TOLOVGO_WEBHOOK_SECRET')
+    );
+  }
+  if (envPlaceholder) {
+    return getCleanEnvKey(process.env[slot], envPlaceholder);
+  }
+  const raw = process.env[slot]?.trim();
+  return raw || null;
+}
+
+function buildSystemApiKeyRows() {
+  return SYSTEM_API_KEY_DEFINITIONS.map((def) => {
+    const dbEntry = cachedSystemApiKeys[def.slot];
+    const dbVal = dbEntry?.value?.trim() || '';
+    const envVal =
+      def.slot === 'TOLOVGO_API_KEY'
+        ? getCleanEnvKey(process.env.TOLOVGO_API_KEY, 'MY_TOLOVGO_API_KEY') ||
+          getCleanEnvKey(process.env.TOLOVGO_KEY, 'MY_TOLOVGO_API_KEY')
+        : def.slot === 'TOLOVGO_WEBHOOK_SECRET'
+          ? getCleanEnvKey(process.env.TOLOVGO_WEBHOOK_SECRET, 'MY_TOLOVGO_WEBHOOK_SECRET') ||
+            getCleanEnvKey(process.env.TOLOVGO_SIGNATURE_SECRET, 'MY_TOLOVGO_WEBHOOK_SECRET')
+          : def.envPlaceholder
+            ? getCleanEnvKey(process.env[def.slot], def.envPlaceholder)
+            : process.env[def.slot]?.trim() || null;
+
+    const effective = dbVal || envVal || '';
+    const source: 'db' | 'env' | 'missing' = dbVal ? 'db' : envVal ? 'env' : 'missing';
+    return {
+      slot: def.slot,
+      label: def.label,
+      category: def.category,
+      description: def.description,
+      source,
+      maskedValue: effective ? maskBackupApiKey(effective) : '',
+      hasDbOverride: Boolean(dbVal),
+      hasEnvFallback: Boolean(envVal),
+      updatedAt: dbEntry?.updatedAt,
+    };
+  });
+}
+
+interface StoredMandatoryChannel {
+  id: string;
+  title: string;
+  chatId: string;
+  inviteUrl: string;
+  enabled: boolean;
+  priority: number;
+  lastCheckStatus?: 'ok' | 'error' | 'untested';
+  lastCheckMessage?: string;
+  lastCheckedAt?: number;
+  createdAt: number;
+}
+
+function normalizeChannelChatId(raw: string): string {
+  const s = raw.trim();
+  if (!s) return '';
+  if (/^https?:\/\/t\.me\//i.test(s)) {
+    const slug = s.replace(/^https?:\/\/t\.me\//i, '').split(/[/?#]/)[0]?.trim() || '';
+    if (slug && !slug.startsWith('+')) return `@${slug.replace(/^@+/, '')}`;
+  }
+  if (/^-?\d{5,20}$/.test(s)) return s;
+  return `@${s.replace(/^@+/, '')}`;
+}
+
+function normalizeChannelInviteUrl(rawUrl: string, chatId: string): string {
+  const trimmed = rawUrl.trim();
+  if (trimmed) {
+    if (/^https?:\/\/(t\.me|telegram\.me)\//i.test(trimmed)) return trimmed;
+    if (/^t\.me\//i.test(trimmed)) return `https://${trimmed}`;
+  }
+  if (chatId.startsWith('@')) {
+    return `https://t.me/${chatId.slice(1)}`;
+  }
+  return '';
+}
+
+async function getStoredMandatoryChannels(): Promise<StoredMandatoryChannel[]> {
+  const fromDb = await dbGetSetting<StoredMandatoryChannel[]>('mandatory_channels').catch(() => null);
+  const fromKv = !fromDb
+    ? await kvGet<StoredMandatoryChannel[]>('app_settings:mandatory_channels').catch(() => null)
+    : null;
+  const list = Array.isArray(fromDb) ? fromDb : Array.isArray(fromKv) ? fromKv : [];
+  return list
+    .filter((c) => c && typeof c.id === 'string' && typeof c.chatId === 'string')
+    .sort((a, b) => (a.priority || 99) - (b.priority || 99));
+}
+
+async function saveStoredMandatoryChannels(
+  list: StoredMandatoryChannel[]
+): Promise<StoredMandatoryChannel[]> {
+  const sorted = [...list].sort((a, b) => (a.priority || 99) - (b.priority || 99));
+  await Promise.all([
+    dbSetSetting('mandatory_channels', sorted),
+    kvSet('app_settings:mandatory_channels', sorted),
+  ]);
+  return sorted;
+}
+
+async function checkUserMandatorySubscriptions(telegramId: string): Promise<{
+  ok: boolean;
+  missingChannels: Array<{ id: string; title: string; chatId: string; inviteUrl: string }>;
+}> {
+  const channels = (await getStoredMandatoryChannels()).filter((c) => c.enabled && c.inviteUrl);
+  if (channels.length === 0) {
+    return { ok: true, missingChannels: [] };
+  }
+  if (!getTelegramBotToken()) {
+    return { ok: true, missingChannels: [] };
+  }
+  const staff = await resolveStaffAccess(telegramId).catch(() => null);
+  if (staff?.isStaff) {
+    return { ok: true, missingChannels: [] };
+  }
+  const numericUserId = Number(telegramId);
+  if (!Number.isSafeInteger(numericUserId)) {
+    return { ok: true, missingChannels: [] };
+  }
+
+  const results = await Promise.all(
+    channels.map(async (ch) => {
+      try {
+        const resp = await telegramApi('getChatMember', {
+          chat_id: ch.chatId,
+          user_id: numericUserId,
+        });
+        if (!resp.ok || !resp.result || typeof resp.result !== 'object') {
+          // If bot lacks admin access or chat is unreachable, do not lock out legitimate users
+          return { ch, subscribed: true };
+        }
+        const member = resp.result as { status?: string; is_member?: boolean };
+        const status = String(member.status || '');
+        const isMember =
+          status === 'creator' ||
+          status === 'administrator' ||
+          status === 'member' ||
+          (status === 'restricted' && member.is_member === true);
+        return { ch, subscribed: isMember };
+      } catch {
+        return { ch, subscribed: true };
+      }
+    })
+  );
+
+  const missingChannels = results
+    .filter((r) => !r.subscribed)
+    .map((r) => ({
+      id: r.ch.id,
+      title: r.ch.title,
+      chatId: r.ch.chatId,
+      inviteUrl: r.ch.inviteUrl,
+    }));
+
+  return { ok: missingChannels.length === 0, missingChannels };
+}
+
+function buildMandatorySubKeyboard(
+  missing: Array<{ id: string; title: string; chatId: string; inviteUrl: string }>
+) {
+  return {
+    inline_keyboard: [
+      ...missing.map((ch, idx) => [
+        {
+          text: `📢 ${idx + 1}. ${ch.title} — Obuna bo'lish`,
+          url: ch.inviteUrl,
+        },
+      ]),
+      [{ text: "✅ Obunani tekshirish", callback_data: 'check_sub' }],
+    ],
+  };
+}
+
+function formatMandatorySubMessage(
+  missing: Array<{ id: string; title: string; chatId: string; inviteUrl: string }>
+): string {
+  const list = missing
+    .map((ch, idx) => `${idx + 1}) <b>${escapeTgHtml(ch.title)}</b>`)
+    .join('\n');
+  return (
+    `📢 <b>Majburiy obuna talab qilinadi</b>\n\n` +
+    `Bot va SlaydCanva AI xizmatlaridan foydalanish uchun quyidagi rasmiy kanallarga obuna bo'ling:\n\n` +
+    `${list}\n\n` +
+    `Obuna bo'lgach pastdagi <b>«✅ Obunani tekshirish»</b> tugmasini bosing.`
+  );
+}
+
 async function runSingleBackupAiProvider(
   provider: StoredBackupAiProvider,
   params: {
@@ -666,7 +964,8 @@ async function generateStructuredJson(params: {
   thinkingLevel?: ThinkingLevel;
   trace?: string[];
 }): Promise<unknown> {
-  const openRouterKey = process.env.OPENROUTER_API_KEY?.trim();
+  await refreshSystemApiKeysCache();
+  const openRouterKey = getEffectiveSystemApiKey('OPENROUTER_API_KEY');
   const geminiClient = getGeminiClient();
   const siteCfg = await getEffectiveSiteConfig().catch(() => DEFAULT_SITE_CONFIG);
   const preferredOrModel = siteCfg.defaultAiModel || undefined;
@@ -1000,6 +1299,7 @@ const ACADEMIC_DOC_RESPONSE_SCHEMA = {
     ministryHeader: { type: Type.STRING },
     abstract: { type: Type.STRING },
     keywords: { type: Type.ARRAY, items: { type: Type.STRING } },
+    imageQueries: { type: Type.ARRAY, items: { type: Type.STRING } },
     planOutline: {
       type: Type.ARRAY,
       items: {
@@ -1073,6 +1373,7 @@ const ACADEMIC_CHUNK1_SCHEMA = {
     ministryHeader: { type: Type.STRING },
     abstract: { type: Type.STRING },
     keywords: { type: Type.ARRAY, items: { type: Type.STRING } },
+    imageQueries: { type: Type.ARRAY, items: { type: Type.STRING } },
     planOutline: {
       type: Type.ARRAY,
       items: {
@@ -1757,10 +2058,8 @@ function resolveTolovgoCredential(requestedMode?: 'live' | 'test'): {
   hasLiveKey: boolean;
   hasTestKey: boolean;
 } | null {
-  const liveKey =
-    getCleanEnvKey(process.env.TOLOVGO_API_KEY, 'MY_TOLOVGO_API_KEY') ||
-    getCleanEnvKey(process.env.TOLOVGO_KEY, 'MY_TOLOVGO_API_KEY');
-  const testKey = getCleanEnvKey(process.env.TOLOVGO_TEST_API, 'MY_TOLOVGO_TEST_API');
+  const liveKey = getEffectiveSystemApiKey('TOLOVGO_API_KEY', 'MY_TOLOVGO_API_KEY');
+  const testKey = getEffectiveSystemApiKey('TOLOVGO_TEST_API', 'MY_TOLOVGO_TEST_API');
   const envMode = process.env.TOLOVGO_MODE?.trim().toLowerCase();
   const effectiveMode =
     requestedMode === 'test' || requestedMode === 'live'
@@ -2001,6 +2300,11 @@ app.use((req, _res, next) => {
     const qs = restParams.toString();
     req.url = `/api/${cleanPath}${qs ? `?${qs}` : ''}`;
   }
+  next();
+});
+
+app.use('/api', async (_req, _res, next) => {
+  await refreshSystemApiKeysCache().catch(() => {});
   next();
 });
 
@@ -2302,6 +2606,19 @@ app.post('/api/ai/generate', async (req, res) => {
           "Tizimda vaqtincha texnik ishlar olib borilmoqda. Birozdan so'ng urinib ko'ring.",
       });
       return;
+    }
+
+    if (tgUser && !staff?.isStaff) {
+      const subCheck = await checkUserMandatorySubscriptions(tgUser.telegramId);
+      if (!subCheck.ok && subCheck.missingChannels.length > 0) {
+        res.status(403).json({
+          error:
+            "Xizmatdan foydalanish uchun avval majburiy Telegram kanallarga obuna bo'ling.",
+          code: 'SUBSCRIPTION_REQUIRED',
+          missingChannels: subCheck.missingChannels,
+        });
+        return;
+      }
     }
 
     const isContinuationRequest =
@@ -2928,6 +3245,7 @@ Faqat ishning umumiy titul sarlavhasi, to'liq mundarija rejasi (planOutline) ham
 Qoidalar:
 - title: mavzuning rasmiy ilmiy sarlavhasi (qo'shtirnoqsiz); subtitle: qisqa akademik aniqlashtiruvchi sarlavha.
 ${isEssay ? '- abstract: 70-100 so‘zlik annotatsiya; keywords: 5-7 ta ilmiy kalit so‘z.' : ''}
+- imageQueries: Wikipedia/Wikimedia Commons dan mavzuga mos haqiqiy ilmiy fotosuratlar topish uchun ingliz tilida 3 ta aniq qidiruv iborasi.
 - planOutline: ${outlinePlanInstruction} Har bir elementda { code, title } bo'lsin.
 - introduction:
   - relevance: mavzuning dolzarbligi (120-160 so'z, kuchli ilmiy asos);
@@ -2949,6 +3267,17 @@ ${isEssay ? '- abstract: 70-100 so‘zlik annotatsiya; keywords: 5-7 ta ilmiy ka
             trace,
           })) as Record<string, unknown>;
           chunk1Data.docKind = docKindValue;
+          const aiImgQueries = Array.isArray(chunk1Data.imageQueries)
+            ? (chunk1Data.imageQueries as unknown[]).map((q) => String(q || '').trim()).filter(Boolean)
+            : [];
+          let realPhotos = await searchRealTopicImages(topic, aiImgQueries, 3);
+          if (realPhotos.length === 0) {
+            const fallbackQueries = await translateTopicToEnglishQueries(topic);
+            if (fallbackQueries.length > 0) {
+              realPhotos = await searchRealTopicImages(topic, fallbackQueries, 3);
+            }
+          }
+          chunk1Data.topicImages = realPhotos;
           sendAiJson({ serviceId: body.serviceId, wordChunk: 1, data: chunk1Data });
           return;
         }
@@ -3133,6 +3462,17 @@ QAT'IY QOIDALAR:
 
       data.docKind = docKindValue;
       data.references = normalizeReferenceList(data.references);
+      const docImgQueries = Array.isArray(data.imageQueries)
+        ? (data.imageQueries as unknown[]).map((q) => String(q || '').trim()).filter(Boolean)
+        : [];
+      let realDocPhotos = await searchRealTopicImages(topic, docImgQueries, 3);
+      if (realDocPhotos.length === 0) {
+        const fallbackQueries = await translateTopicToEnglishQueries(topic);
+        if (fallbackQueries.length > 0) {
+          realDocPhotos = await searchRealTopicImages(topic, fallbackQueries, 3);
+        }
+      }
+      data.topicImages = realDocPhotos;
 
       sendAiJson({ serviceId: body.serviceId, data });
       return;
@@ -3377,7 +3717,7 @@ async function kvSet(key: string, value: unknown, ttlSeconds?: number): Promise<
 }
 
 function getTelegramBotToken(): string | null {
-  return getCleanEnvKey(process.env.TELEGRAM_BOT_TOKEN, 'MY_TELEGRAM_BOT_TOKEN');
+  return getEffectiveSystemApiKey('TELEGRAM_BOT_TOKEN', 'MY_TELEGRAM_BOT_TOKEN');
 }
 
 function getTelegramWebhookSecret(): string | null {
@@ -3389,9 +3729,9 @@ function getSigningKey(): Buffer {
   if (explicit) {
     return crypto.createHash('sha256').update(explicit).digest();
   }
-  const botToken = getTelegramBotToken();
-  if (botToken) {
-    return crypto.createHmac('sha256', 'slaydcanva-session-v1').update(botToken).digest();
+  const envBotToken = getCleanEnvKey(process.env.TELEGRAM_BOT_TOKEN, 'MY_TELEGRAM_BOT_TOKEN');
+  if (envBotToken) {
+    return crypto.createHmac('sha256', 'slaydcanva-session-v1').update(envBotToken).digest();
   }
   return MODULE_EPHEMERAL_SECRET;
 }
@@ -3949,10 +4289,7 @@ async function saveSiteConfig(next: Partial<SiteConfigSettings>): Promise<SiteCo
 }
 
 function getTolovgoWebhookSecret(): string | null {
-  return (
-    getCleanEnvKey(process.env.TOLOVGO_WEBHOOK_SECRET, 'MY_TOLOVGO_WEBHOOK_SECRET') ||
-    getCleanEnvKey(process.env.TOLOVGO_SIGNATURE_SECRET, 'MY_TOLOVGO_WEBHOOK_SECRET')
-  );
+  return getEffectiveSystemApiKey('TOLOVGO_WEBHOOK_SECRET', 'MY_TOLOVGO_WEBHOOK_SECRET');
 }
 
 function verifyTolovgoWebhookSignature(
@@ -6394,8 +6731,8 @@ app.get('/api/admin/ai-providers', async (req, res) => {
     ok: true,
     providers: publicProviders,
     defaultAiModel: siteCfg.defaultAiModel || 'google/gemini-2.5-flash',
-    hasPrimaryOpenRouter: Boolean(process.env.OPENROUTER_API_KEY?.trim()),
-    hasPrimaryGemini: Boolean(process.env.GEMINI_API_KEY?.trim()),
+    hasPrimaryOpenRouter: Boolean(getEffectiveSystemApiKey('OPENROUTER_API_KEY')),
+    hasPrimaryGemini: Boolean(getEffectiveSystemApiKey('GEMINI_API_KEY')),
   });
 });
 
@@ -6620,6 +6957,230 @@ app.post('/api/admin/ai-providers/:id/test', async (req, res) => {
       })),
     });
   }
+});
+
+app.get('/api/admin/api-keys', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'super_admin');
+  if (!ctx) return;
+  await refreshSystemApiKeysCache(true);
+  res.json({ ok: true, keys: buildSystemApiKeyRows() });
+});
+
+app.post('/api/admin/api-keys', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'super_admin');
+  if (!ctx) return;
+  const rawSlot = String(req.body?.slot || '').trim() as SystemApiKeySlot;
+  const rawValue = typeof req.body?.value === 'string' ? req.body.value.trim() : '';
+  const def = SYSTEM_API_KEY_DEFINITIONS.find((d) => d.slot === rawSlot);
+  if (!def) {
+    res.status(400).json({ error: "Noto'g'ri API kalit turi." });
+    return;
+  }
+  if (!rawValue || rawValue.length < 6) {
+    res.status(400).json({ error: "API kalit kamida 6 ta belgidan iborat bo'lishi kerak." });
+    return;
+  }
+
+  await refreshSystemApiKeysCache(true);
+  const nextMap: Partial<Record<SystemApiKeySlot, StoredSystemApiKeyEntry>> = {
+    ...cachedSystemApiKeys,
+    [rawSlot]: { value: rawValue, updatedAt: Date.now() },
+  };
+  await saveSystemApiKeysMap(nextMap);
+
+  await dbAppendAuditLog({
+    id: `aud_key_${Date.now().toString(36)}`,
+    actorId: ctx.user.telegramId,
+    action: 'admin_system_api_key_saved',
+    targetId: rawSlot,
+    details: `${def.label} bazaga saqlandi (${maskBackupApiKey(rawValue)})`,
+  });
+
+  res.json({ ok: true, keys: buildSystemApiKeyRows() });
+});
+
+app.delete('/api/admin/api-keys/:slot', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'super_admin');
+  if (!ctx) return;
+  const rawSlot = String(req.params.slot || '').trim() as SystemApiKeySlot;
+  const def = SYSTEM_API_KEY_DEFINITIONS.find((d) => d.slot === rawSlot);
+  if (!def) {
+    res.status(400).json({ error: "Noto'g'ri API kalit turi." });
+    return;
+  }
+
+  await refreshSystemApiKeysCache(true);
+  const nextMap: Partial<Record<SystemApiKeySlot, StoredSystemApiKeyEntry>> = {
+    ...cachedSystemApiKeys,
+  };
+  delete nextMap[rawSlot];
+  await saveSystemApiKeysMap(nextMap);
+
+  await dbAppendAuditLog({
+    id: `aud_keydel_${Date.now().toString(36)}`,
+    actorId: ctx.user.telegramId,
+    action: 'admin_system_api_key_deleted',
+    targetId: rawSlot,
+    details: `${def.label} bazadan o'chirildi`,
+  });
+
+  res.json({ ok: true, keys: buildSystemApiKeyRows() });
+});
+
+app.get('/api/admin/channels', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'settings');
+  if (!ctx) return;
+  const channels = await getStoredMandatoryChannels();
+  res.json({
+    ok: true,
+    channels,
+    hasBotToken: Boolean(getTelegramBotToken()),
+  });
+});
+
+app.post('/api/admin/channels', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'settings');
+  if (!ctx) return;
+  const rawId = typeof req.body?.id === 'string' ? req.body.id.trim() : '';
+  const title = typeof req.body?.title === 'string' ? req.body.title.trim().slice(0, 80) : '';
+  const rawChatId = typeof req.body?.chatId === 'string' ? req.body.chatId.trim() : '';
+  const rawInviteUrl = typeof req.body?.inviteUrl === 'string' ? req.body.inviteUrl.trim() : '';
+  const enabled = req.body?.enabled !== false;
+  const priority = Math.max(1, Math.min(99, Math.round(Number(req.body?.priority) || 1)));
+
+  const chatId = normalizeChannelChatId(rawChatId);
+  const inviteUrl = normalizeChannelInviteUrl(rawInviteUrl, chatId);
+
+  if (title.length < 2) {
+    res.status(400).json({ error: "Kanal nomi kamida 2 ta belgi bo'lishi kerak." });
+    return;
+  }
+  if (!chatId || (!chatId.startsWith('@') && !/^-?\d{5,20}$/.test(chatId))) {
+    res.status(400).json({ error: "Kanal @username yoki -100... ID sini to'g'ri kiriting." });
+    return;
+  }
+  if (!inviteUrl) {
+    res.status(400).json({
+      error: "Yopiq (-100...) kanal uchun https://t.me/+... taklif havolasini ham kiriting.",
+    });
+    return;
+  }
+
+  const existing = await getStoredMandatoryChannels();
+  const prev = rawId ? existing.find((c) => c.id === rawId) : undefined;
+  const nextId = prev?.id || `ch_${Date.now().toString(36)}_${crypto.randomBytes(2).toString('hex')}`;
+  const updatedRecord: StoredMandatoryChannel = {
+    id: nextId,
+    title,
+    chatId,
+    inviteUrl,
+    enabled,
+    priority,
+    lastCheckStatus: prev?.lastCheckStatus || 'untested',
+    lastCheckMessage: prev?.lastCheckMessage,
+    lastCheckedAt: prev?.lastCheckedAt,
+    createdAt: prev?.createdAt || Date.now(),
+  };
+
+  const nextList = await saveStoredMandatoryChannels([
+    updatedRecord,
+    ...existing.filter((c) => c.id !== nextId),
+  ]);
+
+  await dbAppendAuditLog({
+    id: `aud_ch_${Date.now().toString(36)}`,
+    actorId: ctx.user.telegramId,
+    action: 'admin_mandatory_channel_saved',
+    targetId: nextId,
+    details: `${title} (${chatId}) · ${enabled ? 'Faol' : "O'chiq"}`,
+  });
+
+  res.json({ ok: true, channels: nextList });
+});
+
+app.post('/api/admin/channels/:id/test', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'settings');
+  if (!ctx) return;
+  const id = String(req.params.id || '').trim();
+  const existing = await getStoredMandatoryChannels();
+  const target = existing.find((c) => c.id === id);
+  if (!target) {
+    res.status(404).json({ error: 'Kanal topilmadi.' });
+    return;
+  }
+  if (!getTelegramBotToken()) {
+    res.status(400).json({ error: 'TELEGRAM_BOT_TOKEN kiritilmagan.' });
+    return;
+  }
+
+  let checkOk = false;
+  let checkMessage = '';
+  try {
+    const [chatRes, meRes] = await Promise.all([
+      telegramApi('getChat', { chat_id: target.chatId }),
+      telegramApi('getMe', {}),
+    ]);
+    if (!chatRes.ok || !chatRes.result) {
+      checkMessage = chatRes.description || "Kanal topilmadi yoki bot qo'shilmagan.";
+    } else if (!meRes.ok || !meRes.result || typeof meRes.result !== 'object') {
+      checkMessage = meRes.description || "Bot ma'lumotini olib bo'lmadi.";
+    } else {
+      const botId = Number((meRes.result as { id?: number }).id);
+      const memberRes = await telegramApi('getChatMember', {
+        chat_id: target.chatId,
+        user_id: botId,
+      });
+      const memberStatus = (memberRes.result as { status?: string } | undefined)?.status;
+      if (memberRes.ok && (memberStatus === 'administrator' || memberStatus === 'creator')) {
+        checkOk = true;
+        checkMessage = 'Bot kanalda admin — obuna tekshiruvi ishlaydi.';
+      } else {
+        checkMessage = "Bot kanalga admin qilinmagan! Botni kanalga Admin qilib qo'shing.";
+      }
+    }
+  } catch (err) {
+    checkMessage = err instanceof Error ? err.message : 'Tekshiruvda xatolik.';
+  }
+
+  const nextList = await saveStoredMandatoryChannels(
+    existing.map((c) =>
+      c.id === id
+        ? {
+            ...c,
+            lastCheckStatus: checkOk ? 'ok' : 'error',
+            lastCheckMessage: checkMessage,
+            lastCheckedAt: Date.now(),
+          }
+        : c
+    )
+  );
+
+  if (!checkOk) {
+    res.status(400).json({ ok: false, error: checkMessage, channels: nextList });
+    return;
+  }
+  res.json({ ok: true, message: checkMessage, channels: nextList });
+});
+
+app.delete('/api/admin/channels/:id', async (req, res) => {
+  const ctx = await requireStaffSession(req, res, 'settings');
+  if (!ctx) return;
+  const id = String(req.params.id || '').trim();
+  const existing = await getStoredMandatoryChannels();
+  const target = existing.find((c) => c.id === id);
+  if (!target) {
+    res.status(404).json({ error: 'Kanal topilmadi.' });
+    return;
+  }
+  const nextList = await saveStoredMandatoryChannels(existing.filter((c) => c.id !== id));
+  await dbAppendAuditLog({
+    id: `aud_chdel_${Date.now().toString(36)}`,
+    actorId: ctx.user.telegramId,
+    action: 'admin_mandatory_channel_deleted',
+    targetId: id,
+    details: `${target.title} (${target.chatId}) o'chirildi`,
+  });
+  res.json({ ok: true, channels: nextList });
 });
 
 app.get('/api/admin/promos', async (req, res) => {
@@ -7650,6 +8211,9 @@ app.get('/api/telegram/me', async (req, res) => {
   }
   const account = await getTgUserAccount(user);
   const staff = await resolveStaffAccess(user.telegramId);
+  const subStatus = staff.isStaff
+    ? { ok: true, missingChannels: [] }
+    : await checkUserMandatorySubscriptions(user.telegramId);
   const sessionToken = issueSessionCookieAndToken(req, res, user);
   res.json({
     ok: true,
@@ -7665,8 +8229,23 @@ app.get('/api/telegram/me', async (req, res) => {
       notifyOnActivity: account.notifyOnActivity,
     },
     account,
+    missingChannels: subStatus.missingChannels,
     kvConfigured: hasPersistentStorage(),
     dbDriver: getStorageDriver(),
+  });
+});
+
+app.get('/api/telegram/subscription-status', async (req, res) => {
+  const user = getAuthenticatedTelegramUser(req);
+  if (!user) {
+    res.status(401).json({ error: 'Telegram autentifikatsiyasi talab qilinadi.' });
+    return;
+  }
+  const subStatus = await checkUserMandatorySubscriptions(user.telegramId);
+  res.json({
+    ok: true,
+    subscribed: subStatus.ok,
+    missingChannels: subStatus.missingChannels,
   });
 });
 
@@ -8207,6 +8786,58 @@ app.post('/api/telegram/webhook', async (req, res) => {
         const siteCfg = await getEffectiveSiteConfig();
         const staffLoginUrl = (!siteCfg.telegramOnlyMode || staff.isStaff) ? loginUrl : undefined;
 
+        if (data === 'check_sub') {
+          const subCheck = await checkUserMandatorySubscriptions(user.telegramId);
+          if (!subCheck.ok && subCheck.missingChannels.length > 0) {
+            await telegramApi('answerCallbackQuery', {
+              callback_query_id: cqId,
+              text: `Hali ${subCheck.missingChannels.length} ta kanalga obuna bo'lmagansiz!`,
+              show_alert: true,
+            });
+            await telegramApi('sendMessage', {
+              chat_id: cid,
+              text: formatMandatorySubMessage(subCheck.missingChannels),
+              parse_mode: 'HTML',
+              reply_markup: buildMandatorySubKeyboard(subCheck.missingChannels),
+            });
+          } else {
+            await telegramApi('answerCallbackQuery', {
+              callback_query_id: cqId,
+              text: "✅ Obuna tasdiqlandi! Xush kelibsiz!",
+            });
+            await telegramApi('sendMessage', {
+              chat_id: cid,
+              text:
+                `✅ <b>Obuna muvaffaqiyatli tasdiqlandi!</b>\n\n` +
+                `💰 Balansingiz: <b>${escapeTgHtml(formatSomServer(account.balance))}</b>\n\n` +
+                `Endi pastdagi tugmalar orqali barcha AI xizmatlardan foydalanishingiz mumkin.`,
+              parse_mode: 'HTML',
+              reply_markup: buildMainBotKeyboard(origin, staffLoginUrl),
+            });
+          }
+          res.json({ ok: true });
+          return;
+        }
+
+        if (!staff.isStaff) {
+          const subCheck = await checkUserMandatorySubscriptions(user.telegramId);
+          if (!subCheck.ok && subCheck.missingChannels.length > 0) {
+            await telegramApi('answerCallbackQuery', {
+              callback_query_id: cqId,
+              text: "Avval majburiy kanallarga obuna bo'ling.",
+              show_alert: true,
+            });
+            await telegramApi('sendMessage', {
+              chat_id: cid,
+              text: formatMandatorySubMessage(subCheck.missingChannels),
+              parse_mode: 'HTML',
+              reply_markup: buildMandatorySubKeyboard(subCheck.missingChannels),
+            });
+            res.json({ ok: true });
+            return;
+          }
+        }
+
         if (data === 'menu:home') {
           await telegramApi('answerCallbackQuery', { callback_query_id: cqId });
           await telegramApi('sendMessage', {
@@ -8490,6 +9121,21 @@ app.post('/api/telegram/webhook', async (req, res) => {
           if (account.isNewUser) {
             void notifyNewUserToCrmAndStaff(refreshedAccount, appliedInviterId);
           }
+
+          if (!staff.isStaff && !arg.startsWith('auth_')) {
+            const subCheck = await checkUserMandatorySubscriptions(user.telegramId);
+            if (!subCheck.ok && subCheck.missingChannels.length > 0) {
+              await telegramApi('sendMessage', {
+                chat_id: cid,
+                text: formatMandatorySubMessage(subCheck.missingChannels),
+                parse_mode: 'HTML',
+                reply_markup: buildMandatorySubKeyboard(subCheck.missingChannels),
+              });
+              res.json({ ok: true });
+              return;
+            }
+          }
+
           const bonusLine = account.isNewUser && pricing.welcomeBonus > 0
             ? `🎁 Xush kelibsiz bonusi: <b>+${escapeTgHtml(formatSomServer(pricing.welcomeBonus))}</b>!\n`
             : '';
@@ -8516,7 +9162,21 @@ app.post('/api/telegram/webhook', async (req, res) => {
             parse_mode: 'HTML',
             reply_markup: buildBotReplyKeyboard(origin),
           });
-        } else if (text === '📁 Fayllar va Amaliyotlar' || cmd === '/files') {
+        } else {
+          if (!staff.isStaff) {
+            const subCheck = await checkUserMandatorySubscriptions(user.telegramId);
+            if (!subCheck.ok && subCheck.missingChannels.length > 0) {
+              await telegramApi('sendMessage', {
+                chat_id: cid,
+                text: formatMandatorySubMessage(subCheck.missingChannels),
+                parse_mode: 'HTML',
+                reply_markup: buildMandatorySubKeyboard(subCheck.missingChannels),
+              });
+              res.json({ ok: true });
+              return;
+            }
+          }
+          if (text === '📁 Fayllar va Amaliyotlar' || cmd === '/files') {
           await telegramApi('sendMessage', {
             chat_id: cid,
             text: await formatBotFilesMessage(tid),
@@ -8719,6 +9379,7 @@ app.post('/api/telegram/webhook', async (req, res) => {
             parse_mode: 'HTML',
             reply_markup: buildMainBotKeyboard(origin, staffLoginUrl),
           });
+          }
         }
       }
     }

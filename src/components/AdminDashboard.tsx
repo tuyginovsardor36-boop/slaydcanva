@@ -15,6 +15,7 @@ import {
   Database,
   Download,
   Edit3,
+  ExternalLink,
   Eye,
   Gift,
   Headphones,
@@ -25,6 +26,7 @@ import {
   Megaphone,
   MessageSquare,
   Plus,
+  Radio,
   RefreshCw,
   Save,
   Search,
@@ -61,6 +63,7 @@ import {
   InboxMessageRow,
   ManagerPermission,
   ManagerRecord,
+  MandatoryChannelRecord,
   PromoCodeRow,
   SecurityLogRow,
   SecurityScanReport,
@@ -68,6 +71,8 @@ import {
   StaffRole,
   SupportTicketRow,
   SupportTicketStatus,
+  SystemApiKeyRow,
+  SystemApiKeySlot,
   TelegramUser,
   TolovgoPaymentMode,
 } from '../types/editor';
@@ -78,7 +83,9 @@ import {
   adminChangePassword,
   adminDeleteAiProvider,
   adminDeleteManager,
+  adminDeleteMandatoryChannel,
   adminDeletePromo,
+  adminDeleteSystemApiKey,
   adminGetAnalytics,
   adminGetOverview,
   adminGetStatus,
@@ -89,10 +96,12 @@ import {
   adminListBroadcasts,
   adminListCrmEvents,
   adminListManagers,
+  adminListMandatoryChannels,
   adminListOrders,
   adminListPromos,
   adminListSecurityLogs,
   adminListSupportTickets,
+  adminListSystemApiKeys,
   adminListUsers,
   adminLogin,
   adminLogout,
@@ -103,6 +112,7 @@ import {
   adminSavePricing,
   adminSaveSettings,
   adminSaveSiteConfig,
+  adminSaveSystemApiKey,
   adminSendBroadcast,
   adminSendDirectMessage,
   adminSendTestTelegramAlert,
@@ -110,10 +120,12 @@ import {
   adminSetupTelegramWebhook,
   adminSetUserBanned,
   adminTestAiProvider,
+  adminTestMandatoryChannel,
   adminUpdateSupportStatus,
   adminUpdateUserCrm,
   adminUpsertAiProvider,
   adminUpsertManager,
+  adminUpsertMandatoryChannel,
   adminUpsertPromo,
   adminVerifyOrder,
 } from '../utils/telegramClient';
@@ -126,6 +138,7 @@ type AdminTab =
   | 'managers'
   | 'orders'
   | 'pricing'
+  | 'api_channels'
   | 'marketing'
   | 'security';
 
@@ -388,6 +401,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [savingAiProvider, setSavingAiProvider] = useState(false);
   const [testingAiId, setTestingAiId] = useState<string | null>(null);
 
+  // System API Keys Placement Table
+  const [systemApiKeys, setSystemApiKeys] = useState<SystemApiKeyRow[]>([]);
+  const [apiKeyDrafts, setApiKeyDrafts] = useState<Record<string, string>>({});
+  const [savingKeySlot, setSavingKeySlot] = useState<SystemApiKeySlot | null>(null);
+  const [deletingKeySlot, setDeletingKeySlot] = useState<SystemApiKeySlot | null>(null);
+
+  // Mandatory Telegram Channels Table
+  const [mandatoryChannels, setMandatoryChannels] = useState<MandatoryChannelRecord[]>([]);
+  const [channelsHasBotToken, setChannelsHasBotToken] = useState(false);
+  const [chFormId, setChFormId] = useState('');
+  const [chFormTitle, setChFormTitle] = useState('');
+  const [chFormChatId, setChFormChatId] = useState('');
+  const [chFormInviteUrl, setChFormInviteUrl] = useState('');
+  const [chFormPriority, setChFormPriority] = useState('1');
+  const [chFormEnabled, setChFormEnabled] = useState(true);
+  const [savingChannel, setSavingChannel] = useState(false);
+  const [testingChannelId, setTestingChannelId] = useState<string | null>(null);
+
   // Security Scanner, Threat Logs, Log Analyzer & Audit
   const [auditLogs, setAuditLogs] = useState<AdminAuditRow[]>([]);
   const [securityLogs, setSecurityLogs] = useState<SecurityLogRow[]>([]);
@@ -550,11 +581,29 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         allowed: hasPerm('promos'),
       },
       {
+        id: 'sec_api_keys',
+        title: 'API Kalitlar Joylash Jadvali (OpenRouter, Gemini, Bot, TolovGo)',
+        subtitle: 'Tizim API kalitlarini bazadan boshqarish va holatini ko‘rish',
+        keywords: 'api kalit key jadval openrouter gemini telegram bot token tolovgo secret',
+        tab: 'api_channels',
+        badge: 'KEY',
+        allowed: isSuperAdmin,
+      },
+      {
+        id: 'sec_mandatory_channels',
+        title: 'Majburiy Obuna Kanallari Jadvali',
+        subtitle: 'Bot va ilova foydalanuvchilari uchun majburiy Telegram kanallari',
+        keywords: 'majburiy obuna kanal channel subscription telegram azo tekshirish',
+        tab: 'api_channels',
+        badge: 'SUB',
+        allowed: hasPerm('settings') || isSuperAdmin,
+      },
+      {
         id: 'sec_ai_backup',
         title: 'Zapaska AI Modellar & API Kalitlar (Bazaga Saqlash)',
         subtitle: 'OpenRouter, Gemini, OpenAI-mos zaxira AI va standart model',
         keywords: 'ai model api kalit key zapaska backup openrouter gemini openai llm suniy intelekt',
-        tab: 'marketing',
+        tab: 'api_channels',
         badge: 'AI',
         allowed: isSuperAdmin,
       },
@@ -636,7 +685,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       });
     }
 
-    // 3. Backup AI models saved in DB
+    // 3. Backup AI models, System API keys & Mandatory Channels saved in DB
     if (isSuperAdmin) {
       aiProviders.forEach((ap) => {
         if (
@@ -650,7 +699,42 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             badge: 'AI',
             title: `${ap.name} (${ap.model})`,
             subtitle: `${ap.providerType} · Ustuvorlik #${ap.priority} · ${ap.enabled ? 'Faol' : "O'chiq"}`,
-            tab: 'marketing',
+            tab: 'api_channels',
+          });
+        }
+      });
+      systemApiKeys.forEach((k) => {
+        if (
+          k.label.toLowerCase().includes(q) ||
+          k.slot.toLowerCase().includes(q) ||
+          k.description.toLowerCase().includes(q)
+        ) {
+          pushItem({
+            id: `syskey_${k.slot}`,
+            category: 'API Kalit',
+            badge: 'KEY',
+            title: `${k.label} (${k.slot})`,
+            subtitle: `Manba: ${k.source === 'db' ? 'Bazadan' : k.source === 'env' ? '.env dan' : 'Kiritilmagan'} · ${k.maskedValue || '—'}`,
+            tab: 'api_channels',
+          });
+        }
+      });
+    }
+
+    if (hasPerm('settings') || isSuperAdmin) {
+      mandatoryChannels.forEach((ch) => {
+        if (
+          ch.title.toLowerCase().includes(q) ||
+          ch.chatId.toLowerCase().includes(q) ||
+          ch.inviteUrl.toLowerCase().includes(q)
+        ) {
+          pushItem({
+            id: `mch_${ch.id}`,
+            category: 'Majburiy Obuna',
+            badge: 'SUB',
+            title: ch.title,
+            subtitle: `${ch.chatId} · ${ch.enabled ? 'Faol' : "O'chiq"}`,
+            tab: 'api_channels',
           });
         }
       });
@@ -787,6 +871,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     isSuperAdmin,
     pricingDraft.services,
     aiProviders,
+    systemApiKeys,
+    mandatoryChannels,
     supportTickets,
     users,
     orders,
@@ -803,6 +889,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       managers: isSuperAdmin,
       orders: hasPerm('orders') || hasPerm('settings'),
       pricing: hasPerm('pricing') || hasPerm('promos'),
+      api_channels: hasPerm('settings') || isSuperAdmin,
       marketing: hasPerm('broadcast') || hasPerm('settings'),
       security: hasPerm('security') || isSuperAdmin,
     };
@@ -920,6 +1007,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   setAiProviders(r.providers);
                   setHasPrimaryOpenRouter(Boolean(r.hasPrimaryOpenRouter));
                   setHasPrimaryGemini(Boolean(r.hasPrimaryGemini));
+                }
+              })
+            : Promise.resolve(),
+          roleNow === 'super_admin'
+            ? adminListSystemApiKeys(telegramSessionToken, token).then((r) => {
+                if (r.ok) setSystemApiKeys(r.keys);
+              })
+            : Promise.resolve(),
+          can('settings')
+            ? adminListMandatoryChannels(telegramSessionToken, token).then((r) => {
+                if (r.ok) {
+                  setMandatoryChannels(r.channels);
+                  setChannelsHasBotToken(Boolean(r.hasBotToken));
                 }
               })
             : Promise.resolve(),
@@ -1647,6 +1747,137 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     onNotify('ok', 'Zapaska AI bazadan o‘chirildi.');
   };
 
+  const handleSaveSystemApiKey = async (slot: SystemApiKeySlot) => {
+    if (!adminToken || savingKeySlot) return;
+    const rawVal = (apiKeyDrafts[slot] || '').trim();
+    if (rawVal.length < 4) {
+      onNotify('err', 'Kamida 4 ta belgidan iborat haqiqiy API kalit kiriting.');
+      return;
+    }
+    setSavingKeySlot(slot);
+    try {
+      const res = await adminSaveSystemApiKey(telegramSessionToken, adminToken, slot, rawVal);
+      if (!res.ok) {
+        onNotify('err', res.error || 'API kalit saqlanmadi.');
+        return;
+      }
+      if (res.keys) setSystemApiKeys(res.keys);
+      setApiKeyDrafts((prev) => ({ ...prev, [slot]: '' }));
+      onNotify('ok', `${slot} bazaga saqlandi va tizimda darhol faollashdi.`);
+    } finally {
+      setSavingKeySlot(null);
+    }
+  };
+
+  const handleDeleteSystemApiKey = async (slot: SystemApiKeySlot) => {
+    if (!adminToken || deletingKeySlot) return;
+    setDeletingKeySlot(slot);
+    try {
+      const res = await adminDeleteSystemApiKey(telegramSessionToken, adminToken, slot);
+      if (!res.ok) {
+        onNotify('err', res.error || "Kalitni o'chirib bo'lmadi.");
+        return;
+      }
+      if (res.keys) setSystemApiKeys(res.keys);
+      onNotify('ok', `${slot} bazadan o‘chirildi.`);
+    } finally {
+      setDeletingKeySlot(null);
+    }
+  };
+
+  const handleResetChannelForm = () => {
+    setChFormId('');
+    setChFormTitle('');
+    setChFormChatId('');
+    setChFormInviteUrl('');
+    setChFormPriority(String((mandatoryChannels.length || 0) + 1));
+    setChFormEnabled(true);
+  };
+
+  const handleEditChannel = (ch: MandatoryChannelRecord) => {
+    setChFormId(ch.id);
+    setChFormTitle(ch.title);
+    setChFormChatId(ch.chatId);
+    setChFormInviteUrl(ch.inviteUrl);
+    setChFormPriority(String(ch.priority || 1));
+    setChFormEnabled(ch.enabled);
+  };
+
+  const handleSaveChannelSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!adminToken || savingChannel) return;
+    if (!chFormTitle.trim() || !chFormChatId.trim()) {
+      onNotify('err', 'Kanal nomi va @username (yoki -100... ID) ni kiriting.');
+      return;
+    }
+    setSavingChannel(true);
+    try {
+      const res = await adminUpsertMandatoryChannel(telegramSessionToken, adminToken, {
+        id: chFormId || undefined,
+        title: chFormTitle.trim(),
+        chatId: chFormChatId.trim(),
+        inviteUrl: chFormInviteUrl.trim() || undefined,
+        enabled: chFormEnabled,
+        priority: Math.max(1, Math.min(99, Number(chFormPriority) || 1)),
+      });
+      if (!res.ok) {
+        onNotify('err', res.error || 'Kanal saqlanmadi.');
+        return;
+      }
+      if (res.channels) setMandatoryChannels(res.channels);
+      handleResetChannelForm();
+      onNotify('ok', 'Majburiy obuna kanali saqlandi.');
+    } finally {
+      setSavingChannel(false);
+    }
+  };
+
+  const handleTestChannel = async (id: string) => {
+    if (!adminToken || testingChannelId) return;
+    setTestingChannelId(id);
+    try {
+      const res = await adminTestMandatoryChannel(telegramSessionToken, adminToken, id);
+      if (res.channels) setMandatoryChannels(res.channels);
+      if (!res.ok) {
+        onNotify('err', res.error || 'Kanal tekshiruvida xatolik.');
+        return;
+      }
+      onNotify('ok', res.message || 'Bot kanalda faol admin sifatida tasdiqlandi.');
+    } finally {
+      setTestingChannelId(null);
+    }
+  };
+
+  const handleToggleChannel = async (ch: MandatoryChannelRecord) => {
+    if (!adminToken) return;
+    const res = await adminUpsertMandatoryChannel(telegramSessionToken, adminToken, {
+      id: ch.id,
+      title: ch.title,
+      chatId: ch.chatId,
+      inviteUrl: ch.inviteUrl,
+      enabled: !ch.enabled,
+      priority: ch.priority,
+    });
+    if (!res.ok) {
+      onNotify('err', res.error || "Kanal holati o'zgartirilmadi.");
+      return;
+    }
+    if (res.channels) setMandatoryChannels(res.channels);
+    onNotify('ok', `${ch.title}: ${!ch.enabled ? 'yoqildi' : "o'chirildi"}`);
+  };
+
+  const handleDeleteChannel = async (id: string) => {
+    if (!adminToken) return;
+    const res = await adminDeleteMandatoryChannel(telegramSessionToken, adminToken, id);
+    if (!res.ok) {
+      onNotify('err', res.error || "Kanal o'chirib bo'lmadi.");
+      return;
+    }
+    if (res.channels) setMandatoryChannels(res.channels);
+    if (chFormId === id) handleResetChannelForm();
+    onNotify('ok', "Kanal majburiy obuna ro'yxatidan o'chirildi.");
+  };
+
   const handleRunSecurityScan = async () => {
     if (!adminToken || runningScan) return;
     setRunningScan(true);
@@ -2003,6 +2234,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       visible: hasPerm('pricing') || hasPerm('promos'),
     },
     {
+      id: 'api_channels',
+      label: 'API & Majburiy Obuna',
+      icon: <KeyRound className="w-4 h-4" />,
+      visible: hasPerm('settings') || isSuperAdmin,
+      badge: mandatoryChannels.filter((c) => c.enabled).length || undefined,
+    },
+    {
       id: 'marketing',
       label: 'Bot Xabar & Sayt',
       icon: <Megaphone className="w-4 h-4" />,
@@ -2100,135 +2338,139 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        <header className="h-[54px] shrink-0 bg-white border-b border-zinc-200 px-4 md:px-6 flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2.5 min-w-0">
-            <button
-              type="button"
-              onClick={onClose}
-              className="md:hidden p-1.5 rounded-lg border border-zinc-200 text-zinc-700 hover:bg-zinc-50"
-              aria-label="Saytga qaytish"
-            >
-              <ArrowLeft className="w-4 h-4" />
-            </button>
-            <h1 className="font-display text-sm md:text-base font-bold text-zinc-900 truncate">
-              {visibleNavItems.find((n) => n.id === activeTab)?.label || 'CRM Boshqaruv'}
-            </h1>
-            <span className="hidden sm:inline text-xs text-zinc-400">·</span>
-            <span className="hidden sm:inline text-xs font-mono text-zinc-500 truncate">
-              TolovGo: {tolovgoMode === 'test' ? 'Sinov' : 'Haqiqiy'} · Imzo:{' '}
-              {hasWebhookSecret ? 'Yoqilgan' : 'Kutilmoqda'}
-            </span>
-          </div>
-
-          {/* Google-like Universal Search & Suggestions */}
-          <div ref={searchBoxRef} className="relative flex-1 max-w-2xl mx-2 md:mx-4">
-            <div className="relative flex items-center">
-              <Search className="w-4 h-4 text-zinc-400 absolute left-3.5 pointer-events-none" />
-              <input
-                ref={searchInputRef}
-                type="text"
-                value={globalSearchQuery}
-                onChange={(e) => {
-                  setGlobalSearchQuery(e.target.value);
-                  setShowSearchDropdown(true);
-                }}
-                onFocus={() => setShowSearchDropdown(true)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && searchSuggestions.length > 0) {
-                    e.preventDefault();
-                    const first = searchSuggestions[0];
-                    setActiveTab(first.tab);
-                    if (first.userTelegramId) void handleOpenUserDetail(first.userTelegramId);
-                    if (first.supportTelegramId) void handleOpenSupportThread(first.supportTelegramId);
-                    setGlobalSearchQuery('');
-                    setShowSearchDropdown(false);
-                  }
-                }}
-                placeholder="Barcha xizmatlar, foydalanuvchilar, buyurtmalar, Zapaska AI, sozlamalarni qidiring... ( / )"
-                className="w-full pl-10 pr-16 py-2 bg-zinc-100 hover:bg-zinc-200/70 focus:bg-white border border-zinc-200 focus:border-red-500 focus:ring-2 focus:ring-red-500/15 rounded-2xl text-xs md:text-sm text-zinc-900 placeholder:text-zinc-400 outline-none transition-all shadow-2xs"
-              />
-              {globalSearchQuery ? (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setGlobalSearchQuery('');
-                    setShowSearchDropdown(false);
-                  }}
-                  aria-label="Qidiruvni tozalash"
-                  className="absolute right-3 w-5 h-5 rounded-full bg-zinc-200/80 hover:bg-zinc-300 text-zinc-700 flex items-center justify-center text-xs font-bold"
-                >
-                  ×
-                </button>
-              ) : (
-                <span className="hidden sm:inline-flex absolute right-3 px-1.5 py-0.5 rounded-md border border-zinc-300 bg-white text-[10px] font-mono text-zinc-400 pointer-events-none">
-                  /
-                </span>
-              )}
+        <header className="shrink-0 bg-white border-b border-zinc-200 px-4 md:px-6 py-2.5 space-y-2.5">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <button
+                type="button"
+                onClick={onClose}
+                className="md:hidden p-1.5 rounded-lg border border-zinc-200 text-zinc-700 hover:bg-zinc-50"
+                aria-label="Saytga qaytish"
+              >
+                <ArrowLeft className="w-4 h-4" />
+              </button>
+              <h1 className="font-display text-sm md:text-base font-bold text-zinc-900 truncate">
+                {visibleNavItems.find((n) => n.id === activeTab)?.label || 'CRM Boshqaruv'}
+              </h1>
+              <span className="hidden sm:inline text-xs text-zinc-400">·</span>
+              <span className="hidden sm:inline text-xs font-mono text-zinc-500 truncate">
+                TolovGo: {tolovgoMode === 'test' ? 'Sinov' : 'Haqiqiy'} · Imzo:{' '}
+                {hasWebhookSecret ? 'Yoqilgan' : 'Kutilmoqda'}
+              </span>
             </div>
 
-            {showSearchDropdown && searchSuggestions.length > 0 && (
-              <div className="absolute top-full left-0 right-0 mt-2 bg-white border border-zinc-200 rounded-2xl shadow-2xl overflow-hidden z-50 divide-y divide-zinc-100 max-h-96 overflow-y-auto">
-                <div className="px-4 py-2 bg-zinc-50 flex items-center justify-between text-[10px] font-semibold text-zinc-500 uppercase tracking-wider">
-                  <span>
-                    {globalSearchQuery.trim()
-                      ? `Qidiruv natijalari (${searchSuggestions.length})`
-                      : "Tezkor o'tish va asosiy xizmatlar"}
-                  </span>
-                  <span className="font-mono text-zinc-400">Enter — birinchisini ochish</span>
-                </div>
-                {searchSuggestions.map((item) => (
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                disabled={loadingData}
+                onClick={() => void loadAllAdminData(adminToken)}
+                className="px-3 py-1.5 rounded-lg border border-zinc-200 bg-white hover:bg-zinc-50 text-xs font-medium text-zinc-700 flex items-center gap-1.5 disabled:opacity-50 transition-colors whitespace-nowrap"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${loadingData ? 'animate-spin' : ''}`} />
+                <span className="hidden sm:inline">Yangilash</span>
+              </button>
+              <button
+                type="button"
+                onClick={onClose}
+                className="hidden md:flex px-3 py-1.5 rounded-lg bg-[#111113] hover:bg-zinc-800 text-white text-xs font-medium items-center gap-1.5 transition-colors whitespace-nowrap"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" />
+                <span>Muhitga qaytish</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Google-like Wide Universal Search & Suggestions */}
+          <div className="flex justify-center">
+            <div ref={searchBoxRef} className="relative w-full max-w-4xl">
+              <div className="relative flex items-center">
+                <Search className="w-4 h-4 text-zinc-400 absolute left-4 pointer-events-none" />
+                <input
+                  ref={searchInputRef}
+                  type="text"
+                  value={globalSearchQuery}
+                  onChange={(e) => {
+                    setGlobalSearchQuery(e.target.value);
+                    setShowSearchDropdown(true);
+                  }}
+                  onFocus={() => setShowSearchDropdown(true)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && searchSuggestions.length > 0) {
+                      e.preventDefault();
+                      const first = searchSuggestions[0];
+                      setActiveTab(first.tab);
+                      if (first.userTelegramId) void handleOpenUserDetail(first.userTelegramId);
+                      if (first.supportTelegramId) void handleOpenSupportThread(first.supportTelegramId);
+                      setGlobalSearchQuery('');
+                      setShowSearchDropdown(false);
+                    }
+                  }}
+                  placeholder="Barcha xizmatlar, foydalanuvchilar, buyurtmalar, Zapaska AI, obuna va API kalitlarni qidiring... ( / )"
+                  className="w-full pl-11 pr-16 py-2.5 bg-zinc-100/90 hover:bg-zinc-200/70 focus:bg-white border border-zinc-200 focus:border-red-500 focus:ring-2 focus:ring-red-500/15 rounded-2xl text-sm text-zinc-900 placeholder:text-zinc-400 outline-none transition-all shadow-2xs"
+                />
+                {globalSearchQuery ? (
                   <button
                     type="button"
-                    key={item.id}
                     onClick={() => {
-                      setActiveTab(item.tab);
-                      if (item.userTelegramId) {
-                        void handleOpenUserDetail(item.userTelegramId);
-                      }
-                      if (item.supportTelegramId) {
-                        void handleOpenSupportThread(item.supportTelegramId);
-                      }
                       setGlobalSearchQuery('');
                       setShowSearchDropdown(false);
                     }}
-                    className="w-full px-4 py-2.5 text-left hover:bg-zinc-50 flex items-center justify-between gap-3 transition-colors"
+                    aria-label="Qidiruvni tozalash"
+                    className="absolute right-3.5 w-6 h-6 rounded-full bg-zinc-200/80 hover:bg-zinc-300 text-zinc-700 flex items-center justify-center text-xs font-bold"
                   >
-                    <div className="flex items-start gap-2.5 min-w-0">
-                      <span className="px-1.5 py-1 rounded-lg bg-red-50 text-red-600 flex items-center justify-center text-[10px] font-mono shrink-0 mt-0.5 font-bold">
-                        {item.badge}
-                      </span>
-                      <div className="min-w-0">
-                        <div className="text-xs font-semibold text-zinc-900 truncate">{item.title}</div>
-                        <div className="text-[11px] text-zinc-500 truncate">{item.subtitle}</div>
-                      </div>
-                    </div>
-                    <span className="text-[10px] font-medium text-zinc-400 bg-zinc-100 px-2 py-0.5 rounded-md shrink-0">
-                      {item.category}
-                    </span>
+                    ×
                   </button>
-                ))}
+                ) : (
+                  <span className="hidden sm:inline-flex absolute right-3.5 px-2 py-0.5 rounded-md border border-zinc-300 bg-white text-[11px] font-mono text-zinc-400 pointer-events-none">
+                    /
+                  </span>
+                )}
               </div>
-            )}
-          </div>
 
-          <div className="flex items-center gap-2 shrink-0">
-            <button
-              type="button"
-              disabled={loadingData}
-              onClick={() => void loadAllAdminData(adminToken)}
-              className="px-3 py-1.5 rounded-lg border border-zinc-200 bg-white hover:bg-zinc-50 text-xs font-medium text-zinc-700 flex items-center gap-1.5 disabled:opacity-50 transition-colors whitespace-nowrap"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${loadingData ? 'animate-spin' : ''}`} />
-              <span className="hidden sm:inline">Yangilash</span>
-            </button>
-            <button
-              type="button"
-              onClick={onClose}
-              className="hidden md:flex px-3 py-1.5 rounded-lg bg-[#111113] hover:bg-zinc-800 text-white text-xs font-medium items-center gap-1.5 transition-colors whitespace-nowrap"
-            >
-              <ArrowLeft className="w-3.5 h-3.5" />
-              <span>Muhitga qaytish</span>
-            </button>
+              {showSearchDropdown && searchSuggestions.length > 0 && (
+                <div className="absolute top-full left-0 right-0 mt-1.5 bg-white border border-zinc-200 rounded-2xl shadow-2xl overflow-hidden z-50 divide-y divide-zinc-100 max-h-96 overflow-y-auto">
+                  <div className="px-4 py-2 bg-zinc-50 flex items-center justify-between text-[10px] font-semibold text-zinc-500 uppercase tracking-wider">
+                    <span>
+                      {globalSearchQuery.trim()
+                        ? `Qidiruv natijalari (${searchSuggestions.length})`
+                        : "Tezkor o'tish va asosiy xizmatlar"}
+                    </span>
+                    <span className="font-mono text-zinc-400">Enter — birinchisini ochish</span>
+                  </div>
+                  {searchSuggestions.map((item) => (
+                    <button
+                      type="button"
+                      key={item.id}
+                      onClick={() => {
+                        setActiveTab(item.tab);
+                        if (item.userTelegramId) {
+                          void handleOpenUserDetail(item.userTelegramId);
+                        }
+                        if (item.supportTelegramId) {
+                          void handleOpenSupportThread(item.supportTelegramId);
+                        }
+                        setGlobalSearchQuery('');
+                        setShowSearchDropdown(false);
+                      }}
+                      className="w-full px-4 py-2.5 text-left hover:bg-zinc-50 flex items-center justify-between gap-3 transition-colors"
+                    >
+                      <div className="flex items-start gap-2.5 min-w-0">
+                        <span className="px-1.5 py-1 rounded-lg bg-red-50 text-red-600 flex items-center justify-center text-[10px] font-mono shrink-0 mt-0.5 font-bold">
+                          {item.badge}
+                        </span>
+                        <div className="min-w-0">
+                          <div className="text-xs font-semibold text-zinc-900 truncate">{item.title}</div>
+                          <div className="text-[11px] text-zinc-500 truncate">{item.subtitle}</div>
+                        </div>
+                      </div>
+                      <span className="text-[10px] font-medium text-zinc-400 bg-zinc-100 px-2 py-0.5 rounded-md shrink-0">
+                        {item.category}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         </header>
 
@@ -4229,17 +4471,419 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   </section>
                 )}
 
-                {/* #20 Backup AI ("Zapaska AI") Models & API Keys Management */}
+                {/* Quick jump to API & Mandatory Subscription tab */}
+                {(isSuperAdmin || hasPerm('settings')) && (
+                  <section className="lg:col-span-2 bg-white border border-zinc-200 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div>
+                      <h3 className="text-xs font-semibold text-zinc-900 flex items-center gap-1.5">
+                        <KeyRound className="w-4 h-4 text-red-600" />
+                        <span>Tizim API Kalitlari, Zapaska AI va Majburiy Obuna Kanallari</span>
+                      </h3>
+                      <p className="text-[11px] text-zinc-500 mt-0.5">
+                        Barcha API kalitlar jadvali, zaxira AI modellari va Telegram majburiy obuna kanallari alohida bo‘limda joylashgan.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab('api_channels')}
+                      className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-semibold shrink-0 flex items-center justify-center gap-1.5"
+                    >
+                      <KeyRound className="w-3.5 h-3.5" />
+                      <span>API & Majburiy Obunaga o‘tish</span>
+                    </button>
+                  </section>
+                )}
+              </div>
+            )}
+
+            {/* ============================================================
+                TAB 6B: SYSTEM API KEYS TABLE, MANDATORY SUBSCRIPTION TABLE & ZAPASKA AI TABLE
+                ============================================================ */}
+            {activeTab === 'api_channels' && (
+              <div className="space-y-6">
+                {/* 1. System API Keys Placement Table (Super Admin) */}
                 {isSuperAdmin && (
-                  <section className="lg:col-span-2 bg-white border border-zinc-200 rounded-2xl p-5 space-y-4">
-                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <section className="bg-white border border-zinc-200 rounded-2xl overflow-hidden">
+                    <div className="px-5 py-4 border-b border-zinc-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                      <div>
+                        <h2 className="text-sm font-semibold text-zinc-900 flex items-center gap-1.5">
+                          <KeyRound className="w-4 h-4 text-red-600" />
+                          <span>Tizim API Kalitlari Joylash Jadvali</span>
+                        </h2>
+                        <p className="text-xs text-zinc-500 mt-0.5">
+                          Kalitlarni to‘g‘ridan-to‘g‘ri bazaga joylashtiring. Bazadagi kalit <span className="font-mono">.env</span> dan ustun turadi va darhol kuchga kiradi.
+                        </p>
+                      </div>
+                      <span className="text-xs font-mono tabular-nums text-zinc-500">
+                        {systemApiKeys.filter((k) => k.source !== 'missing').length}/{systemApiKeys.length} ta faol
+                      </span>
+                    </div>
+
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left border-collapse text-xs">
+                        <thead>
+                          <tr className="border-b border-zinc-200 bg-zinc-50/70 text-zinc-500">
+                            <th className="py-2.5 px-4 font-medium">API Xizmat / Kalit nomi</th>
+                            <th className="py-2.5 px-4 font-medium">Manba</th>
+                            <th className="py-2.5 px-4 font-medium">Joriy kalit</th>
+                            <th className="py-2.5 px-4 font-medium min-w-[230px]">Yangi kalit kiritish</th>
+                            <th className="py-2.5 px-4 font-medium text-right">Amallar</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-zinc-100">
+                          {systemApiKeys.map((row) => (
+                            <tr key={row.slot} className="hover:bg-zinc-50/60">
+                              <td className="py-3 px-4 align-top">
+                                <div className="font-semibold text-zinc-900">{row.label}</div>
+                                <div className="text-[11px] font-mono text-zinc-500 mt-0.5">{row.slot}</div>
+                                <div className="text-[11px] text-zinc-500 mt-0.5">{row.description}</div>
+                              </td>
+                              <td className="py-3 px-4 align-top whitespace-nowrap">
+                                <span
+                                  className={`inline-flex items-center px-2 py-0.5 rounded-md border text-[11px] font-medium ${
+                                    row.source === 'db'
+                                      ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
+                                      : row.source === 'env'
+                                        ? 'bg-blue-50 border-blue-200 text-blue-700'
+                                        : 'bg-red-50 border-red-200 text-red-700'
+                                  }`}
+                                >
+                                  {row.source === 'db'
+                                    ? 'Bazadan'
+                                    : row.source === 'env'
+                                      ? '.env dan'
+                                      : 'Kiritilmagan'}
+                                </span>
+                              </td>
+                              <td className="py-3 px-4 align-top font-mono text-zinc-700 whitespace-nowrap">
+                                <div>{row.maskedValue || '—'}</div>
+                                {row.updatedAt ? (
+                                  <div className="text-[10px] text-zinc-400 mt-0.5">
+                                    {formatDateTime(row.updatedAt)}
+                                  </div>
+                                ) : null}
+                              </td>
+                              <td className="py-3 px-4 align-top">
+                                <input
+                                  type="password"
+                                  autoComplete="new-password"
+                                  value={apiKeyDrafts[row.slot] || ''}
+                                  onChange={(e) =>
+                                    setApiKeyDrafts((prev) => ({
+                                      ...prev,
+                                      [row.slot]: e.target.value,
+                                    }))
+                                  }
+                                  placeholder={`${row.slot} qiymatini kiriting...`}
+                                  className="w-full text-xs font-mono bg-zinc-50 border border-zinc-200 focus:border-red-600 focus:bg-white rounded-xl px-3 py-2 outline-none"
+                                />
+                              </td>
+                              <td className="py-3 px-4 align-top text-right whitespace-nowrap">
+                                <div className="inline-flex items-center gap-1.5">
+                                  <button
+                                    type="button"
+                                    disabled={
+                                      savingKeySlot === row.slot ||
+                                      !(apiKeyDrafts[row.slot] || '').trim()
+                                    }
+                                    onClick={() => void handleSaveSystemApiKey(row.slot)}
+                                    className="px-3 py-1.5 rounded-lg bg-[#111113] hover:bg-zinc-800 disabled:opacity-45 text-white text-[11px] font-semibold inline-flex items-center gap-1"
+                                  >
+                                    {savingKeySlot === row.slot ? (
+                                      <Loader2 className="w-3 h-3 animate-spin" />
+                                    ) : (
+                                      <Save className="w-3 h-3" />
+                                    )}
+                                    <span>Saqlash</span>
+                                  </button>
+                                  {row.hasDbOverride && (
+                                    <button
+                                      type="button"
+                                      disabled={deletingKeySlot === row.slot}
+                                      onClick={() => void handleDeleteSystemApiKey(row.slot)}
+                                      title="Bazadagi kalitni o'chirish (.env ga qaytarish)"
+                                      className="p-1.5 rounded-lg border border-red-200 hover:bg-red-50 text-red-600 disabled:opacity-45"
+                                    >
+                                      {deletingKeySlot === row.slot ? (
+                                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                      ) : (
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                      )}
+                                    </button>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </section>
+                )}
+
+                {/* 2. Mandatory Telegram Channels Subscription Table */}
+                <section className="bg-white border border-zinc-200 rounded-2xl overflow-hidden">
+                  <div className="px-5 py-4 border-b border-zinc-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <div>
+                      <h2 className="text-sm font-semibold text-zinc-900 flex items-center gap-1.5">
+                        <Radio className="w-4 h-4 text-red-600" />
+                        <span>Majburiy Obuna Kanallari Jadvali (Telegram)</span>
+                      </h2>
+                      <p className="text-xs text-zinc-500 mt-0.5">
+                        Foydalanuvchi botdan yoki AI xizmatlardan foydalanishdan oldin quyidagi faol kanallarga obuna bo‘lishi shart. Botni kanalga <span className="font-semibold text-zinc-700">Admin</span> qilib qo‘shing.
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 text-[11px] font-mono">
+                      <span
+                        className={`px-2 py-1 rounded-lg border ${
+                          channelsHasBotToken
+                            ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
+                            : 'bg-red-50 border-red-200 text-red-700'
+                        }`}
+                      >
+                        Bot Token: {channelsHasBotToken ? 'Faol' : 'Kiritilmagan'}
+                      </span>
+                      <span className="text-zinc-500">
+                        {mandatoryChannels.filter((c) => c.enabled).length}/{mandatoryChannels.length} ta faol
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Add / Edit Channel Form */}
+                  <form
+                    onSubmit={handleSaveChannelSubmit}
+                    className="p-4 border-b border-zinc-200 bg-zinc-50/70 space-y-3"
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold text-zinc-900 flex items-center gap-1.5">
+                        <Plus className="w-3.5 h-3.5 text-red-600" />
+                        <span>
+                          {chFormId ? 'Majburiy kanalni tahrirlash' : "Yangi majburiy kanal qo'shish"}
+                        </span>
+                      </span>
+                      {chFormId && (
+                        <button
+                          type="button"
+                          onClick={handleResetChannelForm}
+                          className="text-[11px] text-red-600 hover:underline font-medium"
+                        >
+                          Bekor qilish
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2.5">
+                      <div className="space-y-1">
+                        <label className="block text-[11px] font-medium text-zinc-700">
+                          Kanal nomi
+                        </label>
+                        <input
+                          type="text"
+                          value={chFormTitle}
+                          onChange={(e) => setChFormTitle(e.target.value)}
+                          placeholder="SlaydCanva Rasmiy"
+                          className="w-full text-xs bg-white border border-zinc-200 focus:border-red-600 rounded-xl px-3 py-2 outline-none"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="block text-[11px] font-medium text-zinc-700">
+                          @username yoki -100... ID
+                        </label>
+                        <input
+                          type="text"
+                          value={chFormChatId}
+                          onChange={(e) => setChFormChatId(e.target.value)}
+                          placeholder="@slaydcanva_uz yoki -100..."
+                          className="w-full text-xs font-mono bg-white border border-zinc-200 focus:border-red-600 rounded-xl px-3 py-2 outline-none"
+                        />
+                      </div>
+                      <div className="sm:col-span-2 space-y-1">
+                        <label className="block text-[11px] font-medium text-zinc-700">
+                          Taklif havolasi (yopiq kanal uchun majburiy)
+                        </label>
+                        <input
+                          type="url"
+                          value={chFormInviteUrl}
+                          onChange={(e) => setChFormInviteUrl(e.target.value)}
+                          placeholder="https://t.me/slaydcanva_uz"
+                          className="w-full text-xs font-mono bg-white border border-zinc-200 focus:border-red-600 rounded-xl px-3 py-2 outline-none"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="block text-[11px] font-medium text-zinc-700">
+                          Tartib (#) & Holat
+                        </label>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="number"
+                            min={1}
+                            max={99}
+                            value={chFormPriority}
+                            onChange={(e) => setChFormPriority(e.target.value)}
+                            className="w-16 text-xs font-mono bg-white border border-zinc-200 focus:border-red-600 rounded-xl px-2.5 py-2 outline-none"
+                          />
+                          <label className="flex items-center gap-1.5 text-xs text-zinc-800 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={chFormEnabled}
+                              onChange={(e) => setChFormEnabled(e.target.checked)}
+                              className="accent-red-600 w-4 h-4"
+                            />
+                            <span>Faol</span>
+                          </label>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex justify-end">
+                      <button
+                        type="submit"
+                        disabled={savingChannel}
+                        className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white text-xs font-semibold flex items-center gap-1.5"
+                      >
+                        {savingChannel ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Save className="w-3.5 h-3.5" />
+                        )}
+                        <span>{chFormId ? 'Kanalni yangilash' : 'Kanalni saqlash'}</span>
+                      </button>
+                    </div>
+                  </form>
+
+                  {/* Channels Table */}
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="border-b border-zinc-200 bg-zinc-50/70 text-zinc-500">
+                          <th className="py-2.5 px-4 font-medium">#</th>
+                          <th className="py-2.5 px-4 font-medium">Kanal</th>
+                          <th className="py-2.5 px-4 font-medium">Chat ID & Havola</th>
+                          <th className="py-2.5 px-4 font-medium">Bot Tekshiruvi</th>
+                          <th className="py-2.5 px-4 font-medium">Holat</th>
+                          <th className="py-2.5 px-4 font-medium text-right">Amallar</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-zinc-100">
+                        {mandatoryChannels.length === 0 ? (
+                          <tr>
+                            <td colSpan={6} className="py-8 text-center text-zinc-400">
+                              Hozircha majburiy obuna kanali qo‘shilmagan. Yuqoridagi forma orqali kanal qo‘shing.
+                            </td>
+                          </tr>
+                        ) : (
+                          mandatoryChannels.map((ch) => (
+                            <tr key={ch.id} className="hover:bg-zinc-50/60">
+                              <td className="py-3 px-4 font-mono font-semibold text-zinc-800">
+                                #{ch.priority}
+                              </td>
+                              <td className="py-3 px-4 font-semibold text-zinc-900">{ch.title}</td>
+                              <td className="py-3 px-4">
+                                <div className="font-mono text-zinc-800">{ch.chatId}</div>
+                                <a
+                                  href={ch.inviteUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="inline-flex items-center gap-1 text-[11px] text-red-600 hover:underline mt-0.5"
+                                >
+                                  <span className="truncate max-w-[220px]">{ch.inviteUrl}</span>
+                                  <ExternalLink className="w-3 h-3 shrink-0" />
+                                </a>
+                              </td>
+                              <td className="py-3 px-4">
+                                <span
+                                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[11px] font-medium ${
+                                    ch.lastCheckStatus === 'ok'
+                                      ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
+                                      : ch.lastCheckStatus === 'error'
+                                        ? 'bg-red-50 border-red-200 text-red-700'
+                                        : 'bg-zinc-100 border-zinc-200 text-zinc-600'
+                                  }`}
+                                >
+                                  {ch.lastCheckStatus === 'ok' ? (
+                                    <CheckCircle2 className="w-3 h-3" />
+                                  ) : ch.lastCheckStatus === 'error' ? (
+                                    <AlertCircle className="w-3 h-3" />
+                                  ) : null}
+                                  <span>
+                                    {ch.lastCheckStatus === 'ok'
+                                      ? 'Tasdiqlangan'
+                                      : ch.lastCheckStatus === 'error'
+                                        ? 'Xatolik'
+                                        : 'Tekshirilmagan'}
+                                  </span>
+                                </span>
+                                {ch.lastCheckMessage && (
+                                  <div className="text-[11px] text-zinc-500 mt-1 max-w-[220px]">
+                                    {ch.lastCheckMessage}
+                                  </div>
+                                )}
+                              </td>
+                              <td className="py-3 px-4">
+                                <button
+                                  type="button"
+                                  onClick={() => void handleToggleChannel(ch)}
+                                  className={`px-2.5 py-1 rounded-lg border text-[11px] font-medium ${
+                                    ch.enabled
+                                      ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                                      : 'border-zinc-200 bg-white text-zinc-600'
+                                  }`}
+                                >
+                                  {ch.enabled ? 'Faol' : "O'chiq"}
+                                </button>
+                              </td>
+                              <td className="py-3 px-4 text-right whitespace-nowrap">
+                                <div className="inline-flex items-center gap-1">
+                                  <button
+                                    type="button"
+                                    disabled={testingChannelId === ch.id}
+                                    onClick={() => void handleTestChannel(ch.id)}
+                                    className="px-2.5 py-1 rounded-lg border border-zinc-200 bg-zinc-50 hover:bg-zinc-100 text-[11px] font-medium text-zinc-800 inline-flex items-center gap-1"
+                                  >
+                                    {testingChannelId === ch.id ? (
+                                      <Loader2 className="w-3 h-3 animate-spin" />
+                                    ) : (
+                                      <Zap className="w-3 h-3 text-amber-600" />
+                                    )}
+                                    <span>Tekshirish</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleEditChannel(ch)}
+                                    title="Tahrirlash"
+                                    className="p-1.5 rounded-lg border border-zinc-200 hover:bg-zinc-50 text-zinc-600"
+                                  >
+                                    <Edit3 className="w-3.5 h-3.5" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => void handleDeleteChannel(ch.id)}
+                                    title="O'chirish"
+                                    className="p-1.5 rounded-lg border border-red-200 hover:bg-red-50 text-red-600"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+
+                {/* 3. Zapaska AI Models & Keys Table (Super Admin) */}
+                {isSuperAdmin && (
+                  <section className="bg-white border border-zinc-200 rounded-2xl overflow-hidden">
+                    <div className="px-5 py-4 border-b border-zinc-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                       <div>
                         <h2 className="text-sm font-semibold text-zinc-900 flex items-center gap-1.5">
                           <Cpu className="w-4 h-4 text-red-600" />
-                          <span>Asosiy & Zapaska AI Modellari (Bazaga saqlanadigan API kalitlar)</span>
+                          <span>Asosiy & Zapaska AI Modellari Jadvali</span>
                         </h2>
                         <p className="text-xs text-zinc-500 mt-0.5">
-                          Asosiy AI ishlamay qolganda tizim avtomatik ravishda ustuvorlik (#1, #2...) tartibida bazadagi Zapaska AI modellarga o‘tadi.
+                          Asosiy AI ishlamay qolganda tizim ustuvorlik (#1, #2...) tartibida bazadagi Zapaska AI modellarga avtomatik o‘tadi.
                         </p>
                       </div>
                       <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-mono">
@@ -4250,7 +4894,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                               : 'bg-zinc-50 border-zinc-200 text-zinc-500'
                           }`}
                         >
-                          ENV OpenRouter: {hasPrimaryOpenRouter ? 'Faol' : "Yo'q"}
+                          OpenRouter: {hasPrimaryOpenRouter ? 'Faol' : "Yo'q"}
                         </span>
                         <span
                           className={`px-2 py-1 rounded-lg border ${
@@ -4259,39 +4903,39 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                               : 'bg-zinc-50 border-zinc-200 text-zinc-500'
                           }`}
                         >
-                          ENV Gemini: {hasPrimaryGemini ? 'Faol' : "Yo'q"}
+                          Gemini: {hasPrimaryGemini ? 'Faol' : "Yo'q"}
                         </span>
                       </div>
                     </div>
 
-                    {/* Default primary model selector */}
-                    <div className="p-3.5 rounded-xl bg-zinc-50 border border-zinc-200 flex flex-col sm:flex-row sm:items-end gap-3">
-                      <div className="flex-1 space-y-1">
-                        <label className="block text-xs font-medium text-zinc-700">
-                          Asosiy OpenRouter Model ID
-                        </label>
-                        <input
-                          type="text"
-                          value={siteConfigDraft.defaultAiModel}
-                          onChange={(e) =>
-                            setSiteConfigDraft((s) => ({ ...s, defaultAiModel: e.target.value }))
-                          }
-                          placeholder="google/gemini-2.5-flash"
-                          className="w-full text-xs font-mono bg-white border border-zinc-200 focus:border-red-600 rounded-xl px-3 py-2 outline-none"
-                        />
+                    <div className="p-4 border-b border-zinc-200 space-y-4">
+                      {/* Default primary model selector */}
+                      <div className="p-3.5 rounded-xl bg-zinc-50 border border-zinc-200 flex flex-col sm:flex-row sm:items-end gap-3">
+                        <div className="flex-1 space-y-1">
+                          <label className="block text-xs font-medium text-zinc-700">
+                            Asosiy OpenRouter Model ID
+                          </label>
+                          <input
+                            type="text"
+                            value={siteConfigDraft.defaultAiModel}
+                            onChange={(e) =>
+                              setSiteConfigDraft((s) => ({ ...s, defaultAiModel: e.target.value }))
+                            }
+                            placeholder="google/gemini-2.5-flash"
+                            className="w-full text-xs font-mono bg-white border border-zinc-200 focus:border-red-600 rounded-xl px-3 py-2 outline-none"
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          disabled={savingSiteCfg}
+                          onClick={(e) => void handleSaveSiteConfigSubmit(e)}
+                          className="px-4 py-2 rounded-xl bg-[#111113] hover:bg-zinc-800 disabled:opacity-50 text-white text-xs font-semibold flex items-center justify-center gap-1.5 shrink-0"
+                        >
+                          <Save className="w-3.5 h-3.5" />
+                          <span>Asosiy modelni saqlash</span>
+                        </button>
                       </div>
-                      <button
-                        type="button"
-                        disabled={savingSiteCfg}
-                        onClick={(e) => void handleSaveSiteConfigSubmit(e)}
-                        className="px-4 py-2 rounded-xl bg-[#111113] hover:bg-zinc-800 disabled:opacity-50 text-white text-xs font-semibold flex items-center justify-center gap-1.5 shrink-0"
-                      >
-                        <Save className="w-3.5 h-3.5" />
-                        <span>Asosiy modelni saqlash</span>
-                      </button>
-                    </div>
 
-                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
                       {/* Add / Edit Backup AI Form */}
                       <form
                         onSubmit={handleSaveAiProviderSubmit}
@@ -4312,7 +4956,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           )}
                         </div>
 
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
                           <div className="space-y-1">
                             <label className="block text-[11px] font-medium text-zinc-700">
                               Nomi
@@ -4347,10 +4991,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                               <option value="openai_compatible">OpenAI-mos API (Groq/Together/Custom)</option>
                             </select>
                           </div>
-                        </div>
-
-                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-                          <div className="sm:col-span-2 space-y-1">
+                          <div className="space-y-1">
                             <label className="block text-[11px] font-medium text-zinc-700">
                               Model ID
                             </label>
@@ -4383,33 +5024,34 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           </div>
                         </div>
 
-                        {aiFormType === 'openai_compatible' && (
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                           <div className="space-y-1">
                             <label className="block text-[11px] font-medium text-zinc-700">
-                              Endpoint URL (faqat https://)
+                              API Kalit {aiFormId ? "(bo'sh qoldirilsa eski kalit saqlanadi)" : ''}
                             </label>
                             <input
-                              type="url"
-                              value={aiFormEndpoint}
-                              onChange={(e) => setAiFormEndpoint(e.target.value)}
-                              placeholder="https://api.groq.com/openai/v1/chat/completions"
+                              type="password"
+                              value={aiFormApiKey}
+                              onChange={(e) => setAiFormApiKey(e.target.value)}
+                              placeholder={aiFormId ? 'Yangi kalit (ixtiyoriy)...' : 'sk-or-... yoki AIza...'}
+                              autoComplete="new-password"
                               className="w-full text-xs font-mono bg-white border border-zinc-200 focus:border-red-600 rounded-xl px-3 py-2 outline-none"
                             />
                           </div>
-                        )}
-
-                        <div className="space-y-1">
-                          <label className="block text-[11px] font-medium text-zinc-700">
-                            API Kalit {aiFormId ? "(bo'sh qoldirilsa eski kalit saqlanadi)" : ''}
-                          </label>
-                          <input
-                            type="password"
-                            value={aiFormApiKey}
-                            onChange={(e) => setAiFormApiKey(e.target.value)}
-                            placeholder={aiFormId ? 'Yangi kalit (ixtiyoriy)...' : 'sk-or-... yoki AIza...'}
-                            autoComplete="new-password"
-                            className="w-full text-xs font-mono bg-white border border-zinc-200 focus:border-red-600 rounded-xl px-3 py-2 outline-none"
-                          />
+                          {aiFormType === 'openai_compatible' && (
+                            <div className="space-y-1">
+                              <label className="block text-[11px] font-medium text-zinc-700">
+                                Endpoint URL (faqat https://)
+                              </label>
+                              <input
+                                type="url"
+                                value={aiFormEndpoint}
+                                onChange={(e) => setAiFormEndpoint(e.target.value)}
+                                placeholder="https://api.groq.com/openai/v1/chat/completions"
+                                className="w-full text-xs font-mono bg-white border border-zinc-200 focus:border-red-600 rounded-xl px-3 py-2 outline-none"
+                              />
+                            </div>
+                          )}
                         </div>
 
                         <div className="flex items-center justify-between gap-2 pt-1">
@@ -4436,73 +5078,75 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           </button>
                         </div>
                       </form>
+                    </div>
 
-                      {/* Saved Backup AI List */}
-                      <div className="space-y-2.5">
-                        <div className="text-xs font-semibold text-zinc-900">
-                          Bazadagi Zapaska AI modellari ({aiProviders.length})
-                        </div>
-                        {aiProviders.length === 0 ? (
-                          <div className="p-6 rounded-xl border border-dashed border-zinc-200 text-center text-xs text-zinc-400">
-                            Hali bazaga Zapaska AI qo‘shilmagan. Chapdagi forma orqali model va API kalit qo‘shing.
-                          </div>
-                        ) : (
-                          <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
-                            {aiProviders.map((ap) => (
-                              <div
-                                key={ap.id}
-                                className={`p-3 rounded-xl border transition-colors ${
-                                  ap.enabled
-                                    ? 'bg-white border-zinc-200'
-                                    : 'bg-zinc-50 border-zinc-200/70 opacity-75'
-                                }`}
-                              >
-                                <div className="flex items-start justify-between gap-2">
-                                  <div className="min-w-0">
-                                    <div className="flex flex-wrap items-center gap-1.5">
-                                      <span className="px-1.5 py-0.5 rounded bg-zinc-900 text-white text-[10px] font-mono font-semibold">
-                                        #{ap.priority}
-                                      </span>
-                                      <span className="text-xs font-semibold text-zinc-900 truncate">
-                                        {ap.name}
-                                      </span>
-                                      <span
-                                        className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
-                                          ap.lastStatus === 'ok'
-                                            ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                                            : ap.lastStatus === 'error'
-                                              ? 'bg-red-50 text-red-700 border border-red-200'
-                                              : 'bg-zinc-100 text-zinc-600'
-                                        }`}
-                                      >
-                                        {ap.lastStatus === 'ok'
-                                          ? 'Ishlayapti'
-                                          : ap.lastStatus === 'error'
-                                            ? 'Xato'
-                                            : "Sinovdan o'tmagan"}
-                                      </span>
+                    {/* Backup AI Table */}
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left border-collapse text-xs">
+                        <thead>
+                          <tr className="border-b border-zinc-200 bg-zinc-50/70 text-zinc-500">
+                            <th className="py-2.5 px-4 font-medium">#</th>
+                            <th className="py-2.5 px-4 font-medium">Nomi</th>
+                            <th className="py-2.5 px-4 font-medium">Provayder & Model</th>
+                            <th className="py-2.5 px-4 font-medium">API Kalit</th>
+                            <th className="py-2.5 px-4 font-medium">Sinov holati</th>
+                            <th className="py-2.5 px-4 font-medium text-right">Amallar</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-zinc-100">
+                          {aiProviders.length === 0 ? (
+                            <tr>
+                              <td colSpan={6} className="py-8 text-center text-zinc-400">
+                                Hali bazaga Zapaska AI qo‘shilmagan. Yuqoridagi forma orqali model va API kalit qo‘shing.
+                              </td>
+                            </tr>
+                          ) : (
+                            aiProviders.map((ap) => (
+                              <tr key={ap.id} className={ap.enabled ? 'hover:bg-zinc-50/60' : 'bg-zinc-50/60 opacity-75'}>
+                                <td className="py-3 px-4 font-mono font-semibold text-zinc-900">
+                                  #{ap.priority}
+                                </td>
+                                <td className="py-3 px-4 font-semibold text-zinc-900">{ap.name}</td>
+                                <td className="py-3 px-4 font-mono text-zinc-700">
+                                  <div>{ap.providerType} · {ap.model}</div>
+                                  {ap.endpointUrl && (
+                                    <div className="text-[10px] text-zinc-400 truncate max-w-[220px]">
+                                      {ap.endpointUrl}
                                     </div>
-                                    <div className="text-[11px] font-mono text-zinc-600 mt-1 truncate">
-                                      {ap.providerType} · {ap.model}
+                                  )}
+                                </td>
+                                <td className="py-3 px-4 font-mono text-zinc-600">
+                                  {ap.apiKeyMasked || '—'}
+                                </td>
+                                <td className="py-3 px-4">
+                                  <span
+                                    className={`inline-flex px-2 py-0.5 rounded-md border text-[11px] font-medium ${
+                                      ap.lastStatus === 'ok'
+                                        ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                        : ap.lastStatus === 'error'
+                                          ? 'bg-red-50 text-red-700 border-red-200'
+                                          : 'bg-zinc-100 text-zinc-600 border-zinc-200'
+                                    }`}
+                                  >
+                                    {ap.lastStatus === 'ok'
+                                      ? 'Ishlayapti'
+                                      : ap.lastStatus === 'error'
+                                        ? 'Xato'
+                                        : "Sinovdan o'tmagan"}
+                                  </span>
+                                  {ap.lastError && (
+                                    <div className="text-[10px] text-red-600 mt-1 max-w-[200px] truncate">
+                                      {ap.lastError}
                                     </div>
-                                    <div className="text-[10px] font-mono text-zinc-400 mt-0.5">
-                                      Kalit: {ap.apiKeyMasked || '—'}
-                                      {ap.endpointUrl ? ` · ${ap.endpointUrl}` : ''}
-                                    </div>
-                                    {ap.lastError && (
-                                      <div className="text-[10px] text-red-600 mt-1 line-clamp-2">
-                                        {ap.lastError}
-                                      </div>
-                                    )}
-                                  </div>
-
-                                  <div className="flex items-center gap-1 shrink-0">
+                                  )}
+                                </td>
+                                <td className="py-3 px-4 text-right whitespace-nowrap">
+                                  <div className="inline-flex items-center gap-1">
                                     <button
                                       type="button"
                                       disabled={testingAiId === ap.id}
                                       onClick={() => void handleTestAiProvider(ap.id)}
-                                      title="API ni sinab ko'rish"
-                                      className="px-2 py-1 rounded-lg border border-zinc-200 bg-zinc-50 hover:bg-zinc-100 text-[11px] font-medium text-zinc-800 flex items-center gap-1"
+                                      className="px-2 py-1 rounded-lg border border-zinc-200 bg-zinc-50 hover:bg-zinc-100 text-[11px] font-medium text-zinc-800 inline-flex items-center gap-1"
                                     >
                                       {testingAiId === ap.id ? (
                                         <Loader2 className="w-3 h-3 animate-spin" />
@@ -4539,12 +5183,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                       <Trash2 className="w-3 h-3" />
                                     </button>
                                   </div>
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
+                                </td>
+                              </tr>
+                            ))
+                          )}
+                        </tbody>
+                      </table>
                     </div>
                   </section>
                 )}

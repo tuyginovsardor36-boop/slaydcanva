@@ -99,11 +99,44 @@
 }
 
 .word-editor-content hr.doc-page-break {
+  position: relative;
   border: none;
   border-top: 2px dashed #cbd5e1;
   margin: 28px 0;
   page-break-before: always;
   break-before: page;
+}
+
+.word-editor-content hr.doc-page-break::after {
+  content: 'YANGI SAHIFA';
+  position: absolute;
+  top: -9px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #ffffff;
+  padding: 0 10px;
+  font-size: 9px;
+  font-family: var(--font-mono);
+  letter-spacing: 0.08em;
+  color: #94a3b8;
+}
+
+.word-editor-content .doc-titul-page {
+  min-height: 1015px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  box-sizing: border-box;
+}
+
+.word-editor-content .doc-toc-page {
+  min-height: 920px;
+  box-sizing: border-box;
+}
+
+.word-editor-content figure.doc-figure {
+  margin: 18px 0;
+  text-align: center;
 }
 
 .word-editor-content img {

@@ -523,6 +523,17 @@ export const AiServicesView: React.FC<AiServicesViewProps> = ({
           });
           const payload = await response.json().catch(() => ({}));
           if (!response.ok) {
+            if (
+              response.status === 403 &&
+              payload?.code === 'SUBSCRIPTION_REQUIRED' &&
+              Array.isArray(payload?.missingChannels)
+            ) {
+              window.dispatchEvent(
+                new CustomEvent('slaydcanva:subscription-required', {
+                  detail: payload.missingChannels,
+                })
+              );
+            }
             const errText = String(payload?.error || "Serverdan xatolik qaytdi.");
             const retryable =
               attempt < maxAttempts &&
