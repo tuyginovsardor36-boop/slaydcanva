@@ -75,7 +75,6 @@ import {
   logTelegramActivity,
   saveAndSendUserFile,
   saveCloudProfile,
-  sendProjectPptxFallbackToBot,
   syncCloudProject,
   TelegramAccountResponse,
   TelegramWebAppWindow,
@@ -797,47 +796,20 @@ export default function App() {
         }
       }
 
-      let downloadFailed = false;
       if (meta?.triggerDownload !== false) {
-        try {
-          await triggerSafeFileDownload({
-            fileName,
-            blob,
-            serverDownloadPath,
-          });
-        } catch {
-          downloadFailed = true;
-        }
-      }
-
-      if (downloadFailed && tgSessionToken && !sentTg && !tooLarge) {
-        const forceRes = await saveAndSendUserFile({
-          blob,
+        await triggerSafeFileDownload({
           fileName,
-          sessionToken: tgSessionToken,
-          caption: `📄 ${fileName} — SlaydCanva (avtomatik yuborildi)`,
-          serviceId: meta?.serviceId,
-          serviceTitle: meta?.serviceTitle,
-          sendToTelegram: true,
-          forceTelegram: true,
+          blob,
+          serverDownloadPath,
         });
-        if (forceRes.ok) {
-          sentTg = Boolean(forceRes.sentToTelegram);
-          serverDownloadPath = forceRes.downloadPath || serverDownloadPath;
-          setFilesRefreshKey((k) => k + 1);
-        }
       }
 
-      if (downloadFailed && sentTg) {
-        showNotice('ok', "Yuklab olishda muammo bo'ldi — fayl Telegram botingizga yuborildi.");
-      } else if (sentTg) {
+      if (sentTg) {
         showNotice('ok', `${baseMessage} Fayllarim va Telegramga saqlandi.`);
       } else if (tooLarge) {
         showNotice('ok', `${baseMessage} (15 MB dan katta — serverga yuklanmadi).`);
       } else if (serverDownloadPath) {
         showNotice('ok', `${baseMessage} Fayllarim bo'limiga saqlandi.`);
-      } else if (downloadFailed) {
-        showNotice('err', "Yuklab olishda xatolik yuz berdi.");
       } else {
         showNotice('ok', baseMessage);
       }
@@ -850,10 +822,7 @@ export default function App() {
     setIsExporting(true);
     try {
       if (state.mode === 'pptx') {
-        const res = await exportToPptx(state.pptxPages, state.docTitle, {
-          download: false,
-          sessionToken: tgSessionToken,
-        });
+        const res = await exportToPptx(state.pptxPages, state.docTitle, { download: false });
         await deliverExportToTelegram(res.blob, res.fileName, 'PPTX fayli tayyor.', {
           serviceTitle: 'Taqdimot (PPTX)',
           triggerDownload: true,
@@ -878,21 +847,6 @@ export default function App() {
         });
       }
     } catch {
-      if (state.mode === 'pptx' && tgSessionToken) {
-        const fallbackRes = await sendProjectPptxFallbackToBot({
-          sessionToken: tgSessionToken,
-          projectId: activeProjectId,
-          title: state.docTitle,
-          pages: state.pptxPages,
-          serviceTitle: 'Taqdimot (PPTX)',
-          caption: `📄 ${state.docTitle || 'Taqdimot'} — PPTX shaklida yuborildi`,
-        });
-        if (fallbackRes.ok && fallbackRes.sentToTelegram) {
-          setFilesRefreshKey((k) => k + 1);
-          showNotice('ok', "Yuklab olishda muammo bo'ldi — tizim PPTX faylni Telegram botingizga yubordi.");
-          return;
-        }
-      }
       showNotice('err', "Eksport qilishda xatolik yuz berdi. Qaytadan urinib ko'ring.");
     } finally {
       setIsExporting(false);
@@ -1531,13 +1485,11 @@ export default function App() {
           result.serverCharged ? 0 : -result.price,
           tokenSnapshot
         );
-        let deliveredToBot = false;
         try {
           let exported: { blob: Blob; fileName: string } | null = null;
           if (result.targetMode === 'pptx') {
             exported = await exportToPptx(result.pages, result.docTitle, {
               download: false,
-              sessionToken: tokenSnapshot,
             });
           } else if (result.targetMode === 'word' && result.wordDoc) {
             exported = await exportToDocx(result.wordDoc, result.docTitle, {
@@ -1561,47 +1513,21 @@ export default function App() {
               caption: `✨ ${result.serviceTitle}: ${result.docTitle}`,
               serviceId: result.serviceId,
               serviceTitle: result.serviceTitle,
-              sendToTelegram: result.targetMode === 'pptx' ? true : shouldSendToTg,
-              forceTelegram: result.targetMode === 'pptx',
+              sendToTelegram: shouldSendToTg,
             });
             if (savedRes.ok) {
               setFilesRefreshKey((k) => k + 1);
-              deliveredToBot = Boolean(savedRes.sentToTelegram);
               if (savedRes.sentToTelegram) {
                 showNotice('ok', `${result.serviceTitle} Fayllarim va Telegram botga yuborildi.`);
               } else {
                 showNotice('ok', `${result.serviceTitle} Fayllarim bo'limiga saqlandi.`);
               }
-            } else if (!savedRes.skipped && savedRes.error && result.targetMode !== 'pptx') {
+            } else if (!savedRes.skipped && savedRes.error) {
               showNotice('err', savedRes.error);
             }
           }
         } catch {
-          if (result.targetMode !== 'pptx') {
-            showNotice('err', "Faylni eksport qilib saqlashda xatolik yuz berdi.");
-          }
-        }
-
-        if (result.targetMode === 'pptx' && !deliveredToBot && result.pages.length > 0) {
-          const fallbackRes = await sendProjectPptxFallbackToBot({
-            sessionToken: tokenSnapshot,
-            projectId: projectIdToSave,
-            title: result.docTitle,
-            pages: result.pages,
-            caption: `✨ ${result.serviceTitle}: ${result.docTitle}`,
-            serviceId: result.serviceId,
-            serviceTitle: result.serviceTitle,
-          });
-          if (fallbackRes.ok) {
-            setFilesRefreshKey((k) => k + 1);
-            if (fallbackRes.sentToTelegram) {
-              showNotice('ok', `${result.serviceTitle} PPTX shaklida Telegram botingizga yuborildi.`);
-            } else {
-              showNotice('ok', `${result.serviceTitle} PPTX shaklida Fayllarim bo'limiga saqlandi.`);
-            }
-          } else {
-            showNotice('err', fallbackRes.error || "PPTX faylini saqlash va botga yuborishda xatolik.");
-          }
+          showNotice('err', "Faylni eksport qilib saqlashda xatolik yuz berdi.");
         }
       })();
     }
