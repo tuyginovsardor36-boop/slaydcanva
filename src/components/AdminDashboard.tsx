@@ -380,7 +380,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         { download }
       );
     }
-    return exportToPptx(proj.pptxPages, docName, { download });
+    return exportToPptx(proj.pptxPages, docName, { download, sessionToken: telegramSessionToken });
   };
 
   const handleAdminDownloadProject = async (

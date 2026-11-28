@@ -61,6 +61,7 @@ import {
   resendUserFileToTelegram,
   resetUserSupportChat,
   saveAndSendUserFile,
+  sendProjectPptxFallbackToBot,
   sendUserSupportMessage,
   TelegramAccountResponse,
   TelegramConfigResponse,
@@ -1225,7 +1226,10 @@ export const FilesAndOpsView: React.FC<FilesAndOpsViewProps> = ({
           { download: downloadDirectly }
         );
       } else {
-        exported = await exportToPptx(cloud.pptxPages, docName, { download: downloadDirectly });
+        exported = await exportToPptx(cloud.pptxPages, docName, {
+          download: false,
+          sessionToken: telegramSessionToken,
+        });
       }
 
       if (!exported) {
@@ -1234,7 +1238,49 @@ export const FilesAndOpsView: React.FC<FilesAndOpsViewProps> = ({
       }
 
       if (action === 'download') {
-        onNotify?.('ok', `${exported.fileName} yuklab olindi.`);
+        if (cloud.mode === 'pptx') {
+          const savedRes = await saveAndSendUserFile({
+            blob: exported.blob,
+            fileName: exported.fileName,
+            sessionToken: telegramSessionToken,
+            caption: `📄 ${docName}`,
+            sendToTelegram: telegramUser?.autoSendFiles !== false,
+          });
+          let dlFailed = false;
+          try {
+            await triggerSafeFileDownload({
+              fileName: exported.fileName,
+              blob: exported.blob,
+              serverDownloadPath: savedRes.ok ? savedRes.downloadPath : undefined,
+            });
+          } catch {
+            dlFailed = true;
+          }
+          if (dlFailed && !savedRes.sentToTelegram) {
+            const forceRes = await saveAndSendUserFile({
+              blob: exported.blob,
+              fileName: exported.fileName,
+              sessionToken: telegramSessionToken,
+              caption: `📄 ${docName} — PPTX shaklida yuborildi`,
+              sendToTelegram: true,
+              forceTelegram: true,
+            });
+            if (forceRes.ok && forceRes.sentToTelegram) {
+              void refreshFiles();
+              onNotify?.('ok', "Yuklab olishda muammo bo'ldi — tizim PPTX faylni Telegram botga yubordi.");
+              return;
+            }
+          }
+          if (savedRes.ok) void refreshFiles();
+          onNotify?.(
+            'ok',
+            savedRes.sentToTelegram
+              ? `${exported.fileName} yuklab olindi va Telegram botga yuborildi.`
+              : `${exported.fileName} yuklab olindi.`
+          );
+        } else {
+          onNotify?.('ok', `${exported.fileName} yuklab olindi.`);
+        }
       } else {
         const res = await saveAndSendUserFile({
           blob: exported.blob,
@@ -1245,6 +1291,20 @@ export const FilesAndOpsView: React.FC<FilesAndOpsViewProps> = ({
           forceTelegram: true,
         });
         if (!res.ok) {
+          if (cloud.mode === 'pptx') {
+            const fb = await sendProjectPptxFallbackToBot({
+              sessionToken: telegramSessionToken,
+              projectId: proj.id,
+              title: docName,
+              pages: cloud.pptxPages,
+              caption: `📄 ${docName}`,
+            });
+            if (fb.ok && fb.sentToTelegram) {
+              void refreshFiles();
+              onNotify?.('ok', `${exported.fileName} Telegram botga yuborildi.`);
+              return;
+            }
+          }
           onNotify?.('err', res.error || 'Telegram botga yuborib bo‘lmadi.');
           return;
         }
@@ -1252,6 +1312,19 @@ export const FilesAndOpsView: React.FC<FilesAndOpsViewProps> = ({
         onNotify?.('ok', `${exported.fileName} Telegram botga yuborildi.`);
       }
     } catch {
+      if (proj.mode === 'pptx' || !proj.mode) {
+        const fb = await sendProjectPptxFallbackToBot({
+          sessionToken: telegramSessionToken,
+          projectId: proj.id,
+          title: proj.title || 'SlaydCanva',
+          caption: `📄 ${proj.title || 'SlaydCanva'} — PPTX shaklida yuborildi`,
+        });
+        if (fb.ok && fb.sentToTelegram) {
+          void refreshFiles();
+          onNotify?.('ok', "Yuklab olishda muammo bo'ldi — tizim PPTX faylni Telegram botga yubordi.");
+          return;
+        }
+      }
       onNotify?.('err', 'Fayl eksport qilishda xatolik yuz berdi.');
     } finally {
       setExportingProjId(null);
@@ -1265,17 +1338,33 @@ export const FilesAndOpsView: React.FC<FilesAndOpsViewProps> = ({
     try {
       const linkRes = await getFileDownloadLink(f.id, telegramSessionToken);
       if (!linkRes.ok || !linkRes.downloadPath) {
+        const resendRes = await resendUserFileToTelegram(f.id, telegramSessionToken);
+        if (resendRes.ok) {
+          setFiles((prev) => prev.map((item) => (item.id === f.id ? { ...item, sentToTelegram: true } : item)));
+          onNotify?.('ok', `${f.fileName} yuklab olinmadi, lekin Telegram botga yuborildi.`);
+          return;
+        }
         onNotify?.('err', linkRes.error || 'Faylni yuklab olish havolasi olinmadi.');
         return;
       }
-      const dlMode = await triggerSafeFileDownload({
-        fileName: f.fileName,
-        serverDownloadPath: linkRes.downloadPath,
-      });
-      if (dlMode === 'browser_url' || dlMode === 'browser_blob') {
-        onNotify?.('ok', `${f.fileName} yuklab olinmoqda.`);
-      } else {
-        onNotify?.('ok', `${f.fileName} yuklab olish oynasi ochildi.`);
+      try {
+        const dlMode = await triggerSafeFileDownload({
+          fileName: f.fileName,
+          serverDownloadPath: linkRes.downloadPath,
+        });
+        if (dlMode === 'browser_url' || dlMode === 'browser_blob') {
+          onNotify?.('ok', `${f.fileName} yuklab olinmoqda.`);
+        } else {
+          onNotify?.('ok', `${f.fileName} yuklab olish oynasi ochildi.`);
+        }
+      } catch {
+        const resendRes = await resendUserFileToTelegram(f.id, telegramSessionToken);
+        if (resendRes.ok) {
+          setFiles((prev) => prev.map((item) => (item.id === f.id ? { ...item, sentToTelegram: true } : item)));
+          onNotify?.('ok', `Yuklab olishda muammo bo'ldi — ${f.fileName} Telegram botga yuborildi.`);
+          return;
+        }
+        onNotify?.('err', 'Faylni yuklab olishda xatolik yuz berdi.');
       }
     } catch {
       onNotify?.('err', 'Faylni yuklab olishda xatolik yuz berdi.');
